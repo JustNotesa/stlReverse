@@ -1,0 +1,13 @@
+# Abhängigkeiten (per npm install reproduzierbar)
+node_modules/
+
+# Generierte Test-Artefakte
+.playwright-mcp/
+test-results/
+playwright-report/
+
+# Betriebssystem / Editor
+.DS_Store
+*.log
+
+# Hinweis: tests/screenshots/ wird bewusst versioniert (visueller Verifikations-Nachweis).

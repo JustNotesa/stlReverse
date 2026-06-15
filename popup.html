@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>STL Reverse</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>STL Reverse</h1>
+      <p class="subtitle">Erzeuge parametrische Beschreibungen aus Dreiecksmeshes (.stl)</p>
+      <p class="subtitle note">Die Erweiterung öffnet sich bewusst in einem eigenen Tab, damit Datei-Dialoge nicht unterbrochen werden.</p>
+    </div>
+  </header>
+
+  <main>
+    <div class="page-content">
+      <div class="status-stack">
+        <p id="status-banner" class="status-banner status--idle" role="status" aria-live="polite">
+          Bereit für STL-Upload.
+        </p>
+        <div class="progress-group" aria-live="polite">
+          <div class="progress-label">
+            <span id="progress-text">Fortschritt: 0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+        </div>
+        <ol class="progress-steps" id="progress-steps" aria-live="polite"></ol>
+        <p class="progress-live-detail" id="progress-live-detail" aria-live="polite" data-state="idle">
+          <span class="progress-live-detail__chip" aria-hidden="true">Live</span>
+          <span class="progress-live-detail__value">
+            <span class="progress-live-detail__label" id="progress-live-detail-label">Bereit</span>
+            <span class="progress-live-detail__stats" id="progress-live-detail-stats">–</span>
+          </span>
+        </p>
+        <div class="detail-control">
+          <label for="detail-level">
+            Detailgrad der Projektionen
+            <span id="detail-value">70%</span>
+          </label>
+          <input id="detail-level" type="range" min="30" max="95" value="70" step="5" />
+          <p class="hint micro" id="detail-hint">
+            Automatisch erkennt die Analyse planare Flächen & Bohrungen. Mit dem Regler kannst du zusätzliche
+            Konturen freischalten.
+          </p>
+        </div>
+      </div>
+      <div class="layout-grid">
+      <section class="uploader" id="drop-zone">
+        <p><strong>Datei hier ablegen</strong> oder eine STL auswählen.</p>
+        <input id="file-input" type="file" accept=".stl,model/stl" />
+        <p class="hint">ASCII und binäre STL-Dateien werden unterstützt. Die Verarbeitung erfolgt rein lokal.</p>
+      </section>
+
+      <section class="stats" aria-live="polite">
+        <h2>Geometrie</h2>
+        <dl>
+          <div>
+            <dt>Breite (X)</dt>
+            <dd id="width">–</dd>
+          </div>
+          <div>
+            <dt>Tiefe (Y)</dt>
+            <dd id="depth">–</dd>
+          </div>
+          <div>
+            <dt>Höhe (Z)</dt>
+            <dd id="height">–</dd>
+          </div>
+          <div>
+            <dt>Dreiecke</dt>
+            <dd id="faces">–</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="projection-panel">
+        <h2>Orthoprojektionen</h2>
+        <div class="canvas-grid">
+          <figure>
+            <figcaption>XY</figcaption>
+            <canvas id="canvas-xy" width="360" height="360"></canvas>
+          </figure>
+          <figure>
+            <figcaption>YZ</figcaption>
+            <canvas id="canvas-yz" width="360" height="360"></canvas>
+          </figure>
+          <figure>
+            <figcaption>ZX</figcaption>
+            <canvas id="canvas-zx" width="360" height="360"></canvas>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Pipeline Schritt 1: Original STL -->
+      <section class="preview-panel pipeline-step" data-step="1">
+        <h2><span class="step-badge">1</span> Original STL Mesh</h2>
+        <div id="stl-viewer" class="viewer-3d"></div>
+        <p class="hint micro">Das importierte STL-Mesh – Ausgangspunkt der Analyse. Cyan-Punkte: deduplizierte Vertices.</p>
+      </section>
+
+      <!-- Pipeline Schritt 2: Flächen-Regionen (normalGroups) -->
+      <section class="preview-panel pipeline-step" data-step="2">
+        <h2><span class="step-badge">2</span> Flächen-Regionen</h2>
+        <div id="features-viewer" class="viewer-3d"></div>
+        <p class="hint micro">Region-Growing auf Ebenen-Gleichung (Normal ≤2°, Offset ≤0.05 mm) + Face Unification koplanarer Patches.</p>
+      </section>
+
+      <!-- Pipeline Schritt 3: B-Rep Vorschau (Boundary-Loops) -->
+      <section class="webgl-panel pipeline-step" data-step="3">
+        <h2><span class="step-badge">3</span> B-Rep Vorschau</h2>
+        <div id="brep-viewer" class="viewer-3d" data-state="empty"></div>
+        <p class="hint micro">Boundary-Loops der Regionen — entspricht dem, was V2 in die STEP schreibt.</p>
+      </section>
+
+      <!-- Pipeline Schritt 4: STEP-Viewer (occt-import-js) -->
+      <section class="webgl-panel pipeline-step" data-step="4">
+        <h2>
+          <span class="step-badge">4</span> STEP-Datei (geparsed)
+          <label class="edge-toggle micro" style="margin-left:auto; display:inline-flex; align-items:center; gap:.35em; font-weight:400; cursor:pointer;" title="Flächengrenzen (Kanten von PLANE, CYLINDRICAL_SURFACE, …) als Linien anzeigen">
+            <input type="checkbox" id="step-edges-toggle" checked> Kanten
+          </label>
+          <button type="button" id="step-render-button" style="margin-left:.6em;" disabled>Rendern</button>
+        </h2>
+        <div id="step-occt-viewer" class="viewer-3d" data-state="empty"></div>
+        <p id="step-watertight-status" class="watertight-status" data-state=""></p>
+        <div class="webgl-controls">
+          <button type="button" id="step-import-button">STEP-Datei importieren</button>
+          <button type="button" id="step-export-button" disabled>STEP exportieren (V2)</button>
+          <button type="button" id="step-export-triangles-button" disabled>STEP Triangles</button>
+          <p class="hint micro">„Rendern" zeigt den V2-Boundary-Loop-STEP — genau das, was exportiert wird. Gelbe Innenflächen = offene Hülle. Das Verdikt oben sagt, ob der Körper wasserdicht ist (jede Kante genau 1× vor- und 1× rückwärts genutzt).</p>
+        </div>
+      </section>
+
+      <section class="export export-panel">
+        <h2>Parametrische Beschreibung</h2>
+        <textarea id="param-output" readonly></textarea>
+        <div class="export-actions">
+          <button id="download-dxf" type="button" disabled>DXF 2D-Konturen</button>
+          <button id="download-step" type="button" disabled>STEP 2D-Konturen</button>
+          <button id="download-step-solid" type="button" disabled>STEP 3D-Volumen</button>
+          <button id="download-json" type="button" disabled>JSON exportieren</button>
+          <button id="copy-json" type="button" disabled>Kopieren</button>
+        </div>
+      </section>
+
+      <section class="info">
+        <h2>Hinten dran</h2>
+        <ul>
+          <li>Rumpf des STL wird normalisiert und in drei Ansichten projiziert.</li>
+          <li>Planare Flächen werden heuristisch geclustert und mit Maßangaben versehen.</li>
+          <li>Die resultierende JSON-Beschreibung kann als Ausgangspunkt für CAD-Skizzen dienen.</li>
+        </ul>
+      </section>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

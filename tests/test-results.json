@@ -1,0 +1,134 @@
+[
+  {
+    "file": "block_with_hole.stl",
+    "success": true,
+    "meta": {
+      "fileName": "block_with_hole.stl",
+      "triangles": 1464,
+      "surfaceArea": 4465.865,
+      "volume": 15543.09,
+      "detailLevel": 0.7
+    },
+    "boundingBox": {
+      "min": [
+        422.4000244140625,
+        -192.00001525878906,
+        0
+      ],
+      "max": [
+        448,
+        -166.40000915527344,
+        25.600000381469727
+      ],
+      "width": 25.5999755859375,
+      "depth": 25.600006103515625,
+      "height": 25.600000381469727
+    },
+    "features": {
+      "planes": 191,
+      "cylinders": 7,
+      "cones": 0,
+      "spheres": 2
+    },
+    "screenshot": "block_with_hole-full.png"
+  },
+  {
+    "file": "cube_ascii.stl",
+    "success": true,
+    "meta": {
+      "fileName": "cube_ascii.stl",
+      "triangles": 12,
+      "surfaceArea": 6,
+      "volume": 1,
+      "detailLevel": 0.7
+    },
+    "boundingBox": {
+      "min": [
+        0,
+        0,
+        0
+      ],
+      "max": [
+        1,
+        1,
+        1
+      ],
+      "width": 1,
+      "depth": 1,
+      "height": 1
+    },
+    "features": {
+      "planes": 6,
+      "cylinders": 0,
+      "cones": 0,
+      "spheres": 0
+    },
+    "screenshot": "cube_ascii-full.png"
+  },
+  {
+    "file": "cylinder.stl",
+    "success": true,
+    "meta": {
+      "fileName": "cylinder.stl",
+      "triangles": 24,
+      "surfaceArea": 429.904,
+      "volume": 649.519,
+      "detailLevel": 0.7
+    },
+    "boundingBox": {
+      "min": [
+        -5,
+        -4.330126762390137,
+        0
+      ],
+      "max": [
+        5,
+        4.330126762390137,
+        10
+      ],
+      "width": 10,
+      "depth": 8.660253524780273,
+      "height": 10
+    },
+    "features": {
+      "planes": 8,
+      "cylinders": 1,
+      "cones": 0,
+      "spheres": 0
+    },
+    "screenshot": "cylinder-full.png"
+  },
+  {
+    "file": "dino_clip_v3_04-strong-closing.stl",
+    "success": true,
+    "meta": {
+      "fileName": "dino_clip_v3_04-strong-closing.stl",
+      "triangles": 3942,
+      "surfaceArea": 15247.952000000001,
+      "volume": 32727.595,
+      "detailLevel": 0.7
+    },
+    "boundingBox": {
+      "min": [
+        449.7877197265625,
+        -193.6885223388672,
+        0
+      ],
+      "max": [
+        525.59521484375,
+        -117.74305725097656,
+        18.014448165893555
+      ],
+      "width": 75.8074951171875,
+      "depth": 75.94546508789062,
+      "height": 18.014448165893555
+    },
+    "features": {
+      "planes": 2278,
+      "cylinders": 0,
+      "cones": 1,
+      "spheres": 0
+    },
+    "screenshot": "dino_clip_v3_04-strong-closing-full.png"
+  }
+]
