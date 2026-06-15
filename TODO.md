@@ -72,6 +72,15 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 
 ## Erledigt
 
+- [x] **Regressionstest analytische Bohrungen — Dünnplatten-Fall abgesichert (2026-06-15)** —
+  `tests/bore-analytic-regression.mjs` (`npm run test:bore`) fährt die volle Pipeline
+  (parseStl → buildNormalGroups → unify → recognizePrimitives → buildVolumeStepBrepV2) in Node
+  und **asserted boresConverted===1 + Präsenz einer echten CYLINDRICAL_SURFACE** auf `washer_thin.stl`
+  (dünne Platte t<0.6·R, der Auslöser des stillen Voll-Fallbacks) und `block_with_hole.stl` (dicke
+  Kontrolle). Lücke vorher: occt-check + Wasserdicht-Sweep meldeten GRÜN, weil der facettierte Fallback
+  selbst wasserdicht+occt-parsebar ist — der Feature-Verlust war unsichtbar. Belegt: mit zurückgenommenem
+  Axial-Gate/claimed-Set liefert washer_thin boresConverted=0/CYLINDRICAL_SURFACE×0 (watertight bleibt true)
+  → Test schlägt mit Exit 1 fehl; mit Fix grün. Code-Fix selbst lag bereits in Commit 4087978.
 - [x] **Analytische Voll-Durchgangsbohrungen → CYLINDRICAL_SURFACE + CIRCLE (2026-06-15)** —
   Erkannte Voll-Bohrungen (`group.primitive`, kind=bore, full) werden als EINE nahtlose
   `CYLINDRICAL_SURFACE` mit 2 vollen `CIRCLE`-Rand-Kanten exportiert statt Dutzender Facetten-Planes;
