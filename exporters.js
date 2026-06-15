@@ -699,7 +699,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // Fase → flache Fläche etwas weiter außen; dazwischen wird ein KEGEL emittiert und die Fillet-
   // Facetten entfallen — User-Wunsch: gekrümmte Verrundung durch gerade Fase ersetzen). Jeder Rand
   // muss gelöst werden, sonst Plan verwerfen (facettiert).
-  const CHAMFER_MAX = 2.5, CHAMFER_MIN = 0.04;
+  const CHAMFER_MAX = 3.0, CHAMFER_MIN = 0.04;
   const finalPlans = [];
   const chamferZones = [];
   for (const plan of tentative) {
@@ -950,10 +950,20 @@ export function buildVolumeStepBrepV2(analysis) {
   if (allFaceIds.length < 2) return null;
 
   // ---- Step 4: Units + context ----
+  // WICHTIG: komplexe (UND-verknüpfte) STEP-Entitäten MÜSSEN in äußere Klammern `( … )`.
+  // Ohne sie lesen strikte CAD-Importer (Fusion/FreeCAD/SolidWorks) die Einheit NICHT und
+  // skalieren auf eine Default-Einheit → Bauteil erscheint z.B. 10× zu groß (mm als cm gelesen).
+  // Außerdem Winkel- + Raumwinkel-Einheit + Unsicherheit angeben (Winkel nötig für CONICAL_SURFACE).
   const lenUnitId = id++;
-  entities.push(`#${lenUnitId}=LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.);`);
+  entities.push(`#${lenUnitId}=( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );`);
+  const angUnitId = id++;
+  entities.push(`#${angUnitId}=( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );`);
+  const solUnitId = id++;
+  entities.push(`#${solUnitId}=( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );`);
+  const uncId = id++;
+  entities.push(`#${uncId}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.01),#${lenUnitId},'distance_accuracy_value','confusion accuracy');`);
   const ctxId = id++;
-  entities.push(`#${ctxId}=GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId}))REPRESENTATION_CONTEXT('','');`);
+  entities.push(`#${ctxId}=( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${uncId})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId},#${angUnitId},#${solUnitId})) REPRESENTATION_CONTEXT('','3D') );`);
 
   // ---- Step 5: Wasserdicht → echter Volumenkörper (CLOSED_SHELL + MANIFOLD_SOLID_BREP),
   // sonst offenes Flächenmodell (OPEN_SHELL) als Fallback, das das CAD selbst zu nähen versuchen kann.
@@ -1134,10 +1144,17 @@ export function buildVolumeStepTriangles(analysis) {
   const solidId = id++;
   entities.push(`#${solidId}=MANIFOLD_SOLID_BREP('Triangle Mesh Solid',#${shellId});`);
 
+  // Komplexe Entitäten MIT äußeren Klammern (sonst Einheiten-Fehlskalierung im CAD, s. V2-Exporter).
   const lenUnitId = id++;
-  entities.push(`#${lenUnitId}=LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.);`);
+  entities.push(`#${lenUnitId}=( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );`);
+  const angUnitId = id++;
+  entities.push(`#${angUnitId}=( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );`);
+  const solUnitId = id++;
+  entities.push(`#${solUnitId}=( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );`);
+  const uncId = id++;
+  entities.push(`#${uncId}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.01),#${lenUnitId},'distance_accuracy_value','confusion accuracy');`);
   const ctxId = id++;
-  entities.push(`#${ctxId}=GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId}))REPRESENTATION_CONTEXT('','');`);
+  entities.push(`#${ctxId}=( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${uncId})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId},#${angUnitId},#${solUnitId})) REPRESENTATION_CONTEXT('','3D') );`);
   const shapeRepId = id++;
   entities.push(`#${shapeRepId}=ADVANCED_BREP_SHAPE_REPRESENTATION('Triangle Volume',(#${solidId}),#${ctxId});`);
 
