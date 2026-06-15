@@ -435,32 +435,36 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
   for (const g of normalGroups) totalTris += Math.floor(g.vertices.length / 3);
   for (const edges of boundaryEdgesByGroup.values()) totalEdges += edges.length;
 
-  // Flächen (transparent, eingefärbt nach Region)
+  // Flächen mit per-Vertex-ALPHA: erkannte Bohrungen/Fillets KRÄFTIG + nahezu deckend, das
+  // restliche Teil blass + stark durchscheinend → die erkannten Löcher heben sich klar ab und
+  // scheinen durch den Körper. (RGBA-Color-Attribut, itemSize 4.)
   const positions = new Float32Array(totalTris * 9);
-  const colors    = new Float32Array(totalTris * 9);
-  let p = 0;
+  const colors    = new Float32Array(totalTris * 12);
+  let p = 0, c = 0;
   normalGroups.forEach((group, idx) => {
     const verts = group.vertices;
     const triCount = Math.floor(verts.length / 3);
-    const col = group.primitive?.type === 'cylinder'
-      ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xffb060 : 0xff6b60)
-      : new THREE.Color().setHSL(idx / normalGroups.length, 0.35, 0.7);
+    const isCyl = group.primitive?.type === 'cylinder';
+    const col = isCyl
+      ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : 0xff1744) // kräftiges Rot / Orange
+      : new THREE.Color().setHSL(idx / normalGroups.length, 0.30, 0.72);
+    const a = isCyl ? 0.96 : 0.26; // erkannte Features fast deckend, Rest stark durchscheinend
     for (let i = 0; i < triCount; i++) {
       const v0 = verts[i*3], v1 = verts[i*3+1], v2 = verts[i*3+2];
       positions[p]   = v0[0]; positions[p+1] = v0[2]; positions[p+2] = v0[1];
       positions[p+3] = v1[0]; positions[p+4] = v1[2]; positions[p+5] = v1[1];
       positions[p+6] = v2[0]; positions[p+7] = v2[2]; positions[p+8] = v2[1];
-      for (let k = 0; k < 9; k += 3) { colors[p+k] = col.r; colors[p+k+1] = col.g; colors[p+k+2] = col.b; }
       p += 9;
+      for (let k = 0; k < 3; k++) { colors[c] = col.r; colors[c+1] = col.g; colors[c+2] = col.b; colors[c+3] = a; c += 4; }
     }
   });
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 4));
   geo.computeVertexNormals();
   const faceMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
     vertexColors: true, metalness: 0.1, roughness: 0.5, side: THREE.DoubleSide,
-    transparent: true, opacity: 0.55
+    transparent: true, opacity: 1, depthWrite: false // durchscheinend: erkannte Features hinter der Hülle bleiben sichtbar
   }));
   faceMesh.position.set(-centerX, -centerZ, -centerY);
   brepMeshGroup.add(faceMesh);
@@ -494,8 +498,8 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
       if (p.type !== 'cylinder' || !p.full) continue; // Overlay nur für volle Bohrungen (Teil-Zylinder/Fillets nur farbig)
       const cylGeo = new THREE.CylinderGeometry(p.radius, p.radius, p.height, 32, 1, true);
       const cyl = new THREE.Mesh(cylGeo, new THREE.MeshStandardMaterial({
-        color: 0xff3b30, metalness: 0.1, roughness: 0.5, side: THREE.DoubleSide,
-        transparent: true, opacity: 0.22
+        color: 0xff1744, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
+        transparent: true, opacity: 0.45
       }));
       const mid = [
         p.axisPoint[0] + p.axis[0] * p.height / 2,
