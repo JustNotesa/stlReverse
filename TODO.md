@@ -66,16 +66,24 @@ facettiertem Rand"-Hack scheitert in occt (zerfällt in 2 Meshes). Sauberer Weg 
 ebenfalls analytisch als **TOROIDAL_SURFACE** exportieren, sodass Zylinder↔Torus↔Ebene sich echte
 Kreis-Kanten teilen.
 
-- [x] **Emission/Stitching machbar (EMPIRISCH belegt)** — `tests/torus-proto.cjs`: ein wasserdichter Solid
-  aus CYLINDRICAL_SURFACE + TOROIDAL_SURFACE + PLANE mit geteilten CIRCLE-Kanten **parst sauber in occt**
-  (1 Mesh, 4 Faces, glatt tesselliert). Die Repräsentation steht.
-- [ ] **Torus-Erkennung** — Hole-Mündungs-Fillets (entlang KREISFÖRMIGER Kanten) als Torus fitten:
-  Achse + Zentrum (aus der zugehörigen Bohrung), major_radius, minor_radius (Fillet-Radius). Real-Daten
-  sind dicht/verrauscht (~160 Kleinstpatches je Mündung) → robustes Fitting nötig. Abgrenzen von
-  Gerade-Kanten-Fillets (= Teil-Zylinder, schon erkannt).
-- [ ] **Integration in `buildVolumeStepBrepV2`** — Feature „Bohrung+Mündungs-Torus(+Boden-Torus)" als
-  Cylinder + Torus(se) + Ringkante(n) emittieren, geteilte Kreise mit Nachbar-Flächen, wasserdicht;
-  3-Ebenen-Fallback beibehalten. GEBOGENE Löcher (z. B. das grün umrandete) bleiben facettiert.
+- [x] **Emission/Stitching machbar (EMPIRISCH belegt)** — Torus: `tests/torus-proto.cjs`; **Fase/Kegel
+  (User-Idee, einfacher)**: `tests/cone-proto.cjs`. Beide bauen einen wasserdichten Solid aus gemischten
+  analytischen Flächen (CYLINDRICAL + TOROIDAL bzw. CONICAL + PLANE) mit geteilten CIRCLE-Kanten, der
+  sauber in occt parst (1 Mesh, 4 Faces). Repräsentation steht.
+- [x] **Chamfer-Erkennung + -Integration implementiert** (statt Torus — User-Idee: Verrundung durch
+  gerade Fase ersetzen). In `buildVolumeStepBrepV2`: pro Bohrungs-Rand, wenn KEIN direkter Flach-Treffer,
+  Suche nach koaxialem Kreis R2>R im kleinen Achs-Abstand (`loopAsCircle`, CHAMFER_MAX=2.5) → Plan
+  Zylinder + CONICAL_SURFACE-Kegel + Flach-Kreis; Fillet-Facetten in der Zone werden entfernt
+  (`chamferZones`-Filter). Wasserdicht-Verdikt + 3-Ebenen-Fallback unverändert.
+- [ ] **VALIDIERUNG offen / blockiert** — der Kegel-Pfad hat in KEINEM Test ausgelöst (cone=0 überall):
+  (a) synthetische Fasen-Washer werden vom Zylinder-Detektor (`recognizePrimitives`) nicht erkannt
+  (Tuning-Empfindlichkeit, separat zu untersuchen); (b) fischerEbike-Fillets sind größer als CHAMFER_MAX
+  bzw. ihre Ränder bestehen attemptBore nicht (verrundungs-verschliffene Rim-Kreise). **Sicher** (kein
+  Regress, dormant, Fallback), aber unbewiesen. Nötig: reales Teil mit moderaten Fasen, ODER Recognition-
+  Tuning, ODER CHAMFER_MAX behutsam erhöhen + Ergebnis visuell prüfen. Echtes Teil OHNE Verrundung
+  konvertiert bereits sauber (samples/…(ohne rundungen).stl → 2 Zylinder).
+- [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
+  (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
   Check), aber noch nicht als `CONICAL_SURFACE`/`SPHERICAL_SURFACE` erkannt. Analoger Fit (Halbwinkel/Zentrum).
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)

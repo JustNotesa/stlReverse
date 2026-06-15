@@ -289,6 +289,11 @@ export function buildVolumeStepBrepV2(analysis) {
     entities.push(`#${sid}=CYLINDRICAL_SURFACE('',#${placId},${toStep(radius)});`);
     return sid;
   };
+  const addConicalSurface = (placId, radius, semiAngle) => {
+    const sid = id++;
+    entities.push(`#${sid}=CONICAL_SURFACE('',#${placId},${toStep(radius)},${toStep(semiAngle)});`);
+    return sid;
+  };
   const addAdvancedFace = (boundIds, surfId, sameSense) => {
     const fid = id++;
     entities.push(`#${fid}=ADVANCED_FACE('',(${boundIds.map((b) => `#${b}`).join(',')}),#${surfId},.${sameSense ? 'T' : 'F'}.);`);
@@ -650,43 +655,107 @@ export function buildVolumeStepBrepV2(analysis) {
     return true;
   };
 
-  // Tentative Pläne berechnen; erfolgreiche Bohrungs-Gruppen vorerst überspringen.
+  // Tentative Pläne (Zylinder-Ränder). Erfolgreiche Bohrungs-Gruppen vorerst überspringen.
   const tentative = [];
-  const skipGroups = new Set();
+  const boreSkip = new Set();
   for (const entry of boreById.values()) {
     let plan = null;
     try { plan = attemptBore(entry); } catch (_) { plan = null; }
-    if (plan) { tentative.push(plan); for (const g of plan.groups) skipGroups.add(g); }
+    if (plan) { tentative.push(plan); for (const g of plan.groups) boreSkip.add(g); }
   }
 
-  // faceDefs der Nicht-Bohrungs-Gruppen.
+  // faceDefs der Nicht-Bohrungs-Gruppen (mit Gruppen-Ref für Fillet-Filterung).
   const buildFaceDefs = (skip) => {
     const fds = [];
-    for (const group of normalGroups) { if (skip && skip.has(group)) continue; fds.push(...extractGroupFaces(group)); }
+    for (const group of normalGroups) {
+      if (skip && skip.has(group)) continue;
+      for (const fd of extractGroupFaces(group)) { fd.group = group; fds.push(fd); }
+    }
     return fds;
   };
-  const faceDefs = buildFaceDefs(skipGroups);
+  let faceDefs = buildFaceDefs(boreSkip);
 
-  // Rand-Matching: jeder Rand eines Plans muss GENAU einen freien Innen-Loop treffen; sonst
-  // Plan verwerfen und die Bohrungs-Gruppen doch facettiert nachreichen.
+  // Kreis-Deskriptor (Zentrum auf Achse, Radius, Achse, refDir, rimKey) — teilbar via circleRegistry.
+  const mkCircleDesc = (center, radius, axis) => ({
+    center, radius, axis, refDir: computeRefDir(axis),
+    rimKey: `${fixZero(center[0], 3)},${fixZero(center[1], 3)},${fixZero(center[2], 3)}|${fixZero(radius, 3)}`,
+  });
+  // Ist `loop` ein koaxialer Kreis um die Bohrachse? → { center(auf Achse), radius, meanT } | null
+  const loopAsCircle = (loop, normal, axis, ap) => {
+    if (Math.abs(_dot3(normal, axis)) < 0.985) return null; // Wand ~⟂ zur Achse
+    let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
+    const c0 = [cx / loop.length, cy / loop.length, cz / loop.length];
+    let sr = 0; for (const p of loop) { const w = _sub3(p, c0), al = _dot3(w, axis); sr += Math.hypot(w[0] - axis[0] * al, w[1] - axis[1] * al, w[2] - axis[2] * al); }
+    const radius = sr / loop.length;
+    if (!(radius > 0)) return null;
+    const radTol = Math.max(0.1, 0.06 * radius);
+    for (const p of loop) { const w = _sub3(p, c0), al = _dot3(w, axis); const perp = Math.hypot(w[0] - axis[0] * al, w[1] - axis[1] * al, w[2] - axis[2] * al); if (Math.abs(perp - radius) > radTol) return null; }
+    const meanT = _dot3(_sub3(c0, ap), axis);
+    const center = [ap[0] + axis[0] * meanT, ap[1] + axis[1] * meanT, ap[2] + axis[2] * meanT];
+    return { center, radius, meanT };
+  };
+
+  // Rand-Matching: DIREKT (Rand an flacher Fläche, Kreis = Rand) ODER CHAMFER (Rand an Verrundung/
+  // Fase → flache Fläche etwas weiter außen; dazwischen wird ein KEGEL emittiert und die Fillet-
+  // Facetten entfallen — User-Wunsch: gekrümmte Verrundung durch gerade Fase ersetzen). Jeder Rand
+  // muss gelöst werden, sonst Plan verwerfen (facettiert).
+  const CHAMFER_MAX = 2.5, CHAMFER_MIN = 0.04;
   const finalPlans = [];
+  const chamferZones = [];
   for (const plan of tentative) {
     const matched = []; const claimed = new Set(); let okAll = true;
     for (const rim of plan.rims) {
+      // (1) direkter Treffer
       let hit = null;
+      for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim)) { hit = inner; break; } } if (hit) break; }
+      if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
+      // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX)
+      let cham = null;
       for (const fd of faceDefs) {
         for (const inner of fd.inner) {
-          if (inner.circleRim || claimed.has(inner)) continue; // weder fremd- noch im selben Plan belegt
-          if (innerMatchesRim(inner, fd.normal, rim)) { hit = inner; break; }
+          if (inner.circleRim || claimed.has(inner)) continue;
+          const circ = loopAsCircle(inner, fd.normal, rim.axis, rim.center);
+          if (!circ) continue;
+          if (circ.radius <= rim.radius + 0.02 || circ.radius > rim.radius + CHAMFER_MAX) continue;
+          const dz = circ.meanT - rim.meanT;
+          if (Math.abs(dz) < CHAMFER_MIN || Math.abs(dz) > CHAMFER_MAX) continue;
+          cham = { inner, circ, dz }; break;
         }
-        if (hit) break;
+        if (cham) break;
       }
-      if (!hit) { okAll = false; break; }
-      claimed.add(hit);
-      matched.push({ inner: hit, rim });
+      if (cham) { claimed.add(cham.inner); matched.push({ rim, inner: cham.inner, mode: 'chamfer', circ: cham.circ, dz: cham.dz }); continue; }
+      okAll = false; break;
     }
-    if (okAll) { for (const m of matched) m.inner.circleRim = m.rim; finalPlans.push(plan); }
-    else { for (const g of plan.groups) faceDefs.push(...extractGroupFaces(g)); }
+    if (!okAll) { for (const g of plan.groups) for (const fd of extractGroupFaces(g)) { fd.group = g; faceDefs.push(fd); } continue; }
+    plan.coneRims = [];
+    for (const m of matched) {
+      if (m.mode === 'direct') { m.inner.circleRim = m.rim; continue; }
+      const flatDesc = mkCircleDesc(m.circ.center, m.circ.radius, m.rim.axis);
+      m.inner.circleRim = flatDesc;                                   // flache Fläche nutzt äußeren Kreis R2@z2
+      const coneAxis = m.dz >= 0 ? m.rim.axis : [-m.rim.axis[0], -m.rim.axis[1], -m.rim.axis[2]];
+      const semiAngle = Math.atan2(Math.abs(m.circ.radius - m.rim.radius), Math.abs(m.dz));
+      plan.coneRims.push({ rimDesc: m.rim, flatDesc, coneAxis, semiAngle });
+      chamferZones.push({ axis: m.rim.axis, ap: m.rim.center, R: m.rim.radius, R2: m.circ.radius, zLo: Math.min(0, m.dz), zHi: Math.max(0, m.dz) });
+    }
+    finalPlans.push(plan);
+  }
+
+  // Fillet-Facetten entfernen: faceDefs, deren Loops KOMPLETT in einer Chamfer-Zone liegen (zwischen
+  // Rand-Kreis R@z1 und Flach-Kreis R2@z2), entfallen — ihre Geometrie übernimmt der Kegel.
+  if (chamferZones.length) {
+    const inZone = (v) => {
+      for (const z of chamferZones) {
+        const w = _sub3(v, z.ap), al = _dot3(w, z.axis);
+        const rho = Math.hypot(w[0] - z.axis[0] * al, w[1] - z.axis[1] * al, w[2] - z.axis[2] * al);
+        if (rho >= z.R - 0.15 && rho <= z.R2 + 0.15 && al >= z.zLo - 0.15 && al <= z.zHi + 0.15) return true;
+      }
+      return false;
+    };
+    faceDefs = faceDefs.filter(fd => {
+      if (fd.inner.some(l => l.circleRim)) return true;               // gematchte Flachfläche behalten
+      const allV = [...fd.outer, ...fd.inner.flat()];
+      return !allV.every(inZone);
+    });
   }
 
   // ---- Step 2: Shared vertex + edge registry ----
@@ -830,6 +899,21 @@ export function buildVolumeStepBrepV2(analysis) {
         bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
       }
       faceIds.push(addAdvancedFace(bounds, cylSurf, true));
+
+      // Chamfer-Kegel (Fase): überbrückt Rand-Kreis R@z1 (mit Zylinder geteilt) und Flach-Kreis
+      // R2@z2 (mit der flachen Fläche geteilt). Orientierung: Kegel nutzt Rand .T. (Zylinder .F.),
+      // Flach-Kreis .F. (Flachfläche .T.) → je Kreis 1×fwd/1×rev (wasserdicht).
+      for (const cr of (plan.coneRims || [])) {
+        const conePlac = addAxis2Placement3D(cr.rimDesc.center, cr.coneAxis, cr.rimDesc.refDir);
+        const coneSurf = addConicalSurface(conePlac, cr.rimDesc.radius, cr.semiAngle);
+        const ceRim = getOrCreateCircleEdge(cr.rimDesc.rimKey, cr.rimDesc);
+        const ceFlat = getOrCreateCircleEdge(cr.flatDesc.rimKey, cr.flatDesc);
+        useCircle(cr.rimDesc.rimKey, true);
+        useCircle(cr.flatDesc.rimKey, false);
+        const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceRim.ecId, true)]));
+        const ib = addFaceBound(addEdgeLoop([addOrientedEdge(ceFlat.ecId, false)]));
+        faceIds.push(addAdvancedFace([ob, ib], coneSurf, true));
+      }
     }
 
     // Wasserdicht-Verdikt: Linien-Kanten (edgeUse) UND Kreis-Kanten (circleUse) nach denselben
