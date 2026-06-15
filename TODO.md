@@ -56,6 +56,26 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
     Matching müsste auch Outer-Loops prüfen.
   - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
     für Bögen erweiterbar (Naht-Form aus dem Design-Plan).
+
+## Hohe Priorität — Verrundungs-umgebene Löcher → echte Zylinder (TOROIDAL_SURFACE), User-Wunsch 2026-06-15
+
+Befund: ALLE Bohrungen des realen fischerEbike-Teils münden in **Verrundungen** (das Teil ist überall
+verrundet) — keine grenzt an eine flache Fläche (`neighborsFlatParallel=0` für alle 6). Darum greift das
+Kreis-Rand-Matching nicht (Kreis vs. facettierter Fillet passt nicht). Der naheliegende „Zylinder mit
+facettiertem Rand"-Hack scheitert in occt (zerfällt in 2 Meshes). Sauberer Weg = die Verrundungen
+ebenfalls analytisch als **TOROIDAL_SURFACE** exportieren, sodass Zylinder↔Torus↔Ebene sich echte
+Kreis-Kanten teilen.
+
+- [x] **Emission/Stitching machbar (EMPIRISCH belegt)** — `tests/torus-proto.cjs`: ein wasserdichter Solid
+  aus CYLINDRICAL_SURFACE + TOROIDAL_SURFACE + PLANE mit geteilten CIRCLE-Kanten **parst sauber in occt**
+  (1 Mesh, 4 Faces, glatt tesselliert). Die Repräsentation steht.
+- [ ] **Torus-Erkennung** — Hole-Mündungs-Fillets (entlang KREISFÖRMIGER Kanten) als Torus fitten:
+  Achse + Zentrum (aus der zugehörigen Bohrung), major_radius, minor_radius (Fillet-Radius). Real-Daten
+  sind dicht/verrauscht (~160 Kleinstpatches je Mündung) → robustes Fitting nötig. Abgrenzen von
+  Gerade-Kanten-Fillets (= Teil-Zylinder, schon erkannt).
+- [ ] **Integration in `buildVolumeStepBrepV2`** — Feature „Bohrung+Mündungs-Torus(+Boden-Torus)" als
+  Cylinder + Torus(se) + Ringkante(n) emittieren, geteilte Kreise mit Nachbar-Flächen, wasserdicht;
+  3-Ebenen-Fallback beibehalten. GEBOGENE Löcher (z. B. das grün umrandete) bleiben facettiert.
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
   Check), aber noch nicht als `CONICAL_SURFACE`/`SPHERICAL_SURFACE` erkannt. Analoger Fit (Halbwinkel/Zentrum).
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
