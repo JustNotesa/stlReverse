@@ -84,10 +84,19 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
   - Bohrungs-Gruppierung über **prim.id** (Worker-Strukturklon bricht Objekt-Identität — `===` unbrauchbar).
   - **3 Fallback-Ebenen** schützen die Baseline: attemptBore→null pro Bohrung; Rand-Match scheitert→facettiert;
     globaler Schutz (öffnet die Umwandlung die Hülle → ALLES facettiert neu) → 12/13 wasserdicht nie regressiert.
-  - Verifiziert (`tests/occt-check.cjs`, alle 13 Samples): 12/13 wasserdicht, alle occt-parsebar, keine Regression.
+  - Verifiziert (`tests/occt-check.cjs`, alle 14 Samples): 13/14 wasserdicht, alle occt-parsebar, keine Regression.
     Design-Grundlage: 3-Agenten-Panel + Synthese (empirisch an `samples/FensterLueftungInsectProtect.step` belegt).
+  - **Review-Fix (12-Agenten-Review)**: `innerMatchesRim` war achsen-blind → ein koaxialer Ring am
+    FALSCHEN Loch-Ende konnte matchen (geometrisch ungültige Fläche, vom topologischen Verdikt nicht
+    gefangen) UND dünne Platten (Dicke < 0.6·R) fielen still auf Facetten zurück. Fix: **Axial-Ebenen-Gate**
+    (Loop muss in der Ebene SEINES Randes liegen) + **Per-Plan-Distinktheit** (zwei Ränder ≠ derselbe Loop).
+    Neuer Regressions-Sample `washer_thin.stl` (Loch r=8 in 4 mm Platte) wandelt jetzt korrekt um (Browser
+    verifiziert: 67 statt 130 Facetten-Flächen). `exporters.js?v=20`.
+  - **Offen (low, Review-Befund 2)**: Mantel-Rand-Bounds nutzen gleiche Windung + sameSense=.T. (Normale
+    radial nach außen). occt/OCCT re-orientiert beim Import (FreeCAD/Fusion) → rendert korrekt; ein strikter
+    Validator könnte mäkeln. Nicht geändert, um den funktionierenden Stand nicht zu riskieren.
   - **Grenzen** (→ Fallback, kein Geometrie-Schaden): Blindlöcher, geneigte/verrundete Mündungen,
-    Außen-Zylinder, Fillets — siehe „Mittlere Priorität". `exporters.js?v=19`.
+    Außen-Zylinder, Fillets — siehe „Mittlere Priorität".
 - [x] **Panel 4: B-Rep-Kanten anzeigen (Flächengrenzen) + „Kanten"-Umschalter (2026-06-15)** —
   `step-viewer.js` zeichnet jetzt die Ränder der topologischen Flächen (PLANE, CYLINDRICAL_SURFACE, …)
   als dunkle Linien über dem gefüllten Körper (CAD-typische Drahtgitter-auf-Schattierung-Optik).
