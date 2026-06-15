@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /Users/maximilianbottcher/Downloads/Mozzilla\\\\ ADDONS/stlReverse/code/stlReverseV1:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm test:*)",
+      "Bash(node tests/*)",
+      "Bash(web-ext lint:*)",
+      "Bash(web-ext run:*)",
+      "Bash(ls:*)",
+      "Bash(which:*)",
+      "Bash(mkdir:*)"
+    ]
+  }
+}

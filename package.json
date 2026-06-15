@@ -1,0 +1,25 @@
+{
+  "name": "stl-reverse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Firefox/Chrome Add-on zur heuristischen Rückführung von STL-Meshes in parametrische Beschreibungen",
+  "main": "analysis-core.js",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/analysis-core.test.js",
+    "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/e2e/",
+    "lint": "web-ext lint"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "jest": "^30.2.0",
+    "puppeteer": "^24.35.0"
+  },
+  "dependencies": {
+    "occt-import-js": "^0.0.23",
+    "online-3d-viewer": "^0.18.0"
+  }
+}
