@@ -46,10 +46,16 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 
 ## Mittlere Priorität
 
-- [ ] **Analytischer STEP-Export der erkannten Primitive** — die erkannten Zylinder/Fillets als echte
-  `CYLINDRICAL_SURFACE` + `CIRCLE`-Kanten in die STEP schreiben (statt facettierter Planes). Daten liegen
-  in `analysis.primitives` ({axis, axisPoint, radius, height, kind, full}). Setzt den projectOntoPlane-Umbau
-  (wasserdichter Export) voraus.
+- [ ] **Analytischer STEP-Export — Rest-Fälle** (Voll-Durchgangsbohrungen sind erledigt, siehe unten). Offen:
+  - **Blind­löcher** (Sackloch: 1 Rand-Loop statt 2) — braucht Boden-Cap (flach/rund). 4 der 6 fischerEbike-
+    Bohrungen sind Blindlöcher (vermutlich verrundeter Boden → nicht sauber als Zylinder+Scheibe darstellbar).
+  - **Geneigte/verrundete Loch-Mündungen** — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
+    (fischerEbike id=1/id=5: ~10–20° schräg) findet das Rand-Matching keinen Innen-Loop → Fallback.
+    Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
+  - **Außen-Zylinder** (Vollzylinder, nicht Loch): Rand sitzt am AUSSEN-Loop der Deckel, nicht am Innen-Loop —
+    Matching müsste auch Outer-Loops prüfen.
+  - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
+    für Bögen erweiterbar (Naht-Form aus dem Design-Plan).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
   Check), aber noch nicht als `CONICAL_SURFACE`/`SPHERICAL_SURFACE` erkannt. Analoger Fit (Halbwinkel/Zentrum).
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
@@ -66,6 +72,22 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 
 ## Erledigt
 
+- [x] **Analytische Voll-Durchgangsbohrungen → CYLINDRICAL_SURFACE + CIRCLE (2026-06-15)** —
+  Erkannte Voll-Bohrungen (`group.primitive`, kind=bore, full) werden als EINE nahtlose
+  `CYLINDRICAL_SURFACE` mit 2 vollen `CIRCLE`-Rand-Kanten exportiert statt Dutzender Facetten-Planes;
+  die Kreis-Kanten werden mit den angrenzenden Flachflächen geteilt. **block_with_hole: 461 → 7 Faces,
+  weiterhin wasserdicht, occt parst, Loch ist ein glatter Kreis** (Browser verifiziert).
+  - Repräsentation **nahtlos** (2 volle Kreis-Bounds, keine Naht) — empirisch gegen occt-import-js
+    bestätigt (`tests/cyl-proto.cjs` testet seamless+hybrid; beide parsen, seamless ist einfacher).
+  - Kreis-Kanten über eigene `circleRegistry`/`circleUse` (umgehen die LINE-Maschinerie wegen
+    start==end-Vertex), ins selbe Wasserdicht-Verdikt eingefaltet.
+  - Bohrungs-Gruppierung über **prim.id** (Worker-Strukturklon bricht Objekt-Identität — `===` unbrauchbar).
+  - **3 Fallback-Ebenen** schützen die Baseline: attemptBore→null pro Bohrung; Rand-Match scheitert→facettiert;
+    globaler Schutz (öffnet die Umwandlung die Hülle → ALLES facettiert neu) → 12/13 wasserdicht nie regressiert.
+  - Verifiziert (`tests/occt-check.cjs`, alle 13 Samples): 12/13 wasserdicht, alle occt-parsebar, keine Regression.
+    Design-Grundlage: 3-Agenten-Panel + Synthese (empirisch an `samples/FensterLueftungInsectProtect.step` belegt).
+  - **Grenzen** (→ Fallback, kein Geometrie-Schaden): Blindlöcher, geneigte/verrundete Mündungen,
+    Außen-Zylinder, Fillets — siehe „Mittlere Priorität". `exporters.js?v=19`.
 - [x] **Panel 4: B-Rep-Kanten anzeigen (Flächengrenzen) + „Kanten"-Umschalter (2026-06-15)** —
   `step-viewer.js` zeichnet jetzt die Ränder der topologischen Flächen (PLANE, CYLINDRICAL_SURFACE, …)
   als dunkle Linien über dem gefüllten Körper (CAD-typische Drahtgitter-auf-Schattierung-Optik).
