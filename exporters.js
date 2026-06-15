@@ -636,6 +636,11 @@ export function buildVolumeStepBrepV2(analysis) {
     let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
     const c = [cx / loop.length, cy / loop.length, cz / loop.length];
     if (Math.hypot(c[0] - rim.center[0], c[1] - rim.center[1], c[2] - rim.center[2]) > Math.max(0.15, 0.6 * rim.radius)) return false;
+    // Axial-Ebenen-Gate: der Loop MUSS in der Ebene DIESES Randes liegen (an seinem eigenen Ende).
+    // Der Radialtest unten ist achsen-blind (projiziert den Achsanteil weg) — ohne dieses Gate würde
+    // ein koaxialer Ring am ANDEREN Loch-Ende fälschlich matchen (geometrisch falsche Fläche, aber
+    // topologisch wasserdicht → vom Verdikt NICHT gefangen). Trennt auch dünne Platten korrekt auf.
+    if (Math.abs(_dot3(_sub3(c, rim.center), rim.axis)) > Math.max(0.05, 0.1 * rim.radius)) return false;
     const radTol = Math.max(0.1, 0.06 * rim.radius);
     for (const p of loop) {
       const w = _sub3(p, rim.center), along = _dot3(w, rim.axis);
@@ -666,17 +671,18 @@ export function buildVolumeStepBrepV2(analysis) {
   // Plan verwerfen und die Bohrungs-Gruppen doch facettiert nachreichen.
   const finalPlans = [];
   for (const plan of tentative) {
-    const matched = []; let okAll = true;
+    const matched = []; const claimed = new Set(); let okAll = true;
     for (const rim of plan.rims) {
       let hit = null;
       for (const fd of faceDefs) {
         for (const inner of fd.inner) {
-          if (inner.circleRim) continue;
+          if (inner.circleRim || claimed.has(inner)) continue; // weder fremd- noch im selben Plan belegt
           if (innerMatchesRim(inner, fd.normal, rim)) { hit = inner; break; }
         }
         if (hit) break;
       }
       if (!hit) { okAll = false; break; }
+      claimed.add(hit);
       matched.push({ inner: hit, rim });
     }
     if (okAll) { for (const m of matched) m.inner.circleRim = m.rim; finalPlans.push(plan); }
