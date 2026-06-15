@@ -279,6 +279,16 @@ export function buildVolumeStepBrepV2(analysis) {
     entities.push(`#${pid}=PLANE('',#${placId});`);
     return pid;
   };
+  const addCircle = (placId, radius) => {
+    const cid = id++;
+    entities.push(`#${cid}=CIRCLE('',#${placId},${toStep(radius)});`);
+    return cid;
+  };
+  const addCylindricalSurface = (placId, radius) => {
+    const sid = id++;
+    entities.push(`#${sid}=CYLINDRICAL_SURFACE('',#${placId},${toStep(radius)});`);
+    return sid;
+  };
   const addAdvancedFace = (boundIds, surfId, sameSense) => {
     const fid = id++;
     entities.push(`#${fid}=ADVANCED_FACE('',(${boundIds.map((b) => `#${b}`).join(',')}),#${surfId},.${sameSense ? 'T' : 'F'}.);`);
@@ -564,11 +574,114 @@ export function buildVolumeStepBrepV2(analysis) {
   };
 
   // ---- Step 1: Compute face polygons from all groups ----
-  const faceDefs = [];
+  // ---- Analytische Voll-Bohrungen: erkannte Zylinder als EINE CYLINDRICAL_SURFACE + 2 Kreis-
+  // Kanten statt Dutzender Facetten-Planes. Nahtlose Form (2 volle Kreis-Bounds) — empirisch
+  // bestätigt, dass occt-import-js (Panel 4) sie parst. Drei Fallback-Ebenen schützen die
+  // Wasserdicht-Baseline: (1) attemptBore→null pro Bohrung, (2) Rand-Match scheitert→facettiert,
+  // (3) globaler Schutz unten (öffnet die Umwandlung die Hülle → komplett facettiert neu bauen).
+  // Bohrungen tragen group.primitive; über die Worker-Grenze strukturell geklont → Objekt-Identität
+  // gebrochen, daher Gruppierung über prim.id (stabile Ganzzahl), nie ===.
+  const boreById = new Map();
   for (const group of normalGroups) {
-    faceDefs.push(...extractGroupFaces(group));
+    const p = group.primitive;
+    if (p && p.type === 'cylinder' && p.kind === 'bore' && p.full === true && Number.isFinite(p.radius) && p.radius > 0) {
+      let e = boreById.get(p.id);
+      if (!e) { e = { prim: p, groups: [] }; boreById.set(p.id, e); }
+      e.groups.push(group);
+    }
   }
-  if (faceDefs.length < 2) return null;
+
+  // Rand-Geometrie aus der Vereinigung der Facetten extrahieren: Randkanten (genau 1× genutzt)
+  // → geschlossene Loops. Durchgangsloch = genau 2 koaxiale Rand-Kreise; sonst Fallback (null).
+  const attemptBore = (entry) => {
+    const prim = entry.prim;
+    const axis = _norm3(prim.axis), ap = prim.axisPoint, R = prim.radius;
+    const ec = new Map();
+    for (const g of entry.groups) {
+      const vs = g.vertices, tc = Math.floor(vs.length / 3);
+      for (let t = 0; t < tc; t++) {
+        const tri = [vs[t * 3], vs[t * 3 + 1], vs[t * 3 + 2]];
+        for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
+          const k = edgeKeyFn(a, b); const e = ec.get(k) || { c: 0, a, b }; e.c++; ec.set(k, e);
+        }
+      }
+    }
+    const bnd = []; for (const e of ec.values()) if (e.c === 1) bnd.push({ v0: e.a, v1: e.b });
+    const loops = chainEdges(bnd);
+    if (loops.length !== 2) return null; // v1: nur Durchgangslöcher
+    const tol = Math.max(0.08, 0.06 * R);
+    const refDir = computeRefDir(axis);
+    const rims = [];
+    for (const loop of loops) {
+      let st = 0; for (const pt of loop) st += _dot3(_sub3(pt, ap), axis);
+      const meanT = st / loop.length;
+      const center = [ap[0] + axis[0] * meanT, ap[1] + axis[1] * meanT, ap[2] + axis[2] * meanT];
+      for (const pt of loop) {
+        const w = _sub3(pt, center), along = _dot3(w, axis);
+        const perp = Math.hypot(w[0] - axis[0] * along, w[1] - axis[1] * along, w[2] - axis[2] * along);
+        if (Math.abs(perp - R) > tol) return null;
+      }
+      const rimKey = `${fixZero(center[0], 3)},${fixZero(center[1], 3)},${fixZero(center[2], 3)}|${fixZero(R, 3)}`;
+      rims.push({ center, axis, radius: R, refDir, rimKey, meanT });
+    }
+    rims.sort((a, b) => a.meanT - b.meanT); // [unten, oben]
+    if (rims[0].rimKey === rims[1].rimKey) return null; // null-Höhe / kollabiert
+    return { prim, rims, groups: entry.groups, surfCenter: rims[0].center };
+  };
+
+  // Innen-Loop einer Flachfläche rein GEOMETRISCH einem Rand zuordnen (simplifyLoop kann die
+  // Polygon-Auflösung verändert haben → niemals über Vertex-Mengen vergleichen).
+  const innerMatchesRim = (loop, normal, rim) => {
+    if (Math.abs(_dot3(normal, rim.axis)) < 0.985) return false; // Wand ~⟂ zur Achse (≤10°)
+    let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
+    const c = [cx / loop.length, cy / loop.length, cz / loop.length];
+    if (Math.hypot(c[0] - rim.center[0], c[1] - rim.center[1], c[2] - rim.center[2]) > Math.max(0.15, 0.6 * rim.radius)) return false;
+    const radTol = Math.max(0.1, 0.06 * rim.radius);
+    for (const p of loop) {
+      const w = _sub3(p, rim.center), along = _dot3(w, rim.axis);
+      const perp = Math.hypot(w[0] - rim.axis[0] * along, w[1] - rim.axis[1] * along, w[2] - rim.axis[2] * along);
+      if (Math.abs(perp - rim.radius) > radTol) return false;
+    }
+    return true;
+  };
+
+  // Tentative Pläne berechnen; erfolgreiche Bohrungs-Gruppen vorerst überspringen.
+  const tentative = [];
+  const skipGroups = new Set();
+  for (const entry of boreById.values()) {
+    let plan = null;
+    try { plan = attemptBore(entry); } catch (_) { plan = null; }
+    if (plan) { tentative.push(plan); for (const g of plan.groups) skipGroups.add(g); }
+  }
+
+  // faceDefs der Nicht-Bohrungs-Gruppen.
+  const buildFaceDefs = (skip) => {
+    const fds = [];
+    for (const group of normalGroups) { if (skip && skip.has(group)) continue; fds.push(...extractGroupFaces(group)); }
+    return fds;
+  };
+  const faceDefs = buildFaceDefs(skipGroups);
+
+  // Rand-Matching: jeder Rand eines Plans muss GENAU einen freien Innen-Loop treffen; sonst
+  // Plan verwerfen und die Bohrungs-Gruppen doch facettiert nachreichen.
+  const finalPlans = [];
+  for (const plan of tentative) {
+    const matched = []; let okAll = true;
+    for (const rim of plan.rims) {
+      let hit = null;
+      for (const fd of faceDefs) {
+        for (const inner of fd.inner) {
+          if (inner.circleRim) continue;
+          if (innerMatchesRim(inner, fd.normal, rim)) { hit = inner; break; }
+        }
+        if (hit) break;
+      }
+      if (!hit) { okAll = false; break; }
+      matched.push({ inner: hit, rim });
+    }
+    if (okAll) { for (const m of matched) m.inner.circleRim = m.rim; finalPlans.push(plan); }
+    else { for (const g of plan.groups) faceDefs.push(...extractGroupFaces(g)); }
+  }
 
   // ---- Step 2: Shared vertex + edge registry ----
   const ptRegistry = new Map(); // key → { ptId, vtxId }
@@ -621,6 +734,33 @@ export function buildVolumeStepBrepV2(analysis) {
     return edgeRegistry.get(key);
   };
 
+  // ---- Analytische Kreis-Kanten (Bohrungs-Ränder) ----
+  // Volle Kreis-Kanten (EDGE_CURVE mit start==end-Vertex) dürfen NICHT durch getOrCreateEdge/
+  // buildLoopEdges laufen (die überspringen p1==p2 als entartet und bauten sonst eine degenerierte
+  // LINE). Daher eigene Registry, gekeyt über den Rand (Zentrum+Radius+Achse), NICHT über Endpunkte
+  // (bei einem vollen Kreis identisch). Eigener Use-Zähler speist dasselbe Wasserdicht-Verdikt.
+  const circleRegistry = new Map(); // rimKey → { ecId }
+  const circleUse = new Map();      // rimKey → { fwd, rev }
+  const getOrCreateCircleEdge = (rimKey, geom) => {
+    if (!circleRegistry.has(rimKey)) {
+      const placId = addAxis2Placement3D(geom.center, geom.axis, geom.refDir);
+      const circleId = addCircle(placId, geom.radius);
+      const v = getVertex([
+        geom.center[0] + geom.radius * geom.refDir[0],
+        geom.center[1] + geom.radius * geom.refDir[1],
+        geom.center[2] + geom.radius * geom.refDir[2],
+      ]);
+      const ecId = addEdgeCurve(v.vtxId, v.vtxId, circleId);
+      circleRegistry.set(rimKey, { ecId });
+    }
+    return circleRegistry.get(rimKey);
+  };
+  const useCircle = (rimKey, forward) => {
+    const u = circleUse.get(rimKey) || { fwd: 0, rev: 0 };
+    if (forward) u.fwd++; else u.rev++;
+    circleUse.set(rimKey, u);
+  };
+
   // ---- Step 3: Build ADVANCED_FACEs ----
   const buildLoopEdges = (points) => {
     const oeIds = [];
@@ -639,44 +779,85 @@ export function buildVolumeStepBrepV2(analysis) {
     return oeIds;
   };
 
-  const allFaceIds = [];
-  for (const { outer, inner, normal, centroid } of faceDefs) {
-    const outerOe = buildLoopEdges(outer);
-    if (outerOe.length < 3) continue;
-    const outerLoopId = addEdgeLoop(outerOe);
-    const bounds = [addFaceOuterBound(outerLoopId)];
-    for (const innerLoop of inner) {
-      const innerOe = buildLoopEdges(innerLoop);
-      if (innerOe.length < 3) continue;
-      const innerLoopId = addEdgeLoop(innerOe);
-      bounds.push(addFaceBound(innerLoopId));
-    }
-    const uDir = computeRefDir(normal);
-    const placId = addAxis2Placement3D(centroid, normal, uDir);
-    const planeId = addPlane(placId);
-    allFaceIds.push(addAdvancedFace(bounds, planeId, true));
-  }
-  if (allFaceIds.length < 2) return null;
+  // ---- Step 3: Flächen emittieren — re-entrant, damit der globale Fallback alles facettiert
+  // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
+  // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
+  const entMark = entities.length, idMark = id;
+  const assemble = (faceDefsArg, plans) => {
+    entities.length = entMark; id = idMark;
+    ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
+    circleRegistry.clear(); circleUse.clear();
+    const faceIds = [];
 
-  // ---- Step 3b: Wasserdichtigkeits-Befund aus der Kanten-Nutzung ----
-  // Zählt, wie oft jede kanonische Kante von einer ORIENTED_EDGE benutzt wurde.
-  // Spiegelt exakt die emittierte STEP-Topologie wider (inkl. Effekt von
-  // projectOntoPlane/simplifyLoop, die Kanten auseinanderdriften lassen können).
-  let boundaryEdges = 0, nonManifoldEdges = 0, orientationDefects = 0;
-  for (const { fwd, rev } of edgeUse.values()) {
-    const total = fwd + rev;
-    if (total === 1) boundaryEdges++;
-    else if (total > 2) nonManifoldEdges++;
-    else if (total === 2 && (fwd !== 1 || rev !== 1)) orientationDefects++; // {2,0} oder {0,2}
-  }
-  const report = {
-    faceCount: allFaceIds.length,
-    edgeCount: edgeUse.size,
-    boundaryEdges,
-    nonManifoldEdges,
-    orientationDefects,
-    watertight: boundaryEdges === 0 && nonManifoldEdges === 0 && orientationDefects === 0
+    // Flachflächen (Innen-Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert).
+    for (const { outer, inner, normal, centroid } of faceDefsArg) {
+      const outerOe = buildLoopEdges(outer);
+      if (outerOe.length < 3) continue;
+      const bounds = [addFaceOuterBound(addEdgeLoop(outerOe))];
+      for (const innerLoop of inner) {
+        if (innerLoop.circleRim) {
+          const rim = innerLoop.circleRim;
+          const ce = getOrCreateCircleEdge(rim.rimKey, rim);
+          useCircle(rim.rimKey, true); // Flachfläche nutzt den Kreis .T. (Gegenrichtung zum Mantel)
+          bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ce.ecId, true)])));
+          continue;
+        }
+        const innerOe = buildLoopEdges(innerLoop);
+        if (innerOe.length < 3) continue;
+        bounds.push(addFaceBound(addEdgeLoop(innerOe)));
+      }
+      const placId = addAxis2Placement3D(centroid, normal, computeRefDir(normal));
+      faceIds.push(addAdvancedFace(bounds, addPlane(placId), true));
+    }
+
+    // Zylinder-Mantelflächen (nahtlos: 1 CYLINDRICAL_SURFACE, 2 volle Kreis-Bounds).
+    for (const plan of plans) {
+      const r0 = plan.rims[0];
+      const cylPlac = addAxis2Placement3D(plan.surfCenter, r0.axis, r0.refDir);
+      const cylSurf = addCylindricalSurface(cylPlac, r0.radius);
+      const bounds = [];
+      for (let r = 0; r < plan.rims.length; r++) {
+        const rim = plan.rims[r];
+        const ce = getOrCreateCircleEdge(rim.rimKey, rim);
+        useCircle(rim.rimKey, false); // Mantel nutzt den Kreis .F.
+        const loopId = addEdgeLoop([addOrientedEdge(ce.ecId, false)]);
+        bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
+      }
+      faceIds.push(addAdvancedFace(bounds, cylSurf, true));
+    }
+
+    // Wasserdicht-Verdikt: Linien-Kanten (edgeUse) UND Kreis-Kanten (circleUse) nach denselben
+    // Regeln zählen (1× = Randkante, >2 = non-manifold, 2 aber nicht 1fwd/1rev = Orientierungsfehler).
+    let bE = 0, nmE = 0, oD = 0;
+    const tally = (fwd, rev) => {
+      const total = fwd + rev;
+      if (total === 1) bE++;
+      else if (total > 2) nmE++;
+      else if (total === 2 && (fwd !== 1 || rev !== 1)) oD++;
+    };
+    for (const u of edgeUse.values()) tally(u.fwd, u.rev);
+    for (const u of circleUse.values()) tally(u.fwd, u.rev);
+    return {
+      faceIds,
+      report: {
+        faceCount: faceIds.length,
+        edgeCount: edgeUse.size + circleUse.size,
+        boundaryEdges: bE, nonManifoldEdges: nmE, orientationDefects: oD,
+        watertight: bE === 0 && nmE === 0 && oD === 0,
+        boresConverted: plans.length,
+      },
+    };
   };
+
+  let asm = assemble(faceDefs, finalPlans);
+  // Globaler Schutz: öffnet die analytische Umwandlung die Hülle, wird ALLES facettiert neu gebaut
+  // → die wasserdichte Baseline kann durch den Zylinder-Export nie regressieren.
+  if (asm.report.boresConverted > 0 && !asm.report.watertight) {
+    asm = assemble(buildFaceDefs(null), []);
+  }
+  const allFaceIds = asm.faceIds;
+  const report = asm.report;
+  if (allFaceIds.length < 2) return null;
 
   // ---- Step 4: Units + context ----
   const lenUnitId = id++;
