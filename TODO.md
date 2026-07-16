@@ -95,9 +95,16 @@ Kreis-Kanten teilen.
   Konvertierungen intakt. fischerEbike: Erkennung 6→10 Bohrungen (Segmente der gebogenen Bohrung),
   Konvertierung weiter 0 (Mündungen auf GEKRÜMMTEN Flächen — kein koaxialer Flach-Kreis vorhanden).
   Cache-Buster: primitive-recognition `?v=9`, worker `?v=12`, exporters `?v=22`.
+- [ ] **fischerEbike-Konvertierung — gemessener Blocker (2026-06-16, exakte Achsen):** Pro Bohr-Ende
+  nach koaxialen flachen Mündungs-Kreisen gesucht: **die meisten Enden haben KEINEN** (Mündung öffnet
+  auf gekrümmte Fläche oder in den gebogenen Kanal); wo einer existiert, ist er **exzentrisch/oval**
+  (ecc 0.24–4.7 mm bei R2.5; Bohrungen real 13–21° zur Mündungsfläche geneigt — kein Messfehler mehr).
+  Kein einziges Loch hat an BEIDEN Enden einen flachen Kreis → Fase/Kegel hat nichts zum Anbinden.
+  Facet-Rand-Zylinder scheitert in occt (belegt). **Konsequenz: Der Weg für solche Teile ist das
+  Body-Defeaturing** — erst die KÖRPER-Verrundungen entfernen (→ Mündungsflächen werden flach+kreisrund),
+  dann greift die bestehende Loch-Konvertierung. = der geplante Remove-Fillet-Toggle, nächster großer Bau.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
-  (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert. Ebenso offen:
-  Remove-Fillet-**Toggle** (UI) — aktuell ersetzt der Export Mündungs-Verrundungen implizit durch Fasen.
+  (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
   Check), aber noch nicht als `CONICAL_SURFACE`/`SPHERICAL_SURFACE` erkannt. Analoger Fit (Halbwinkel/Zentrum).
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
