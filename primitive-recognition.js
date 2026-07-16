@@ -255,10 +255,267 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     return region;
   };
 
+  // Validierung einer Kandidaten-Region — EXAKT die bisherige Gate-Sequenz, aber ohne
+  // Seiteneffekte (kein visited/failRegion), damit sie zweimal laufen kann: erst auf der
+  // vollen Region (Verhalten wie bisher), bei Kontaminations-Scheitern erneut auf dem
+  // extrahierten Zylinder-Kern (Rettungspfad für verrundungs-umgebene Bohrungen).
+  const validateRegion = (regionArr, modelIn) => {
+    if (regionArr.length < MIN_TRIS) return { ok: false, reason: 'tris' };
+    const verts = [];
+    for (const ti of regionArr) for (const vv of tris[ti].v) verts.push(vv);
+    const circ = fitCircleInPlane(verts, modelIn.axis);
+    if (!circ) return { ok: false, reason: 'fit' };
+    const r = circ.radius;
+    if (!(r >= MIN_RADIUS && r <= MAX_RADIUS)) return { ok: false, reason: 'radius' };
+    if (circ.meanDev > Math.max(0.08, MANTEL_MEAN * r)) return { ok: false, reason: 'meandev' };
+    if (circ.maxDev  > Math.max(0.5,  MANTEL_MAX  * r)) return { ok: false, reason: 'maxdev' };
+    // Normalen müssen ≥2D streuen (sonst flach): mittlerer Eigenwert relevant
+    const vls = modelIn.values;
+    if (!(vls[2] > 0) || vls[1] / vls[2] < EIGEN_MID) return { ok: false, reason: 'eigen' };
+    const axis = modelIn.axis, axisPoint = circ.center;
+    // Zylinder-vs-Kegel/Kugel (lokal, billig): Normalen eines echten Zylinders stehen ⊥ zur Achse.
+    let s2 = 0; for (const ti of regionArr) { const d = dot(tris[ti].n, axis); s2 += d * d; }
+    if (Math.sqrt(s2 / regionArr.length) > AXIS_RMS_MAX) return { ok: false, reason: 'axisrms' };
+    // Konizitäts-Test (global, fängt auch dünne Kegel-Scheiben): der Abstand zur Achse darf
+    // entlang der Achse nicht systematisch driften (Kegel: d(radius)/d(achse) = tan(Halbwinkel)).
+    {
+      let st = 0, sp = 0, stt = 0, stp = 0; const nN = verts.length;
+      for (const vv of verts) {
+        const t = dot(sub(vv, circ.center), axis);
+        const pd = perpDist(vv, circ.center, axis);
+        st += t; sp += pd; stt += t * t; stp += t * pd;
+      }
+      const den = nN * stt - st * st;
+      const slope = Math.abs(den) > 1e-9 ? (nN * stp - st * sp) / den : 0;
+      if (Math.abs(slope) > TAPER_MAX) return { ok: false, reason: 'taper' };
+    }
+    const cov = coverageDeg(verts, axisPoint, axis);
+    if (cov < MIN_COV) return { ok: false, reason: 'coverage' };
+    const full = cov >= FULL_COV;
+    // Krümmungs-Rand-Test für TEIL-Zylinder (Fillets): müssen von EBENEN Flächen begrenzt sein,
+    // nicht von weiterer gekrümmter Fläche → verwirft osculating gefittete Kegel-Scheiben.
+    if (!full) {
+      const regSet = new Set(regionArr);
+      const seen = new Set();
+      let flatN = 0, curvedN = 0;
+      for (const ti of regionArr) {
+        for (const nb of adj[ti]) {
+          if (regSet.has(nb) || seen.has(nb)) continue;
+          seen.add(nb);
+          let maxAng = 0;
+          for (const nn of adj[nb]) {
+            if (regSet.has(nn)) continue; // Region-seitige Naht ignorieren
+            const ang = Math.acos(Math.min(1, Math.abs(dot(tris[nb].n, tris[nn].n))));
+            if (ang > maxAng) maxAng = ang;
+          }
+          if (maxAng < FLAT_NB_RAD) flatN++; else curvedN++;
+        }
+      }
+      if (curvedN > flatN) return { ok: false, reason: 'curvedboundary' };
+    }
+    return { ok: true, verts, circ, r, axis, axisPoint, cov, full };
+  };
+
+  // Kern-Extraktion (Rettungspfad): Der grow zieht an Loch-Mündungen die ersten VERRUNDUNGS-
+  // Facetten mit hinein (dort noch ≈Radius, Normale fast ⊥ Achse) → Fit kontaminiert →
+  // Region fällt fälschlich als „Kegel" durch. Hier wird die Region iterativ auf den sauberen
+  // Zylinder-Kern getrimmt (streng ⊥ Normale + kleines Radial-Residuum) und neu gefittet.
+  const CORE_PERP = 0.12; // strenger als AXIS_PERP (0.26): schließt Fillet-Facetten aus
+  const extractCylinderCore = (regionArr, modelIn) => {
+    // Min-ρ-Band-Trimmen: Bei einer LOCH-Mündung krümmt die Verrundung IMMER nach außen
+    // (ρ ≥ R) — die Zylinder-Wand ist die Facetten-Population am MINIMALEN Achsabstand.
+    // Mehrheits-/Quantil-Trimmen versagt hier, weil die Wand bei tiefen Verrundungen die
+    // MINDERHEIT ist (Fillet-Oskulations-Fits gewinnen, empirisch beobachtet). Das Min-ρ-Band
+    // findet die Wand trotzdem; die PCA einer beliebigen WAND-Teilmenge liefert die wahre
+    // Achse exakt (Wand-Normalen liegen in der Ebene ⊥ Achse) → Iteration entkippt die Achse.
+    let m = modelIn;
+    for (let it = 0; it < 4; it++) {
+      const rhos = regionArr.map(ti => {
+        let s = 0; for (const vv of tris[ti].v) s += perpDist(vv, m.axisPoint, m.axis);
+        return { ti, rho: s / 3, s: Math.abs(dot(tris[ti].n, m.axis)) };
+      }).sort((a, b) => a.rho - b.rho);
+      const rhoLo = rhos[Math.floor(rhos.length * 0.1)].rho;
+      const band = Math.max(0.12, 0.05 * rhoLo);
+      const cand = [];
+      for (const x of rhos) { if (x.rho <= rhoLo + band && x.s <= AXIS_PERP) cand.push(x.ti); }
+      if (cand.length < MIN_TRIS) return null;
+      const { axis: ax, values } = pcaAxis(cand.map(ti => tris[ti].n));
+      const verts = [];
+      for (const ti of cand) for (const vv of tris[ti].v) verts.push(vv);
+      const circ = fitCircleRobust(verts, ax);
+      if (!circ || !(circ.radius >= MIN_RADIUS && circ.radius <= MAX_RADIUS)) return null;
+      m = { axis: ax, axisPoint: circ.center, radius: circ.radius, circ, values };
+    }
+    // Finaler harter Kern: streng ⊥ Normale + enges Radial-Residuum (schließt Fillet-Ringe aus).
+    const tol = Math.max(0.08, 0.05 * m.radius);
+    const hard = regionArr.filter(ti =>
+      Math.abs(dot(tris[ti].n, m.axis)) <= CORE_PERP &&
+      tris[ti].v.every(vv => Math.abs(perpDist(vv, m.axisPoint, m.axis) - m.radius) <= tol));
+    if (hard.length < MIN_TRIS) return null;
+    const { axis: axH, values: valsH } = pcaAxis(hard.map(ti => tris[ti].n));
+    const vertsH = [];
+    for (const ti of hard) for (const vv of tris[ti].v) vertsH.push(vv);
+    const circH = fitCircleRobust(vertsH, axH);
+    if (!circH || !(circH.radius >= MIN_RADIUS && circH.radius <= MAX_RADIUS)) return null;
+    const mH = { axis: axH, axisPoint: circH.center, radius: circH.radius, circ: circH, values: valsH };
+    // Anti-Kugel-Wächter: die WEGGETRIMMTEN Facetten müssen nach AUSSEN krümmen (Loch-Mündungs-
+    // Fillet: ρ ≥ R) — krümmen sie nach INNEN (ρ < R), ist die Region ein Kugel-Äquator-Band
+    // (sphere_full/hemisphere dürfen nicht als „Bohrung" durchrutschen).
+    const coreSet = new Set(hard);
+    let s = 0, n = 0;
+    for (const ti of regionArr) {
+      if (coreSet.has(ti)) continue;
+      for (const vv of tris[ti].v) { s += perpDist(vv, mH.axisPoint, mH.axis) - mH.radius; n++; }
+    }
+    // Schwelle bewusst ENG (0.4% von r): ein Kugel-Äquator-Band krümmt nur sanft nach innen
+    // (−1.8% bei ±15°-Band) und rutschte bei 2% durch (sphere_full-Regression). Loch-Mündungs-
+    // Fillets krümmen nach AUSSEN (positiv) und sind von der Schwelle gar nicht betroffen.
+    if (n && s / n < -Math.max(0.03, 0.004 * mH.radius)) return null; // nach innen → Kugel/Tonne
+    return { core: hard, model: mH };
+  };
+
   const visited = new Uint8Array(T);
+  // `claimed` ⊂ `visited`: nur Facetten, die zu einem AKZEPTIERTEN Primitiv gehören.
+  // Fehlschlag-Verbrauch (failRegion) setzt nur `visited` (Anti-Blowup fürs Seeding) —
+  // der Rettungs-Regrow darf solche Facetten ZURÜCKHOLEN (sonst hungern Junk-Regionen
+  // die Bohrungs-Wand aus, bevor je ein sauberes Modell entsteht).
+  const claimed = new Uint8Array(T);
   const primitives = [];
   let bores = 0, fillets = 0;
 
+  // Rettungspfad (gemeinsam für Phase 1 + 2): Kern entkontaminieren → mit dem sauberen
+  // Modell vom Seed aus NEU wachsen (Regrow blockiert nur auf `claimed` — fehlschlag-
+  // verbrauchte Facetten sind zurückholbar) → validieren, notfalls nochmals kern-trimmen.
+  // Nur VOLLE Bohrungen werden gerettet: Teil-Zylinder-Rettung erzeugt Junk-„Fillets"
+  // aus Torus-Patches (empirisch beobachtet), Bohrungen sind immer 360°.
+  const RESCUE_REASONS = new Set(['meandev', 'maxdev', 'axisrms', 'taper']);
+  const tryRescue = (seed, region, model, v) => {
+    if (!RESCUE_REASONS.has(v.reason)) return null;
+    const ce = extractCylinderCore(region, model);
+    if (!ce) return null;
+    const distTol2 = Math.max(DIST_ABSTOL, DIST_RELTOL * ce.model.radius);
+    const region2 = grow(seed, ce.model.axisPoint, ce.model.axis, ce.model.radius, distTol2, claimed);
+    if (region2.length < MIN_TRIS) return null;
+    const { axis: ax2, values: vals2 } = pcaAxis(region2.map(ti => tris[ti].n));
+    const verts2 = [];
+    for (const ti of region2) for (const vv of tris[ti].v) verts2.push(vv);
+    const circ2 = fitCircleRobust(verts2, ax2);
+    if (!circ2 || !(circ2.radius >= MIN_RADIUS && circ2.radius <= MAX_RADIUS)) return null;
+    const model2 = { axis: ax2, axisPoint: circ2.center, radius: circ2.radius, circ: circ2, values: vals2 };
+    let v2 = validateRegion(region2, model2);
+    let tagged2 = region2;
+    // Kern-Politur IMMER bevorzugen, wenn der Kern eigenständig als volle Bohrung validiert:
+    // der Regrow sammelt grenzwertige Fillet-Ring-Facetten teilweise mit ein (fleckig) —
+    // das verwebt die Rand-Loops der getaggten Fläche (1 Loop statt 2 Kreise) und bricht
+    // die Kegel-/Kreis-Konvertierung im Exporter. Der polierte Kern hat saubere Ränder.
+    const ce2 = extractCylinderCore(region2, model2);
+    if (ce2) {
+      const v3 = validateRegion(ce2.core, ce2.model);
+      if (v3.ok && v3.full) { v2 = v3; tagged2 = ce2.core; }
+    }
+    if (!v2.ok || !v2.full) return null;
+    return { v: v2, tagged: tagged2, consume: region.concat(region2) };
+  };
+
+  // Primitiv übernehmen: taggen (nur die Zylinderfläche → `claimed`, unantastbar) und
+  // verbrauchen (`visited`: die ganze Region — schirmt weggetrimmte Fillet-Facetten
+  // gegen Junk-Seeds ab).
+  const acceptPrim = (v, tagged, consumeArr) => {
+    let tMin = Infinity, tMax = -Infinity;
+    for (const vv of v.verts) { const tt = dot(sub(vv, v.circ.center), v.axis); if (tt < tMin) tMin = tt; if (tt > tMax) tMax = tt; }
+    const prim = {
+      type: 'cylinder', kind: v.full ? 'bore' : 'fillet', full: v.full,
+      id: primitives.length, axis: v.axis, axisPoint: add(v.circ.center, scale(v.axis, tMin)), radius: v.r, height: tMax - tMin,
+      coverageDeg: v.cov, triCount: tagged.length,
+      meanDevMm: v.circ.meanDev
+    };
+    primitives.push(prim);
+    if (v.full) bores++; else fillets++;
+    for (const ti of tagged) { claimed[ti] = 1; normalGroups[tris[ti].g].primitive = prim; }
+    for (const ti of consumeArr) visited[ti] = 1;
+  };
+
+  // ── Phase 1: Kanten-Achsen-Seeding für VOLLE Bohrungen ──────────────────────
+  // Die Scharnier-Kante zwischen zwei benachbarten Zylinder-Facetten liegt EXAKT parallel zur
+  // Achse (gilt für jedes Prisma — unabhängig von Tessellierungs-Feinheit und Dihedralwinkel).
+  // Damit hat jeder echte Zylinder ein exaktes lokales Achsen-Estimate, BEVOR kontaminierte
+  // Bootstrap-PCA-Regionen (Phase 2) wachsen und die Wand in Splitter fressen können — bei
+  // fillet-dominierten Löchern (tiefe Verrundung, dünne Wand) ist genau das der Killer:
+  // die Wand wird sonst in ~12er-Häppchen von Junk-Regionen verbraucht (empirisch belegt).
+  // Phase 1 verbraucht bei Fehlschlag NICHTS und akzeptiert nur volle 360°-Bohrungen;
+  // alles andere (Teil-Zylinder/Fillets, Sonderfälle) behandelt Phase 2 exakt wie bisher.
+  for (let seed = 0; seed < T; seed++) {
+    if (visited[seed]) continue;
+    let nb = -1, bestC = -1;
+    for (const m of adj[seed]) {
+      if (visited[m]) continue;
+      const c = dot(tris[seed].n, tris[m].n);
+      if (c >= SEED_MIN_COS && c <= SEED_MAX_COS && c > bestC) { bestC = c; nb = m; }
+    }
+    if (nb < 0) continue;
+    // Gemeinsame Kante von seed↔nb → Achsrichtung
+    const shared = [];
+    for (const va of tris[seed].v) {
+      for (const vb of tris[nb].v) { if (key(va) === key(vb)) { shared.push(va); break; } }
+    }
+    if (shared.length !== 2) continue;
+    const axis0 = norm(sub(shared[1], shared[0]));
+    // Achsen-beschränkter Bootstrap-Patch (nur Facetten mit Normale ⊥ axis0) für den Radius-Fit
+    const boot = [];
+    {
+      const gb = ++gen;
+      let layer = [seed]; stamp[seed] = gb;
+      for (let depth = 0; depth < BOOT_DEPTH && layer.length && boot.length < BOOT_MAX; depth++) {
+        const next = [];
+        for (const cur of layer) {
+          boot.push(cur);
+          for (const m of adj[cur]) {
+            if (stamp[m] === gb || visited[m]) continue;
+            if (Math.abs(dot(tris[m].n, axis0)) <= AXIS_PERP) { stamp[m] = gb; next.push(m); }
+          }
+        }
+        layer = next;
+      }
+    }
+    if (boot.length < 4) continue;
+    const bverts = []; for (const ti of boot) for (const vv of tris[ti].v) bverts.push(vv);
+    const circ0 = fitCircleRobust(bverts, axis0);
+    if (!circ0 || !(circ0.radius >= MIN_RADIUS && circ0.radius <= MAX_RADIUS)) continue;
+    // Wachsen + Nachfitten (enge Toleranz — die Achse ist ja exakt)
+    let region = grow(seed, circ0.center, axis0, circ0.radius, Math.max(DIST_ABSTOL, DIST_RELTOL * circ0.radius), visited);
+    if (region.length < MIN_TRIS) continue;
+    let model = null, bad = false;
+    for (let pass = 0; pass < 2; pass++) {
+      const { axis: axF, values } = pcaAxis(region.map(ti => tris[ti].n));
+      const verts = [];
+      for (const ti of region) for (const vv of tris[ti].v) verts.push(vv);
+      const circ = fitCircleRobust(verts, axF);
+      if (!circ || !(circ.radius >= MIN_RADIUS && circ.radius <= MAX_RADIUS)) { bad = true; break; }
+      model = { axis: axF, axisPoint: circ.center, radius: circ.radius, circ, values };
+      region = grow(seed, model.axisPoint, model.axis, model.radius, Math.max(DIST_ABSTOL, DIST_RELTOL * circ.radius), visited);
+      if (region.length < MIN_TRIS) { bad = true; break; }
+    }
+    if (bad || !model) continue;
+    let v = validateRegion(region, model);
+    let tagged = region;
+    if (!v.ok) {
+      const resc = tryRescue(seed, region, model, v);
+      if (resc) { v = resc.v; tagged = resc.tagged; region = resc.consume; }
+    }
+    if (!v.ok || !v.full) continue; // Phase 1: nur volle Bohrungen, kein Verbrauch bei Fehlschlag
+    if (tagged === region) {
+      // Erstversuch ohne Rettung → Kern-Politur (falls valide): entfernt fleckig mitgewachsene
+      // Fillet-Facetten von der getaggten Fläche → saubere Rand-Kreise für den Exporter.
+      const ceP = extractCylinderCore(region, model);
+      if (ceP) {
+        const vP = validateRegion(ceP.core, ceP.model);
+        if (vP.ok && vP.full) { v = vP; tagged = ceP.core; }
+      }
+    }
+    acceptPrim(v, tagged, region);
+  }
+
+  // ── Phase 2: Bootstrap-PCA-Seeding (bisheriger Pfad, unverändert) ───────────
   for (let seed = 0; seed < T; seed++) {
     if (visited[seed]) continue;
     // bestgekrümmten freien Nachbarn finden (Saat-Kante)
@@ -319,85 +576,17 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // Bei Erfolg markiert die Tagging-Schleife die Region; nur dann werden Gruppen getaggt.
     const failRegion = () => { for (const ti of region) visited[ti] = 1; };
 
-    // Validieren
-    if (region.length < MIN_TRIS) { failRegion(); continue; }
-    const verts = [];
-    for (const ti of region) for (const vv of tris[ti].v) verts.push(vv);
-    const circ = fitCircleInPlane(verts, model.axis);
-    if (!circ) { failRegion(); continue; }
-    const r = circ.radius;
-    if (!(r >= MIN_RADIUS && r <= MAX_RADIUS)) { failRegion(); continue; }
-    if (circ.meanDev > Math.max(0.08, MANTEL_MEAN * r)) { failRegion(); continue; }
-    if (circ.maxDev  > Math.max(0.5,  MANTEL_MAX  * r)) { failRegion(); continue; }
-    // Normalen müssen ≥2D streuen (sonst flach): mittlerer Eigenwert relevant
-    const vls = model.values;
-    if (!(vls[2] > 0) || vls[1] / vls[2] < EIGEN_MID) { failRegion(); continue; }
-
-    const axis = model.axis, axisPoint = circ.center;
-
-    // Zylinder-vs-Kegel/Kugel (lokal, billig): Normalen eines echten Zylinders stehen ⊥ zur Achse.
-    let s2 = 0; for (const ti of region) { const d = dot(tris[ti].n, axis); s2 += d * d; }
-    if (Math.sqrt(s2 / region.length) > AXIS_RMS_MAX) { failRegion(); continue; }
-
-    // Konizitäts-Test (global, fängt auch dünne Kegel-Scheiben): der Abstand zur Achse darf
-    // entlang der Achse nicht systematisch driften. Bei einem Kegel ist d(radius)/d(achse) =
-    // tan(Halbwinkel) ≠ 0 — die Steigung ist skaleninvariant, anders als der lokale RMS oben.
-    {
-      let st = 0, sp = 0, stt = 0, stp = 0; const nN = verts.length;
-      for (const vv of verts) {
-        const t = dot(sub(vv, circ.center), axis);
-        const pd = perpDist(vv, circ.center, axis);
-        st += t; sp += pd; stt += t * t; stp += t * pd;
-      }
-      const den = nN * stt - st * st;
-      const slope = Math.abs(den) > 1e-9 ? (nN * stp - st * sp) / den : 0;
-      if (Math.abs(slope) > TAPER_MAX) { failRegion(); continue; } // Kegel/Taper
+    // Validieren — erster Durchlauf exakt wie bisher (bestehende Fälle bleiben identisch);
+    // bei Kontaminations-typischem Scheitern der Rettungspfad (nur volle Bohrungen).
+    let v = validateRegion(region, model);
+    let tagged = region;
+    if (!v.ok) {
+      const resc = tryRescue(seed, region, model, v);
+      if (resc) { v = resc.v; tagged = resc.tagged; region = resc.consume; }
     }
+    if (!v.ok) { failRegion(); continue; }
 
-    const cov = coverageDeg(verts, axisPoint, axis);
-    if (cov < MIN_COV) { failRegion(); continue; }
-    const full = cov >= FULL_COV;
-
-    // Krümmungs-Rand-Test für TEIL-Zylinder (Fillets): müssen von EBENEN Flächen begrenzt sein,
-    // nicht von weiterer gekrümmter Fläche → verwirft osculating gefittete Kegel-Scheiben. Nur für
-    // Teil-Zylinder, da er volle Bohrungen mit nicht-perfekt-ebenen Mündungen fälschlich verwerfen kann.
-    // (Trade-off: eine dünne Kugel-Äquatorscheibe kann so als „Bohrung" durchrutschen — seltener Fall.)
-    if (!full) {
-      const regSet = new Set(region);
-      const seen = new Set();
-      let flatN = 0, curvedN = 0;
-      for (const ti of region) {
-        for (const nb of adj[ti]) {
-          if (regSet.has(nb) || seen.has(nb)) continue;
-          seen.add(nb);
-          let maxAng = 0;
-          for (const nn of adj[nb]) {
-            if (regSet.has(nn)) continue; // Region-seitige Naht ignorieren
-            const ang = Math.acos(Math.min(1, Math.abs(dot(tris[nb].n, tris[nn].n))));
-            if (ang > maxAng) maxAng = ang;
-          }
-          if (maxAng < FLAT_NB_RAD) flatN++; else curvedN++;
-        }
-      }
-      if (curvedN > flatN) { failRegion(); continue; } // von Krümmung begrenzt → Kegel/Kugel-Scheibe
-    }
-
-    // Höhe + End-Stützpunkt entlang der Achse (für Overlay)
-    let tMin = Infinity, tMax = -Infinity;
-    for (const vv of verts) { const tt = dot(sub(vv, circ.center), axis); if (tt < tMin) tMin = tt; if (tt > tMax) tMax = tt; }
-    const height = tMax - tMin;
-    const endPoint = add(circ.center, scale(axis, tMin));
-
-    const prim = {
-      type: 'cylinder', kind: full ? 'bore' : 'fillet', full,
-      id: primitives.length, axis, axisPoint: endPoint, radius: r, height,
-      coverageDeg: cov, triCount: region.length,
-      meanDevMm: circ.meanDev
-    };
-    primitives.push(prim);
-    if (full) bores++; else fillets++;
-
-    for (const ti of region) { visited[ti] = 1; normalGroups[tris[ti].g].primitive = prim; }
+    acceptPrim(v, tagged, region);
   }
 
   return {
