@@ -202,6 +202,10 @@ export function buildVolumeStepBrepV2(analysis) {
   // Jede normalGroup wird zu einer oder mehreren ADVANCED_FACE mit echten Polygon-Grenzen.
   const normalGroups = analysis?.normalGroups;
   if (!normalGroups?.length) return null;
+  // Defeaturing-Toggle (default AN): Verrundungen werden beim Export entfernt — Mündungs-
+  // Verrundungen → Kegel-Fase (Chamfer-Pfad), Gerade-Kanten-Verrundungen → scharfe Kante.
+  // OFF = Verrundungen bleiben (facettiert); nur exakte Direkt-Treffer konvertieren weiter.
+  const DEFEATURE = analysis?.defeature !== false;
 
   const entities = [];
   let id = 1;
@@ -441,6 +445,10 @@ export function buildVolumeStepBrepV2(analysis) {
     // Mindestens 1 Dreieck (3 Verts) — ein >=3-Dreiecke-Filter verwarf hier 2-Dreieck-
     // Planflächen (z.B. Würfelwände) und machte den V2-Export unvollständig (Bug 2026-06-12).
     if (!Array.isArray(normal) || verts.length < 3) return [];
+    // Degenerierte Gruppen (Null-Normale = ausschließlich kollineare/flächenlose Dreiecke,
+    // z.B. aus kaputten Tessellierern) überspringen — sie können keine Fläche bilden und
+    // würden sonst eine Müll-Fläche mit offenen Kanten emittieren.
+    if (Math.hypot(normal[0], normal[1], normal[2]) < 0.5) return [];
 
     const triCount = Math.floor(verts.length / 3);
 
@@ -709,8 +717,9 @@ export function buildVolumeStepBrepV2(analysis) {
       let hit = null;
       for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim)) { hit = inner; break; } } if (hit) break; }
       if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
-      // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX)
+      // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX) — nur mit Defeaturing-Toggle
       let cham = null;
+      if (!DEFEATURE) { okAll = false; break; }
       for (const fd of faceDefs) {
         for (const inner of fd.inner) {
           if (inner.circleRim || claimed.has(inner)) continue;
@@ -760,6 +769,169 @@ export function buildVolumeStepBrepV2(analysis) {
       const allV = [...fd.outer, ...fd.inner.flat()];
       return !allV.every(inZone);
     });
+  }
+
+  // ---- Body-Defeaturing: Gerade-Kanten-Verrundungen → scharfe Kante ----
+  // Erkannte Teil-Zylinder-Fillets (kind='fillet') zwischen genau ZWEI Ebenen werden entfernt:
+  // die Fillet-Facetten entfallen, die Rand-Vertices beider Nachbar-Ebenen wandern auf deren
+  // SCHNITTLINIE (= die scharfe Kante, die der Konstrukteur verrundet hat), End-Kappen-Bögen
+  // kollabieren auf den Eckpunkt. Vertex-Vereinheitlichung entlang der Linie (Union beider
+  // Seiten, snap-merge) verhindert T-Junctions. Konservative Guards überall — jede Unsauberkeit
+  // landet im Wasserdicht-Verdikt und der globale Fallback baut komplett facettiert neu.
+  let filletsDefeatured = 0;
+  {
+    const defeaturedGroups = new Set();
+    const filletById = new Map();
+    if (DEFEATURE) {
+      for (const group of normalGroups) {
+        const p = group.primitive;
+        if (p && p.type === 'cylinder' && p.kind === 'fillet' && p.full === false && Number.isFinite(p.radius) && p.radius > 0) {
+          let e = filletById.get(p.id);
+          if (!e) { e = { prim: p, groups: [] }; filletById.set(p.id, e); }
+          e.groups.push(group);
+        }
+      }
+    }
+    if (filletById.size) {
+      // 3x3-Löser (Cramer) für den Schnittlinien-Stützpunkt
+      const solve3 = (r1, b1, r2, b2, r3, b3) => {
+        const det = (m) =>
+          m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+          m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+          m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        const M = [r1, r2, r3];
+        const D = det(M);
+        if (Math.abs(D) < 1e-9) return null;
+        const col = (M2, ci, b) => M2.map((row, ri) => row.map((x, cj) => (cj === ci ? b[ri] : x)));
+        const b = [b1, b2, b3];
+        return [det(col(M, 0, b)) / D, det(col(M, 1, b)) / D, det(col(M, 2, b)) / D];
+      };
+      // Kanten-Schlüssel → Gruppen (einmalig über alle Gruppen, für Nachbarschaft)
+      const edgeToGroups = new Map();
+      for (const group of normalGroups) {
+        const vs = group.vertices, tc = Math.floor(vs.length / 3);
+        for (let t = 0; t < tc; t++) {
+          const tri = [vs[t * 3], vs[t * 3 + 1], vs[t * 3 + 2]];
+          for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
+            const k = edgeKeyFn(a, b);
+            let s = edgeToGroups.get(k); if (!s) { s = new Set(); edgeToGroups.set(k, s); }
+            s.add(group);
+          }
+        }
+      }
+      const defeatureOne = (entry) => {
+        const prim = entry.prim;
+        const fAxis = _norm3(prim.axis), fAp = prim.axisPoint, rf = prim.radius;
+        const own = new Set(entry.groups);
+        // Rand-Kanten des Streifens → Nachbar-Gruppen (Gewicht = geteilte Kanten)
+        const ec = new Map();
+        for (const g of entry.groups) {
+          const vs = g.vertices, tc = Math.floor(vs.length / 3);
+          for (let t = 0; t < tc; t++) {
+            const tri = [vs[t * 3], vs[t * 3 + 1], vs[t * 3 + 2]];
+            for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
+              const k = edgeKeyFn(a, b); ec.set(k, (ec.get(k) || 0) + 1);
+            }
+          }
+        }
+        const nbWeight = new Map();
+        for (const [k, c] of ec) {
+          if (c !== 1) continue;
+          const gs = edgeToGroups.get(k); if (!gs) continue;
+          for (const g of gs) if (!own.has(g) && !defeaturedGroups.has(g)) nbWeight.set(g, (nbWeight.get(g) || 0) + 1);
+        }
+        // Seiten-Nachbarn (Normale ⊥ Fillet-Achse) in Orientierungs-Cluster; Kappen (∥ Achse)
+        // sind erlaubt; SCHRÄGE Nachbarn dazwischen → unsauberer Fall → skip.
+        const clusters = [];
+        for (const [g, w] of nbWeight) {
+          const ng = _norm3(g.normal);
+          const dAx = Math.abs(_dot3(ng, fAxis));
+          if (dAx > 0.3 && dAx < 0.8) return false;
+          if (dAx >= 0.8) continue; // Kappe
+          let cl = null;
+          for (const c of clusters) if (Math.abs(_dot3(c.n, ng)) >= 0.99) { cl = c; break; }
+          if (!cl) { cl = { n: ng, w: 0, ref: g }; clusters.push(cl); }
+          cl.w += w; if (g.vertices.length > cl.ref.vertices.length) cl.ref = g;
+        }
+        if (clusters.length !== 2) return false; // gekrümmte Umgebung (viele Orientierungen) → v2
+        const [A, B] = clusters;
+        if (Math.abs(_dot3(A.n, B.n)) > Math.cos(20 * Math.PI / 180)) return false; // fast koplanar
+        // Scharfe Kante = Schnittlinie der beiden Ebenen (Richtung ≈ Fillet-Achse)
+        const d0 = _cross3(A.n, B.n);
+        const dl = Math.hypot(d0[0], d0[1], d0[2]);
+        if (dl < 1e-6) return false;
+        const dir = [d0[0] / dl, d0[1] / dl, d0[2] / dl];
+        if (Math.abs(_dot3(dir, fAxis)) < Math.cos(15 * Math.PI / 180)) return false;
+        const planeOff = (cl) => { const vs = cl.ref.vertices; let s = 0; for (const v of vs) s += _dot3(cl.n, v); return s / vs.length; };
+        const p0 = solve3(A.n, planeOff(A), B.n, planeOff(B), dir, _dot3(dir, fAp));
+        if (!p0) return false;
+        // Streifen-Ausdehnung entlang der Linie
+        let tLo = Infinity, tHi = -Infinity;
+        for (const g of entry.groups) for (const v of g.vertices) {
+          const t = _dot3(_sub3(v, p0), dir); if (t < tLo) tLo = t; if (t > tHi) tHi = t;
+        }
+        if (!(tHi > tLo)) return false;
+        const tolM = Math.max(0.1, 0.06 * rf);
+        const onStrip = (v) => {
+          const w = _sub3(v, fAp), al = _dot3(w, fAxis);
+          const perp = Math.hypot(w[0] - fAxis[0] * al, w[1] - fAxis[1] * al, w[2] - fAxis[2] * al);
+          if (Math.abs(perp - rf) > tolM) return false;
+          const t = _dot3(_sub3(v, p0), dir);
+          return t >= tLo - 0.5 && t <= tHi + 0.5;
+        };
+        // Betroffene Loops + verschobene Indizes einsammeln
+        const affected = []; const allT = [];
+        for (const fd of faceDefs) {
+          if (own.has(fd.group) || defeaturedGroups.has(fd.group)) continue;
+          for (const loop of [fd.outer, ...fd.inner]) {
+            if (loop.circleRim) continue;
+            const moved = [];
+            for (let i = 0; i < loop.length; i++) if (onStrip(loop[i])) moved.push(i);
+            if (!moved.length) continue;
+            if (moved.length >= loop.length - 1) return false; // (fast) ganze Schleife auf dem Mantel
+            for (const i of moved) allT.push(_dot3(_sub3(loop[i], p0), dir));
+            affected.push({ loop, movedSet: new Set(moved) });
+          }
+        }
+        if (affected.length < 2 || allT.length < 4) return false;
+        // Kanonische Punkte entlang der Linie (Union A-Seite/B-Seite/Kappen, snap-merge 0.05mm)
+        allT.sort((a, b) => a - b);
+        const canonT = [];
+        for (const t of allT) { if (!canonT.length || t - canonT[canonT.length - 1] > 0.05) canonT.push(t); }
+        const canonPts = canonT.map(t => [p0[0] + dir[0] * t, p0[1] + dir[1] * t, p0[2] + dir[2] * t]);
+        const canonIdx = (t) => { let bi = 0, bd = Infinity; for (let i = 0; i < canonT.length; i++) { const d = Math.abs(canonT[i] - t); if (d < bd) { bd = d; bi = i; } } return bi; };
+        // Loops umschreiben: zusammenhängende Runs verschobener Vertices durch die kanonische
+        // Punktfolge im jeweiligen Spann ersetzen (Kappen-Bögen kollabieren auf 1 Punkt).
+        for (const { loop, movedSet } of affected) {
+          let start = -1;
+          for (let i = 0; i < loop.length; i++) if (!movedSet.has(i)) { start = i; break; }
+          if (start < 0) return false;
+          const n = loop.length;
+          const rot = loop.slice(start).concat(loop.slice(0, start));
+          const rotMoved = (i) => movedSet.has((i + start) % n);
+          const out = [];
+          let i = 0;
+          while (i < rot.length) {
+            if (!rotMoved(i)) { out.push(rot[i]); i++; continue; }
+            let j = i; while (j < rot.length && rotMoved(j)) j++;
+            const t1 = _dot3(_sub3(rot[i], p0), dir);
+            const t2 = _dot3(_sub3(rot[j - 1], p0), dir);
+            const i1 = canonIdx(Math.min(t1, t2)), i2 = canonIdx(Math.max(t1, t2));
+            let seq = canonPts.slice(i1, i2 + 1);
+            if (t1 > t2) seq = seq.slice().reverse();
+            out.push(...seq);
+            i = j;
+          }
+          loop.length = 0; loop.push(...out);
+        }
+        for (const g of entry.groups) defeaturedGroups.add(g);
+        return true;
+      };
+      for (const entry of filletById.values()) {
+        try { if (defeatureOne(entry)) filletsDefeatured++; } catch (_) { /* Guard */ }
+      }
+      if (defeaturedGroups.size) faceDefs = faceDefs.filter(fd => !defeaturedGroups.has(fd.group));
+    }
   }
 
   // ---- Step 2: Shared vertex + edge registry ----
@@ -944,10 +1116,13 @@ export function buildVolumeStepBrepV2(analysis) {
   };
 
   let asm = assemble(faceDefs, finalPlans);
-  // Globaler Schutz: öffnet die analytische Umwandlung die Hülle, wird ALLES facettiert neu gebaut
-  // → die wasserdichte Baseline kann durch den Zylinder-Export nie regressieren.
-  if (asm.report.boresConverted > 0 && !asm.report.watertight) {
+  asm.report.filletsDefeatured = filletsDefeatured;
+  // Globaler Schutz: öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
+  // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
+  // die wasserdichte Baseline kann dadurch nie regressieren.
+  if ((asm.report.boresConverted > 0 || filletsDefeatured > 0) && !asm.report.watertight) {
     asm = assemble(buildFaceDefs(null), []);
+    asm.report.filletsDefeatured = 0;
   }
   const allFaceIds = asm.faceIds;
   const report = asm.report;

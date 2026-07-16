@@ -103,6 +103,23 @@ Kreis-Kanten teilen.
   Facet-Rand-Zylinder scheitert in occt (belegt). **Konsequenz: Der Weg für solche Teile ist das
   Body-Defeaturing** — erst die KÖRPER-Verrundungen entfernen (→ Mündungsflächen werden flach+kreisrund),
   dann greift die bestehende Loch-Konvertierung. = der geplante Remove-Fillet-Toggle, nächster großer Bau.
+- [x] **Body-Defeaturing v1 + Toggle-Switch (2026-06-16)** — Gerade-Kanten-Verrundungen zwischen
+  ZWEI Ebenen werden beim Export durch die SCHARFE Schnittkante der Nachbar-Ebenen ersetzt:
+  Fillet-Facetten entfallen, Rand-Vertices beider Ebenen wandern auf die Schnittlinie (kanonische
+  Punkt-Union gegen T-Junctions), End-Kappen-Bögen kollabieren auf den Eckpunkt. Konservative
+  Guards (genau 2 Ebenen-Cluster, Winkel ≥20°, Linie ∥ Fillet-Achse, schräge Nachbarn → skip);
+  jede Unsauberkeit fängt das Wasserdicht-Verdikt + erweiterter globaler Fallback (jetzt auch bei
+  filletsDefeatured>0). **Bewiesen:** `block_edge_fillet.stl` (Block mit verrundeter Längskante,
+  hand-getaggt): 14 → 6 Flächen (scharfer Quader), wasserdicht, occt ok. Toggle AN/AUS verifiziert
+  (washer_filleted: 77 Flächen mit Fasen ↔ 652 facettiert). Regression 17/18 wasserdicht, alle occt-ok.
+  **UI:** Checkbox „Verrundungen entfernen (Fase/scharfe Kante)" in Panel 4 (default AN), Verdikt
+  aktualisiert live beim Umschalten. `exporters.js?v=23`.
+  **Offen:** (a) Die ERKENNUNG liefert auf synthetischen/degenerierten Prismen keine sauberen
+  Teil-Zylinder-Fillets (Bootstrap kreuzt Flächen; Umkreis-Degenerat bei 2-Dreieck-Flächen ohne
+  Innen-Vertices) → automatisches Feuern derzeit nur, wo die Erkennung Fillets korrekt taggt
+  (fischerEbike-Fillets haben gekrümmte Nachbarn → Guards skippen korrekt). Partial-Fillet-Härtung
+  = nächste Recognition-Etappe (analog zur Bohrungs-Härtung). (b) Ebene↔gekrümmt-Streifen (eBike-
+  Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
