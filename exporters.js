@@ -717,7 +717,11 @@ export function buildVolumeStepBrepV2(analysis) {
           const circ = loopAsCircle(inner, fd.normal, rim.axis, rim.center);
           if (!circ) continue;
           if (circ.radius <= rim.radius + 0.02 || circ.radius > rim.radius + CHAMFER_MAX) continue;
-          const dz = circ.meanT - rim.meanT;
+          // loopAsCircle misst meanT bereits RELATIV zum übergebenen rim.center — dz ist also
+          // direkt der Achsabstand des Flach-Kreises zur Rand-Ebene. (rim.meanT ist im Frame
+          // des Bohrungs-axisPoint gemessen — NICHT subtrahieren: Referenzrahmen-Mix, der den
+          // Chamfer-Pfad überall verhinderte.)
+          const dz = circ.meanT;
           if (Math.abs(dz) < CHAMFER_MIN || Math.abs(dz) > CHAMFER_MAX) continue;
           cham = { inner, circ, dz }; break;
         }

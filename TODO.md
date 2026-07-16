@@ -75,15 +75,29 @@ Kreis-Kanten teilen.
   Suche nach koaxialem Kreis R2>R im kleinen Achs-Abstand (`loopAsCircle`, CHAMFER_MAX=2.5) → Plan
   Zylinder + CONICAL_SURFACE-Kegel + Flach-Kreis; Fillet-Facetten in der Zone werden entfernt
   (`chamferZones`-Filter). Wasserdicht-Verdikt + 3-Ebenen-Fallback unverändert.
-- [ ] **VALIDIERUNG offen / blockiert** — der Kegel-Pfad hat in KEINEM Test ausgelöst (cone=0 überall):
-  (a) synthetische Fasen-Washer werden vom Zylinder-Detektor (`recognizePrimitives`) nicht erkannt
-  (Tuning-Empfindlichkeit, separat zu untersuchen); (b) fischerEbike-Fillets sind größer als CHAMFER_MAX
-  bzw. ihre Ränder bestehen attemptBore nicht (verrundungs-verschliffene Rim-Kreise). **Sicher** (kein
-  Regress, dormant, Fallback), aber unbewiesen. Nötig: reales Teil mit moderaten Fasen, ODER Recognition-
-  Tuning, ODER CHAMFER_MAX behutsam erhöhen + Ergebnis visuell prüfen. Echtes Teil OHNE Verrundung
-  konvertiert bereits sauber (samples/…(ohne rundungen).stl → 2 Zylinder).
+- [x] **Recognition-Härtung: verrundete Löcher werden erkannt (2026-06-15/16)** — `primitive-recognition.js`
+  um **Phase 1 (Kanten-Achsen-Seeding)** erweitert: die Scharnier-Kante zweier benachbarter Zylinder-
+  Facetten liegt EXAKT parallel zur Achse → exaktes lokales Achsen-Estimate BEVOR kontaminierte
+  Bootstrap-PCA-Regionen die dünne Wand in ~12er-Splitter fressen (empirisch belegte Todesursache bei
+  fillet-dominierten Löchern). Phase 1 verbraucht bei Fehlschlag NICHTS, akzeptiert nur volle Bohrungen;
+  Phase 2 = bisheriger Pfad unverändert. Dazu: **Rettungspfad** (validateRegion → extractCylinderCore
+  mit Min-ρ-Band-Trimmen [Loch-Fillets krümmen IMMER nach außen → Wand = Population am minimalen
+  Achsabstand] → Regrow mit sauberem Modell, blockiert nur auf `claimed` → Kern-Politur) und
+  **Anti-Kugel-Wächter** (weggetrimmte Facetten müssen nach außen krümmen; Schwelle 0.4%·r — bei 2%
+  rutschte sphere_full durch, Regression behoben). `visited`/`claimed` getrennt (Anti-Aushungern).
+- [x] **Chamfer-Konvertierung FUNKTIONIERT end-to-end (2026-06-16)** — Blocker war ein
+  **Referenzrahmen-Bug**: `dz = circ.meanT − rim.meanT` mischte Frames (loopAsCircle misst relativ
+  zum rim.center, rim.meanT relativ zum axisPoint) → Chamfer konnte NIE feuern. Fix: `dz = circ.meanT`.
+  **Ergebnis:** `washer_filleted` (graduelle Verrundung, fillet-dominiert 12:1) → **652→77 Faces,
+  1 CYLINDRICAL_SURFACE + 2 CONICAL_SURFACE (Fasen), wasserdicht, occt ok**; `washer_chamfered`
+  (45°-Fase) ebenso. Volle Regression (17 Samples, `tests/pipeline.cjs`): 16/17 wasserdicht (nur dino,
+  non-manifold Input), alle occt-ok, Kegel/Kugeln identisch zur Baseline, alle bisherigen
+  Konvertierungen intakt. fischerEbike: Erkennung 6→10 Bohrungen (Segmente der gebogenen Bohrung),
+  Konvertierung weiter 0 (Mündungen auf GEKRÜMMTEN Flächen — kein koaxialer Flach-Kreis vorhanden).
+  Cache-Buster: primitive-recognition `?v=9`, worker `?v=12`, exporters `?v=22`.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
-  (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
+  (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert. Ebenso offen:
+  Remove-Fillet-**Toggle** (UI) — aktuell ersetzt der Export Mündungs-Verrundungen implizit durch Fasen.
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
   Check), aber noch nicht als `CONICAL_SURFACE`/`SPHERICAL_SURFACE` erkannt. Analoger Fit (Halbwinkel/Zentrum).
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
