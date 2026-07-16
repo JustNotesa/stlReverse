@@ -1,5 +1,5 @@
 import { formatBytes, describeDetailLevel } from './utils.js';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=22';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=23';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=24';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=17';
@@ -46,6 +46,11 @@ let detailLevel    = detailSlider ? Number(detailSlider.value) : 70;
 
 const workerJobs     = new Map();
 let workerJobCounter = 0;
+
+// Defeaturing-Toggle: Verrundungen beim Export entfernen (Mündung → Kegel-Fase,
+// gerade Kanten-Verrundung → scharfe Kante). Aus = Verrundungen bleiben facettiert.
+const _defeatureOn = () => document.getElementById('defeature-toggle')?.checked !== false;
+const withDefeature = (a) => (a ? { ...a, defeature: _defeatureOn() } : a);
 
 const WORKER_TIMEOUT_MS = 60000;
 
@@ -191,7 +196,7 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
     // Wasserdichtigkeits-Verdikt sofort anzeigen (rein geometrisch, ohne occt-Parsing).
     // „Rendern" visualisiert es danach zusätzlich im 3D-Viewer.
     try {
-      const v2 = buildVolumeStepBrepV2(analysis);
+      const v2 = buildVolumeStepBrepV2(withDefeature(analysis));
       setStepWatertightStatus(v2 ? v2.report : null);
     } catch (e) { console.warn('Wasserdichtigkeits-Check fehlgeschlagen:', e.message); }
 
@@ -329,7 +334,7 @@ downloadStepSolBtn.addEventListener('click', () => {
     return;
   }
   try {
-    const res = buildVolumeStepBrepV2(lastAnalysis);
+    const res = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
     if (!res?.step) {
       setStatus('STEP-Volumen fehlgeschlagen: zu wenig Flächen erkannt.', 'error');
       return;
@@ -390,7 +395,7 @@ document.getElementById('step-render-button')?.addEventListener('click', () => {
     // Panel 4 prüft den V2-Boundary-Loop-STEP — genau das, was exportiert wird.
     // (Der Triangle-STEP wäre per Konstruktion immer geschlossen und damit als
     //  Dichtheitsprüfung wertlos.)
-    const res = buildVolumeStepBrepV2(lastAnalysis);
+    const res = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
     if (!res?.step) {
       setStatus('Panel 4 Render fehlgeschlagen: zu wenig Flächen.', 'error');
       return;
@@ -402,6 +407,15 @@ document.getElementById('step-render-button')?.addEventListener('click', () => {
     console.error(err);
     setStatus(`Panel 4 Render fehlgeschlagen: ${err.message}`, 'error');
   }
+});
+
+// Defeaturing-Umschalter: Verdikt sofort neu berechnen (Rendern/Export lesen den Toggle ohnehin).
+document.getElementById('defeature-toggle')?.addEventListener('change', () => {
+  if (!lastAnalysis) return;
+  try {
+    const v2 = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
+    setStepWatertightStatus(v2 ? v2.report : null);
+  } catch (e) { console.warn('Defeaturing-Toggle: Verdikt-Update fehlgeschlagen:', e.message); }
 });
 
 // Wasserdichtigkeits-Verdikt unter Panel 4 setzen (aus dem V2-Export-Befund).
