@@ -1,5 +1,6 @@
-import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js';
-import { unifyCoplanarGroups } from './face-unification.js';
+import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=2';
+import { unifyCoplanarGroups } from './face-unification.js?v=2';
+import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=10';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
@@ -130,98 +131,11 @@ self.addEventListener('message', (event) => {
         });
       }
     });
-    // Region-Growing auf echten Ebenen (nicht mehr Dihedral-Winkel!)
-    // Zwei Dreiecke fusionieren nur wenn (a) Normalen nahezu gleich UND (b) Offsets
-    // (n·p) nahezu gleich sind — sprich: sie liegen tatsächlich in derselben Ebene.
-    // Rundungen mit kleinem Winkelschritt (5° pro Tessellierungs-Segment) werden
-    // dadurch NICHT mehr fälschlich zu einer Region zusammengezogen.
-    analysis.normalGroups = (() => {
-      const faces = mesh.faces;
-      const n = faces.length;
-      if (!n) return [];
-
-      // Strenge Ebenen-Toleranzen:
-      //   PLANAR_COS = cos(2°) → Normalen dürfen max. 2° abweichen (Tessellierungs-Rauschen).
-      //   PLANAR_OFFSET_MM = 0.05 mm → Ebene-Offset (n·p) darf max. 50 µm wandern.
-      // Zusammen: Rundungen > 2° pro Segment trennen sauber; echte Ebenen bleiben geschlossen.
-      const PLANAR_COS = Math.cos(2 * Math.PI / 180);
-      const PLANAR_OFFSET_MM = 0.05;
-
-      const vtxKey  = (v) => `${v[0].toFixed(4)},${v[1].toFixed(4)},${v[2].toFixed(4)}`;
-      const edgeKey = (a, b) => {
-        const ka = vtxKey(a), kb = vtxKey(b);
-        return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
-      };
-
-      // Vorab: normalisierte Normale + repräsentativer Offset (n·p0) pro Dreieck
-      const triN = new Float32Array(n * 3);
-      const triOff = new Float32Array(n);
-      for (let i = 0; i < n; i++) {
-        const f = faces[i];
-        const nx = f.normal[0], ny = f.normal[1], nz = f.normal[2];
-        const l = Math.hypot(nx, ny, nz) || 1;
-        triN[i * 3 + 0] = nx / l;
-        triN[i * 3 + 1] = ny / l;
-        triN[i * 3 + 2] = nz / l;
-        const p0 = f.vertices[0];
-        triOff[i] = (nx * p0[0] + ny * p0[1] + nz * p0[2]) / l;
-      }
-
-      // Schritt 1: Kanten → Dreieck(e)
-      const edgeToTris = new Map();
-      for (let i = 0; i < n; i++) {
-        const vs = faces[i].vertices;
-        for (let k = 0; k < 3; k++) {
-          const ek = edgeKey(vs[k], vs[(k + 1) % 3]);
-          let entry = edgeToTris.get(ek);
-          if (!entry) { entry = []; edgeToTris.set(ek, entry); }
-          entry.push(i);
-        }
-      }
-
-      // Schritt 2: Adjazenz nur über koplanare Paare
-      const adj = Array.from({ length: n }, () => []);
-      for (const tris of edgeToTris.values()) {
-        if (tris.length !== 2) continue; // Boundary oder non-manifold → überspringen
-        const [t1, t2] = tris;
-        const i1 = t1 * 3, i2 = t2 * 3;
-        const cosA = triN[i1] * triN[i2] + triN[i1 + 1] * triN[i2 + 1] + triN[i1 + 2] * triN[i2 + 2];
-        if (cosA < PLANAR_COS) continue;                   // Normalen zu unterschiedlich
-        if (Math.abs(triOff[t1] - triOff[t2]) > PLANAR_OFFSET_MM) continue; // Ebene-Offset zu unterschiedlich
-        adj[t1].push(t2);
-        adj[t2].push(t1);
-      }
-
-      // Schritt 3: Region-Growing (BFS)
-      const visited = new Uint8Array(n);
-      const regions = [];
-      for (let i = 0; i < n; i++) {
-        if (visited[i]) continue;
-        visited[i] = 1;
-        const members = [i];
-        const queue = [i];
-        while (queue.length) {
-          const cur = queue.pop();
-          for (const nb of adj[cur]) {
-            if (!visited[nb]) { visited[nb] = 1; members.push(nb); queue.push(nb); }
-          }
-        }
-        let sx = 0, sy = 0, sz = 0;
-        const vertices = [];
-        for (const t of members) {
-          const f = faces[t];
-          sx += f.normal[0]; sy += f.normal[1]; sz += f.normal[2];
-          for (const v of f.vertices) vertices.push(v);
-        }
-        const slen = Math.hypot(sx, sy, sz) || 1;
-        regions.push({ normal: [sx / slen, sy / slen, sz / slen], vertices });
-      }
-
-      // KEIN Mindestgrößen-Filter: Ebene Rechtecke bestehen in STLs typisch aus
-      // genau 2 Dreiecken — ein >=3-Filter löschte ganze Würfelwände (Bug 2026-06-12).
-      // Koplanare Kleinst-Regionen fusioniert die Face Unification danach ohnehin.
-      return regions.sort((a, b) => b.vertices.length - a.vertices.length);
-    })();
+    // Region-Growing auf echten Ebenen — gemeinsames Modul (region-growing.js), identisch zu
+    // Node-Tests/Regressionstests. Bezug ist die REGION (mittlere Normale + Ebene), nicht der
+    // Nachbar: bei feiner Tessellierung kettete der Nachbar-Vergleich ganze Rundungen zu einer
+    // „Ebene“ (Bug 2026-10-23).
+    analysis.normalGroups = buildNormalGroups(mesh);
 
     // Face Unification: fuse räumlich getrennte koplanare Regionen (OCCT-äquivalent
     // zu ShapeUpgrade_UnifySameDomain). Reduziert ADVANCED_FACE-Zahl in der STEP

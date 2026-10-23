@@ -1,0 +1,434 @@
+{
+  "block_edge_fillet.stl": {
+    "bores": 0,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 14,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 14,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "block_with_hole.stl": {
+    "bores": 1,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 7,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 7,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "block_with_hole_and_fillet.stl": {
+    "bores": 1,
+    "fillets": 1,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 21,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 21,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cone_flat.stl": {
+    "bores": 0,
+    "fillets": 2,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 50,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 50,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cone_frustum.stl": {
+    "bores": 0,
+    "fillets": 7,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 50,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 50,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cone_pointed.stl": {
+    "bores": 0,
+    "fillets": 4,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 49,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 49,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cube_ascii.stl": {
+    "bores": 0,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 6,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 6,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cylinder.stl": {
+    "bores": 1,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 65,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 65,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cylinder_oblique_45.stl": {
+    "bores": 1,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 50,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 50,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "cylinder_oblique_xz.stl": {
+    "bores": 1,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 34,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 34,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "dino_clip_v3_04-strong-closing.stl": {
+    "bores": 4,
+    "fillets": 2,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 2990,
+      "watertight": false,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 2990,
+      "watertight": false,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "fischerEbike - FahrradLicht - mount unter sattel(ohne rundungen).stl": {
+    "bores": 9,
+    "fillets": 6,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 2367,
+      "watertight": true,
+      "boresConverted": 2,
+      "filletsDefeatured": 0,
+      "cylindrical": 2,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 2367,
+      "watertight": true,
+      "boresConverted": 2,
+      "filletsDefeatured": 0,
+      "cylindrical": 2,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "fischerEbike - FahrradLicht - mount unter sattel.stl": {
+    "bores": 7,
+    "fillets": 7,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 4608,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 4608,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "hemisphere.stl": {
+    "bores": 0,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 1266,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 1266,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "sphere_full.stl": {
+    "bores": 0,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 2537,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 2537,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "washer_chamfered.stl": {
+    "bores": 2,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 77,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 2,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 290,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "washer_filleted.stl": {
+    "bores": 2,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 77,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 2,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 760,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "washer_thin.stl": {
+    "bores": 2,
+    "fillets": 0,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 67,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 67,
+      "watertight": true,
+      "boresConverted": 1,
+      "filletsDefeatured": 0,
+      "cylindrical": 1,
+      "conical": 0,
+      "occt": true
+    }
+  }
+}

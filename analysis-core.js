@@ -121,9 +121,14 @@ function parseAsciiStl(text, progressCb) {
 }
 
 function addFace(faceCollection, vertexStore, normal, v1, v2, v3) {
-  const n = normalizeVector(
-    normal?.every((value) => Number.isFinite(value)) ? normal : computeFaceNormal(v1, v2, v3)
-  );
+  // Normale aus der Wicklung (Eckpunkt-Reihenfolge) — die in der STL gespeicherte Normale nur
+  // als Rückfall für degenerierte Dreiecke. Viele Tools schreiben „facet normal 0 0 0“; das
+  // wurde vorher als Nullvektor übernommen (STL-Spez.: Leser sollen dann aus der Wicklung
+  // rechnen), und die Flächen-Vereinigung fasste alle Null-Normalen zu EINER Gruppe zusammen.
+  let n = normalizeVector(computeFaceNormal(v1, v2, v3));
+  if (!n[0] && !n[1] && !n[2] && normal?.every((value) => Number.isFinite(value))) {
+    n = normalizeVector(normal);
+  }
   const area = triangleArea(v1, v2, v3);
 
   faceCollection.push({
