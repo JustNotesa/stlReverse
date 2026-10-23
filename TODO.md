@@ -1,15 +1,23 @@
 # TODO - STL Reverse Add-on
 
-*Stand: 2026-04-20 — Nach Cleanup: RUN_V3BETA-Detektoren (Zylinder/Kegel/Kugel) entfernt, V1 archiviert.*
+*Stand: 2026-10-23 — Zuverlässigkeits-Etappe: Laufzeit-Fix Erkennung, Region-Growing als gemeinsames
+Modul (kein Verketten mehr bei feiner Tessellierung), Golden-Regressionstest. Testen im eingebauten
+Browser + Node-Harness (Firefox erst beim Packaging).*
+
+**Tests (vor jedem Commit):** `npm run test:golden` (alle Samples gegen `tests/golden.json` + 50k-Stressnetze,
+Laufzeitgrenzen) und `npm run test:bore`. Gewollte Änderungen: `npm run test:golden -- --update`, Diff prüfen, committen.
 
 ---
 
-## Aktueller Pipeline-Stand (nach Cleanup 2026-04-20)
+## Aktueller Pipeline-Stand
 
 Was **tatsächlich funktioniert**:
-- STL-Parsing (ASCII + binär) + Mesh-Simplification (>50k Dreiecke)
+- STL-Parsing (ASCII + binär) + Mesh-Simplification (>50k Dreiecke); Normalen aus der Wicklung
 - Bounding-Box + 3 Orthoprojektionen (XY/YZ/ZX) mit konvexer Hülle
-- **normalGroups** — Region-Growing via Dihedral-Winkel (15° Hard-Edge-Schwelle) in `analysis-worker.js`
+- **normalGroups** — Region-Growing in `region-growing.js` (gemeinsam für Worker + Tests): Dreieck gehört
+  zur Region bei ≤2° zur MITTLEREN Regions-Normale und ≤0.05 mm zur Regions-Ebene; Saat = größte Dreiecke zuerst
+- Face Unification (`face-unification.js`), Zylinder-/Bohrungs-Erkennung (`primitive-recognition.js`),
+  analytischer Export (Zylinder, Kegel-Fasen), Body-Defeaturing (Verrundung → scharfe Kante, Toggle)
 - Exporter: `buildOutlinesDxf` (2D), `buildOutlinesStep` (2D-Konturen), `buildVolumeStepBrepV2` (Konvexe Hülle je Region → STEP), `buildVolumeStepTriangles` (1 PLANE pro Dreieck)
 - 4 Viewer-Panels: STL-Mesh, Flächen-Regionen, B-Rep-Vorschau, STEP (occt-import-js)
 
@@ -122,6 +130,11 @@ Kreis-Kanten teilen.
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
+- [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
+  Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
+  Segment finden → entlang der Kette weiterlaufen → als ein Feature taggen (Panel 3), Export bleibt facettiert.
+- [ ] **Review der Etappen 05fb3c3…6d67e62 abschließen** — Workflow-Lauf `wf_a998fde1-33d` wurde durch einen
+  Absturz unterbrochen (Bereiche: Erkennung, Fasen-Export, Defeaturing, STEP-Gültigkeit, Integration).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
   Check), aber noch nicht als `CONICAL_SURFACE`/`SPHERICAL_SURFACE` erkannt. Analoger Fit (Halbwinkel/Zentrum).
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
@@ -138,6 +151,22 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Zuverlässigkeit Flächen-Gruppierung + Golden-Test (2026-10-23)** — drei ältere Fehler, gefunden per
+  Stresstest mit feiner Tessellierung: (1) Region-Growing verglich Nachbar mit Nachbar (≤2°) → bei feinen
+  Netzen (CAD-Export „hohe Qualität“, <2°/Facette) kettete es ganze Rundungen zu EINER „Ebene“ (1°-Zylinder:
+  Export 2 Flächen, nicht wasserdicht; 50k-Kugel: Export null). (2) Der alte Offset-Test verglich n₁·p₁ mit
+  n₂·p₂ bei VERSCHIEDENEN Normalen → abhängig vom Abstand zum Ursprung, zerstückelte leicht gekrümmte
+  Flächen willkürlich (eBike 8159 → jetzt 4608 Flächen). (3) `facet normal 0 0 0` wurde als Nullvektor
+  übernommen; die Face Unification fasste alle Null-Normalen zu einer Gruppe. **Fix:** neues gemeinsames
+  Modul `region-growing.js` (Worker + Node-Tests, vorher dreifach kopiert), Bezug = mittlere Regions-
+  Normale + Regions-Ebene, Saat = größte Dreiecke zuerst; Normalen aus der Wicklung (analysis-core.js);
+  Face Unification: Null-Normalen nie fusionieren + Ebenheits-Probe nach dem Mitteln. **Golden-Test**
+  `npm run test:golden` (Kennzahlen aller Samples + 50k-Kugel/-Torus + Laufzeitgrenzen).
+- [x] **Laufzeit-Fix Erkennung (2026-10-23, 6d67e62)** — Phase 1 lief auf Kugeln/Tori O(T²): sphere_full
+  62 ms → 101 s (Worker-Abbruch nach 60 s!). Prisma-Vorfilter, gezieltes Merken gescheiterter Achsen,
+  Schnell-Abbruch, deterministische Arbeits-Budgets, Naht-Fix im Vertex-Schlüssel. Jetzt 50k-Kugel ~9 s.
+  Nebenbefund: die „10 Bohrungen“ des eBike aus 21d846a waren Segmente der gebogenen Bohrung aus dem
+  Brute-Force (jetzt 6/5 wie vor der Härtung) → dafür eigener Rohrbogen-Erkenner nötig (offen, s.o.).
 - [x] **Regressionstest analytische Bohrungen — Dünnplatten-Fall abgesichert (2026-06-15)** —
   `tests/bore-analytic-regression.mjs` (`npm run test:bore`) fährt die volle Pipeline
   (parseStl → buildNormalGroups → unify → recognizePrimitives → buildVolumeStepBrepV2) in Node

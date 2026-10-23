@@ -71,8 +71,13 @@ export function unifyCoplanarGroups(groups, opts = {}) {
 
   // Bucket by quantized normal. Within a bucket, further bin by quantized offset.
   const byNormal = new Map();
+  const unified = [];
   for (const g of groups) {
     if (!g.normal || !Array.isArray(g.vertices) || g.vertices.length < 3) continue;
+    // Null-Normale (rein degenerierte Gruppe): NIE fusionieren, unverändert durchreichen.
+    // Vorher landeten alle im Raster-Feld "0,0,0" mit Offset 0 → EINE Riesen-Gruppe
+    // (Netz mit „facet normal 0 0 0“ kollabierte zu einer Fläche, Export null).
+    if (Math.hypot(g.normal[0], g.normal[1], g.normal[2]) < 0.5) { unified.push(g); continue; }
     const n = normalizeNormal(g.normal);
     const c = centroidOfVertices(g.vertices);
     const offset = planeOffset(n, c);
@@ -82,7 +87,6 @@ export function unifyCoplanarGroups(groups, opts = {}) {
     byNormal.get(nKey).push({ group: g, normal: n, offset });
   }
 
-  const unified = [];
   let mergedPatches = 0;
 
   for (const entries of byNormal.values()) {
@@ -110,8 +114,22 @@ export function unifyCoplanarGroups(groups, opts = {}) {
         if (k > i0) mergedPatches++;
       }
       const l = Math.hypot(sx, sy, sz) || 1;
+      const nm = [sx / l, sy / l, sz / l];
+      // Ebenheits-Probe NACH dem Mitteln: das Normalen-Raster (~0.3°) erlaubt Gruppen, die
+      // über große Distanz deutlich auseinanderlaufen (0.3° auf 50 mm ≈ 0.26 mm). Liegt ein
+      // Punkt weiter als offsetTol von der gemittelten Ebene, wird der Cluster NICHT
+      // fusioniert (konservativ: Gruppen bleiben einzeln, Export bleibt exakt).
+      const c = centroidOfVertices(merged);
+      const d = nm[0] * c[0] + nm[1] * c[1] + nm[2] * c[2];
+      for (const v of merged) {
+        if (Math.abs(nm[0] * v[0] + nm[1] * v[1] + nm[2] * v[2] - d) > offsetTol) {
+          for (let k = i0; k <= i1; k++) unified.push(entries[k].group);
+          mergedPatches -= (i1 - i0);
+          return;
+        }
+      }
       unified.push({
-        normal: [sx / l, sy / l, sz / l],
+        normal: nm,
         vertices: merged,
         unified: true
       });
