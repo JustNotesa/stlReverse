@@ -214,7 +214,11 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const MAX_RADIUS = opts.maxRadius ?? diag; // Zylinder größer als das Bauteil ist unplausibel
 
   // 2) Manifold-Adjazenz
-  const key  = (p) => `${p[0].toFixed(4)},${p[1].toFixed(4)},${p[2].toFixed(4)}`;
+  // −0/+0 vereinheitlichen (wie fixZero im Exporter): an der Naht rotationssymmetrischer
+  // Teile (θ = 0/2π) liefert sin(2π) ≈ −2e-16 → "-0.0000" ≠ "0.0000" → die Naht-Kante fehlte
+  // in der Adjazenz (Grow musste den Umweg nehmen, Naht-Seeds sahen ihren Wand-Nachbarn nicht).
+  const fz = (x) => { const s = x.toFixed(4); return s === '-0.0000' ? '0.0000' : s; };
+  const key  = (p) => `${fz(p[0])},${fz(p[1])},${fz(p[2])}`;
   const ekey = (a, b) => { const ka = key(a), kb = key(b); return ka < kb ? ka + '|' + kb : kb + '|' + ka; };
   const edgeToTris = new Map();
   for (let i = 0; i < T; i++) {
@@ -238,7 +242,10 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const stamp = new Int32Array(T);
   let gen = 0;
 
-  // Region per BFS wachsen (nur über noch freie, passende Nachbarn)
+  // Region per BFS wachsen (nur über noch freie, passende Nachbarn).
+  // `growWork` zählt alle je gewachsenen Facetten — deterministisches Arbeits-Budget für
+  // Phase 1 + Rettungspfad (siehe unten), damit Kugeln/Tori nicht quadratisch explodieren.
+  let growWork = 0;
   const grow = (seed, ap, ax, r, distTol, visited) => {
     const g = ++gen;
     const region = [];
@@ -252,8 +259,18 @@ export function recognizePrimitives(normalGroups, opts = {}) {
         if (fits(nb, ap, ax, r, distTol)) { stamp[nb] = g; q.push(nb); }
       }
     }
+    growWork += region.length;
     return region;
   };
+  // Arbeits-Budgets (in gewachsenen Facetten). Ohne sie lief sphere_full 101 s statt 62 ms:
+  // Phase 1 verbraucht bei Fehlschlag nichts → jede Kugel-Facette startete einen vollen
+  // Wachstums- + Rettungslauf über ein Großkreis-Band (O(T²)). Großzügig bemessen — reale
+  // Teile bleiben weit darunter; bei Überschreitung wird nur der ZUSATZ-Pfad abgeschaltet,
+  // Phase 2 (der ursprüngliche Pfad) läuft immer vollständig.
+  const PHASE1_BUDGET = 40 * T + 50000;
+  const RESCUE_BUDGET = 40 * T + 50000;
+  let rescueWork = 0;
+  let phase1Truncated = false, rescueTruncated = false;
 
   // Validierung einer Kandidaten-Region — EXAKT die bisherige Gate-Sequenz, aber ohne
   // Seiteneffekte (kein visited/failRegion), damit sie zweimal laufen kann: erst auf der
@@ -389,18 +406,24 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // Nur VOLLE Bohrungen werden gerettet: Teil-Zylinder-Rettung erzeugt Junk-„Fillets"
   // aus Torus-Patches (empirisch beobachtet), Bohrungen sind immer 360°.
   const RESCUE_REASONS = new Set(['meandev', 'maxdev', 'axisrms', 'taper']);
+  // Rückgabe: null (gar nicht versucht/abgebrochen vor dem Regrow), { ok:false, touched }
+  // (Regrow gelaufen, aber gescheitert — `touched` MUSS der Aufrufer mit verbrauchen, sonst
+  // wird dasselbe Band von jedem Nachbar-Seed erneut durchwachsen) oder { ok:true, … }.
   const tryRescue = (seed, region, model, v) => {
     if (!RESCUE_REASONS.has(v.reason)) return null;
+    if (rescueWork > RESCUE_BUDGET) { rescueTruncated = true; return null; }
     const ce = extractCylinderCore(region, model);
     if (!ce) return null;
     const distTol2 = Math.max(DIST_ABSTOL, DIST_RELTOL * ce.model.radius);
     const region2 = grow(seed, ce.model.axisPoint, ce.model.axis, ce.model.radius, distTol2, claimed);
-    if (region2.length < MIN_TRIS) return null;
+    rescueWork += region2.length;
+    const fail = { ok: false, touched: region2 };
+    if (region2.length < MIN_TRIS) return fail;
     const { axis: ax2, values: vals2 } = pcaAxis(region2.map(ti => tris[ti].n));
     const verts2 = [];
     for (const ti of region2) for (const vv of tris[ti].v) verts2.push(vv);
     const circ2 = fitCircleRobust(verts2, ax2);
-    if (!circ2 || !(circ2.radius >= MIN_RADIUS && circ2.radius <= MAX_RADIUS)) return null;
+    if (!circ2 || !(circ2.radius >= MIN_RADIUS && circ2.radius <= MAX_RADIUS)) return fail;
     const model2 = { axis: ax2, axisPoint: circ2.center, radius: circ2.radius, circ: circ2, values: vals2 };
     let v2 = validateRegion(region2, model2);
     let tagged2 = region2;
@@ -413,8 +436,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       const v3 = validateRegion(ce2.core, ce2.model);
       if (v3.ok && v3.full) { v2 = v3; tagged2 = ce2.core; }
     }
-    if (!v2.ok || !v2.full) return null;
-    return { v: v2, tagged: tagged2, consume: region.concat(region2) };
+    if (!v2.ok || !v2.full) return fail;
+    return { ok: true, v: v2, tagged: tagged2, consume: region.concat(region2) };
   };
 
   // Primitiv übernehmen: taggen (nur die Zylinderfläche → `claimed`, unantastbar) und
@@ -442,10 +465,57 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // Bootstrap-PCA-Regionen (Phase 2) wachsen und die Wand in Splitter fressen können — bei
   // fillet-dominierten Löchern (tiefe Verrundung, dünne Wand) ist genau das der Killer:
   // die Wand wird sonst in ~12er-Häppchen von Junk-Regionen verbraucht (empirisch belegt).
-  // Phase 1 verbraucht bei Fehlschlag NICHTS und akzeptiert nur volle 360°-Bohrungen;
-  // alles andere (Teil-Zylinder/Fillets, Sonderfälle) behandelt Phase 2 exakt wie bisher.
+  // Phase 1 verbraucht bei Fehlschlag NICHTS (globales `visited`) und akzeptiert nur volle
+  // 360°-Bohrungen; alles andere (Teil-Zylinder/Fillets, Sonderfälle) behandelt Phase 2.
+  // Gegen O(T²): (a) billiger Prisma-Vorfilter (s.u.), (b) `p1tried` merkt sich Facetten
+  // gescheiterter Phase-1-Regionen — sie werden in Phase 1 nicht erneut als Seed probiert
+  // (Phase 2 sieht sie unverändert), (c) PHASE1_BUDGET als hartes Sicherheitsnetz.
+  const p1tried = new Uint8Array(T);
+  const STRICT_PERP = 0.02; // |n·axis0| für „exakt senkrecht" (≈1.1°) — CAD-Prismen liegen bei ~1e-6
+  // Start-Achse einer Facette (Scharnier zum bestgekrümmten Nachbarn), gecacht. Für das
+  // gezielte Merken (p1Fail) ohne Rücksicht auf `visited` — es geht nur um „welche Achse
+  // würde diese Facette als Seed liefern?".
+  const edgeAxisCache = new Float64Array(T * 3);
+  const edgeAxisState = new Uint8Array(T); // 0 = unbekannt, 1 = vorhanden, 2 = keine
+  const edgeAxisOf = (ti) => {
+    if (edgeAxisState[ti] === 0) {
+      let nb = -1, bestC = -1;
+      for (const m of adj[ti]) {
+        const c = dot(tris[ti].n, tris[m].n);
+        if (c >= SEED_MIN_COS && c <= SEED_MAX_COS && c > bestC) { bestC = c; nb = m; }
+      }
+      edgeAxisState[ti] = 2;
+      if (nb >= 0) {
+        const sh = [];
+        for (const va of tris[ti].v) for (const vb of tris[nb].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+        if (sh.length === 2) {
+          const a = norm(sub(sh[1], sh[0]));
+          edgeAxisCache[ti * 3] = a[0]; edgeAxisCache[ti * 3 + 1] = a[1]; edgeAxisCache[ti * 3 + 2] = a[2];
+          edgeAxisState[ti] = 1;
+        }
+      }
+    }
+    return edgeAxisState[ti] === 1 ? [edgeAxisCache[ti * 3], edgeAxisCache[ti * 3 + 1], edgeAxisCache[ti * 3 + 2]] : null;
+  };
+  // Gezieltes Merken: nach einem Phase-1-Fehlschlag mit Start-Achse `failAxis` werden nur
+  // Facetten markiert, deren EIGENE Start-Achse ∥ failAxis ist — sie würden praktisch denselben
+  // Versuch wiederholen. Facetten mit anderer Achse (z.B. Bohrungs-Wand mit senkrechter Achse in
+  // einer gescheiterten Verrundungs-Spalte mit waagerechter Achse) bleiben Seeds. Pauschales
+  // Markieren der ganzen Region ließ die Wand verhungern (washer_filleted, empirisch belegt).
+  const P1_SAME_AXIS_COS = Math.cos((opts.p1SameAxisDeg ?? 20) * DEG);
+  const p1Fail = (failAxis, ...arrs) => {
+    for (const a of arrs) {
+      if (!a) continue;
+      for (const ti of a) {
+        if (p1tried[ti]) continue;
+        const ea = edgeAxisOf(ti);
+        if (ea && Math.abs(dot(ea, failAxis)) >= P1_SAME_AXIS_COS) p1tried[ti] = 1;
+      }
+    }
+  };
   for (let seed = 0; seed < T; seed++) {
-    if (visited[seed]) continue;
+    if (visited[seed] || p1tried[seed]) continue;
+    if (growWork > PHASE1_BUDGET) { phase1Truncated = true; break; }
     let nb = -1, bestC = -1;
     for (const m of adj[seed]) {
       if (visited[m]) continue;
@@ -478,12 +548,21 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       }
     }
     if (boot.length < 4) continue;
+    // Prisma-Vorfilter (O(Boot-Patch), kein Wachsen): auf einer echten Zylinderwand stehen
+    // VIELE Facetten exakt ⊥ zur Scharnier-Achse (alle Wand-Facetten). Auf Kugel/Torus gilt
+    // das nur für Seed + Nachbar selbst (deren gemeinsame Kante liegt in beiden Ebenen) —
+    // die nächste Facette ist schon um den Teilungswinkel verdreht. Ausnahme: Kugel-Äquator-
+    // band (lokal wirklich ein Prisma) — den fängt der Anti-Kugel-Wächter bzw. die Validierung.
+    let strictN = 0;
+    for (const ti of boot) if (Math.abs(dot(tris[ti].n, axis0)) <= STRICT_PERP) strictN++;
+    if (strictN < 4) continue;
     const bverts = []; for (const ti of boot) for (const vv of tris[ti].v) bverts.push(vv);
     const circ0 = fitCircleRobust(bverts, axis0);
     if (!circ0 || !(circ0.radius >= MIN_RADIUS && circ0.radius <= MAX_RADIUS)) continue;
     // Wachsen + Nachfitten (enge Toleranz — die Achse ist ja exakt)
+    p1tried[seed] = 1; // derselbe Seed wird in Phase 1 nie zweimal probiert
     let region = grow(seed, circ0.center, axis0, circ0.radius, Math.max(DIST_ABSTOL, DIST_RELTOL * circ0.radius), visited);
-    if (region.length < MIN_TRIS) continue;
+    if (region.length < MIN_TRIS) { p1Fail(axis0, region); continue; }
     let model = null, bad = false;
     for (let pass = 0; pass < 2; pass++) {
       const { axis: axF, values } = pcaAxis(region.map(ti => tris[ti].n));
@@ -495,14 +574,25 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       region = grow(seed, model.axisPoint, model.axis, model.radius, Math.max(DIST_ABSTOL, DIST_RELTOL * circ.radius), visited);
       if (region.length < MIN_TRIS) { bad = true; break; }
     }
-    if (bad || !model) continue;
+    if (bad || !model) { p1Fail(axis0, region); continue; }
+    // Schnell-Abbruch vor dem teuren Rettungspfad: Phase 1 akzeptiert nur volle Bohrungen, und
+    // mit exakter Kanten-Achse umläuft eine echte Bohrungs-Region bereits hier den vollen Kreis
+    // (Kontamination fügt höchstens Facetten hinzu, nimmt keine Umlauf-Abdeckung weg). Teil-
+    // Bögen (Verrundungs-Spalten, Torus-Patches) → sofort aufgeben.
+    {
+      const cv = [];
+      for (const ti of region) for (const vv of tris[ti].v) cv.push(vv);
+      if (coverageDeg(cv, model.axisPoint, model.axis) < FULL_COV) { p1Fail(axis0, region); continue; }
+    }
     let v = validateRegion(region, model);
     let tagged = region;
+    let touched = null;
     if (!v.ok) {
       const resc = tryRescue(seed, region, model, v);
-      if (resc) { v = resc.v; tagged = resc.tagged; region = resc.consume; }
+      if (resc && resc.ok) { v = resc.v; tagged = resc.tagged; region = resc.consume; }
+      else if (resc) touched = resc.touched;
     }
-    if (!v.ok || !v.full) continue; // Phase 1: nur volle Bohrungen, kein Verbrauch bei Fehlschlag
+    if (!v.ok || !v.full) { p1Fail(axis0, region, touched); continue; } // Phase 1: kein globaler Verbrauch bei Fehlschlag
     if (tagged === region) {
       // Erstversuch ohne Rettung → Kern-Politur (falls valide): entfernt fleckig mitgewachsene
       // Fillet-Facetten von der getaggten Fläche → saubere Rand-Kreise für den Exporter.
@@ -582,7 +672,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     let tagged = region;
     if (!v.ok) {
       const resc = tryRescue(seed, region, model, v);
-      if (resc) { v = resc.v; tagged = resc.tagged; region = resc.consume; }
+      if (resc && resc.ok) { v = resc.v; tagged = resc.tagged; region = resc.consume; }
+      else if (resc) region = region.concat(resc.touched); // gescheiterten Regrow mit verbrauchen
     }
     if (!v.ok) { failRegion(); continue; }
 
@@ -592,6 +683,10 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   return {
     groups: normalGroups,
     primitives,
-    stats: { inputGroups: normalGroups.length, cylinders: primitives.length, bores, fillets }
+    stats: {
+      inputGroups: normalGroups.length, cylinders: primitives.length, bores, fillets,
+      // Diagnose: true = Sicherheitsnetz hat gegriffen (Zusatzpfad gekappt, Phase 2 lief voll)
+      phase1Truncated, rescueTruncated
+    }
   };
 }
