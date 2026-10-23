@@ -130,6 +130,12 @@ Kreis-Kanten teilen.
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
+- [ ] **Kollineare Zwischenpunkte auf geraden Kanten entfernen** — Kanten, die im Netz unterteilt waren
+  (z.B. lbracket fein: Punkte bei z=4/8/12/16), bleiben im STEP als Kette gerader Stücke. Gültig +
+  wasserdicht, aber nicht minimal. Vertex mit genau 2 kollinearen Kanten in BEIDEN angrenzenden Loops
+  entfernen (konsistent, sonst T-Junction).
+- [ ] **Defeaturing v2: Verrundung zwischen Ebene und GEKRÜMMTER Fläche** (eBike-Außenkontur) und Ecken,
+  an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück) — v1 überspringt diese Fälle bewusst.
 - [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
   Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
   Segment finden → entlang der Kette weiterlaufen → als ein Feature taggen (Panel 3), Export bleibt facettiert.
@@ -151,6 +157,16 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Kanten-Verrundungen werden AUTOMATISCH erkannt → Body-Defeaturing greift ohne Hand-Tagging
+  (2026-10-23)** — Phase 1 der Erkennung prüft Teil-Umläufe jetzt streng als gerade Kanten-Verrundung:
+  echtes Prisma (alle inneren Scharnier-Kanten ∥ Achse, billig zuerst) → reguläre Gates inkl. „nur von
+  EBENEN begrenzt“ → Bogen ≤ 180°, ohne Rettungspfad. Zwei Fehlerursachen behoben: (1) `grow()` nahm den
+  Seed ungeprüft auf — eine Ebenen-Facette an der Tangentenkante ruinierte den Fit; (2) der Radius-Fit sah
+  breite Nachbar-Ebenen (Schein-Zylinder R≈19.5 statt r=3) → Profilbreiten-Filter (Mantel = gleich breite
+  schmale Streifen). **Ergebnis:** block_edge_fillet 14→6, block_with_hole_and_fillet 21→7 (Bohrung bleibt
+  CYLINDRICAL), neue Samples `plate_4fillets` (4× R3.00/90° → 6 Flächen) und `lbracket_concave_fillet`
+  (konkave Hohlkehle R4.00/90° → 8 Flächen), Ecken exakt im Ebenen-Schnittpunkt, wasserdicht, occt ok.
+  Keine neuen Fehlerkennungen auf Kegel/Kugel/Torus. Generator: `tests/fixtures-gen/gen_extrude.mjs`.
 - [x] **Zuverlässigkeit Flächen-Gruppierung + Golden-Test (2026-10-23)** — drei ältere Fehler, gefunden per
   Stresstest mit feiner Tessellierung: (1) Region-Growing verglich Nachbar mit Nachbar (≤2°) → bei feinen
   Netzen (CAD-Export „hohe Qualität“, <2°/Facette) kettete es ganze Rundungen zu EINER „Ebene“ (1°-Zylinder:

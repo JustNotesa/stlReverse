@@ -1,13 +1,13 @@
 {
   "block_edge_fillet.stl": {
     "bores": 0,
-    "fillets": 0,
+    "fillets": 1,
     "defeatureOn": {
       "exported": true,
-      "faces": 14,
+      "faces": 6,
       "watertight": true,
       "boresConverted": 0,
-      "filletsDefeatured": 0,
+      "filletsDefeatured": 1,
       "cylindrical": 0,
       "conical": 0,
       "occt": true
@@ -52,10 +52,10 @@
     "fillets": 1,
     "defeatureOn": {
       "exported": true,
-      "faces": 21,
+      "faces": 7,
       "watertight": true,
       "boresConverted": 1,
-      "filletsDefeatured": 0,
+      "filletsDefeatured": 1,
       "cylindrical": 1,
       "conical": 0,
       "occt": true
@@ -264,8 +264,8 @@
     }
   },
   "fischerEbike - FahrradLicht - mount unter sattel(ohne rundungen).stl": {
-    "bores": 9,
-    "fillets": 6,
+    "bores": 10,
+    "fillets": 3,
     "defeatureOn": {
       "exported": true,
       "faces": 2367,
@@ -288,8 +288,8 @@
     }
   },
   "fischerEbike - FahrradLicht - mount unter sattel.stl": {
-    "bores": 7,
-    "fillets": 7,
+    "bores": 8,
+    "fillets": 4,
     "defeatureOn": {
       "exported": true,
       "faces": 4608,
@@ -327,6 +327,54 @@
     "defeatureOff": {
       "exported": true,
       "faces": 1266,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "lbracket_concave_fillet.stl": {
+    "bores": 0,
+    "fillets": 1,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 8,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 1,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 14,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 0,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    }
+  },
+  "plate_4fillets.stl": {
+    "bores": 0,
+    "fillets": 4,
+    "defeatureOn": {
+      "exported": true,
+      "faces": 6,
+      "watertight": true,
+      "boresConverted": 0,
+      "filletsDefeatured": 4,
+      "cylindrical": 0,
+      "conical": 0,
+      "occt": true
+    },
+    "defeatureOff": {
+      "exported": true,
+      "faces": 30,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,

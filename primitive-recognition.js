@@ -465,8 +465,9 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // Bootstrap-PCA-Regionen (Phase 2) wachsen und die Wand in Splitter fressen können — bei
   // fillet-dominierten Löchern (tiefe Verrundung, dünne Wand) ist genau das der Killer:
   // die Wand wird sonst in ~12er-Häppchen von Junk-Regionen verbraucht (empirisch belegt).
-  // Phase 1 verbraucht bei Fehlschlag NICHTS (globales `visited`) und akzeptiert nur volle
-  // 360°-Bohrungen; alles andere (Teil-Zylinder/Fillets, Sonderfälle) behandelt Phase 2.
+  // Phase 1 verbraucht bei Fehlschlag NICHTS (globales `visited`) und akzeptiert volle
+  // 360°-Bohrungen sowie — streng geprüft (Prisma + nur ebene Nachbarn, ohne Rettungspfad) —
+  // gerade Kanten-Verrundungen (Teil-Zylinder). Alles andere behandelt Phase 2.
   // Gegen O(T²): (a) billiger Prisma-Vorfilter (s.u.), (b) `p1tried` merkt sich Facetten
   // gescheiterter Phase-1-Regionen — sie werden in Phase 1 nicht erneut als Seed probiert
   // (Phase 2 sieht sie unverändert), (c) PHASE1_BUDGET als hartes Sicherheitsnetz.
@@ -496,6 +497,26 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       }
     }
     return edgeAxisState[ti] === 1 ? [edgeAxisCache[ti * 3], edgeAxisCache[ti * 3 + 1], edgeAxisCache[ti * 3 + 2]] : null;
+  };
+  // Echtes Prisma: jede Kante, die zwei Region-Facetten mit VERSCHIEDENER Normale trennt,
+  // liegt ∥ zur Achse (Zylinder-/Fillet-Streifen). Torus-/Kegel-Patches haben gedrehte bzw.
+  // konvergierende Scharniere → fallen durch.
+  const isPrism = (regionArr, ax) => {
+    const inR = new Set(regionArr);
+    let hinges = 0;
+    for (const ti of regionArr) {
+      for (const m of adj[ti]) {
+        if (m < ti || !inR.has(m)) continue;
+        if (dot(tris[ti].n, tris[m].n) > Math.cos(0.5 * DEG)) continue; // koplanar (Diagonale)
+        const sh = [];
+        for (const va of tris[ti].v) for (const vb of tris[m].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+        if (sh.length !== 2) return false;
+        const e = norm(sub(sh[1], sh[0]));
+        if (Math.abs(dot(e, ax)) < Math.cos(2 * DEG)) return false;
+        hinges++;
+      }
+    }
+    return hinges >= 2;
   };
   // Gezieltes Merken: nach einem Phase-1-Fehlschlag mit Start-Achse `failAxis` werden nur
   // Facetten markiert, deren EIGENE Start-Achse ∥ failAxis ist — sie würden praktisch denselben
@@ -530,7 +551,20 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     }
     if (shared.length !== 2) continue;
     const axis0 = norm(sub(shared[1], shared[0]));
-    // Achsen-beschränkter Bootstrap-Patch (nur Facetten mit Normale ⊥ axis0) für den Radius-Fit
+    // Profilbreite: Ausdehnung einer Facette quer zur Achse, in ihrer eigenen Ebene. Mantel-
+    // Facetten eines Zylinders/einer Verrundung sind gleich breite, schmale Streifen; eine
+    // angrenzende EBENE ist ein breiter Streifen. Ohne diese Unterscheidung landeten die
+    // fernen Ebenen-Eckpunkte im Radius-Fit (Platte mit r=3-Verrundungen → Schein-Zylinder
+    // R≈19.5, empirisch belegt).
+    const profW = (ti) => {
+      const d = norm(cross(axis0, tris[ti].n));
+      let lo = Infinity, hi = -Infinity;
+      for (const vv of tris[ti].v) { const t = dot(vv, d); if (t < lo) lo = t; if (t > hi) hi = t; }
+      return hi - lo;
+    };
+    const wSeed = profW(seed);
+    if (wSeed > 2.5 * profW(nb)) continue; // breiter Ebenen-Streifen neben schmalem Mantel: kein Seed
+    // Achsen-beschränkter Bootstrap-Patch (Normale ⊥ axis0, ähnliche Profilbreite) für den Radius-Fit
     const boot = [];
     {
       const gb = ++gen;
@@ -541,7 +575,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
           boot.push(cur);
           for (const m of adj[cur]) {
             if (stamp[m] === gb || visited[m]) continue;
-            if (Math.abs(dot(tris[m].n, axis0)) <= AXIS_PERP) { stamp[m] = gb; next.push(m); }
+            if (Math.abs(dot(tris[m].n, axis0)) <= AXIS_PERP && profW(m) <= 2.5 * wSeed) { stamp[m] = gb; next.push(m); }
           }
         }
         layer = next;
@@ -575,6 +609,13 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       if (region.length < MIN_TRIS) { bad = true; break; }
     }
     if (bad || !model) { p1Fail(axis0, region); continue; }
+    // grow() nimmt den Seed UNGEPRÜFT auf. Ist der Seed selbst kein Mantel-Dreieck (z.B. eine
+    // Ebenen-Facette direkt an der Tangentenkante einer Verrundung — sie hat einen gekrümmten
+    // Nachbarn und liefert sogar die exakte Achse), ruiniert sein ferner Eckpunkt den Fit.
+    if (!fits(seed, model.axisPoint, model.axis, model.radius, Math.max(DIST_ABSTOL, DIST_RELTOL * model.radius))) {
+      region = region.filter((ti) => ti !== seed);
+      if (region.length < MIN_TRIS) { p1Fail(axis0, region); continue; }
+    }
     // Schnell-Abbruch vor dem teuren Rettungspfad: Phase 1 akzeptiert nur volle Bohrungen, und
     // mit exakter Kanten-Achse umläuft eine echte Bohrungs-Region bereits hier den vollen Kreis
     // (Kontamination fügt höchstens Facetten hinzu, nimmt keine Umlauf-Abdeckung weg). Teil-
@@ -582,7 +623,19 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     {
       const cv = [];
       for (const ti of region) for (const vv of tris[ti].v) cv.push(vv);
-      if (coverageDeg(cv, model.axisPoint, model.axis) < FULL_COV) { p1Fail(axis0, region); continue; }
+      if (coverageDeg(cv, model.axisPoint, model.axis) < FULL_COV) {
+        // Teil-Umlauf: Kandidat für eine GERADE KANTEN-VERRUNDUNG (Fillet). Streng prüfen,
+        // OHNE Rettungspfad: echtes Prisma (alle inneren Scharnier-Kanten ∥ Achse — billig, bricht
+        // auf Torus-/Kegel-Patches an der ersten gedrehten Kante ab) → reguläre Gates inkl.
+        // „nur von EBENEN begrenzt" → plausibler Bogen (≤ 180°). Liefert die Fillets, die das
+        // Body-Defeaturing im Exporter (Verrundung → scharfe Kante) braucht.
+        const vF = isPrism(region, model.axis) ? validateRegion(region, model) : { ok: false };
+        if (vF.ok && !vF.full && vF.cov <= 180) {
+          acceptPrim(vF, region, region);
+          continue;
+        }
+        p1Fail(axis0, region); continue;
+      }
     }
     let v = validateRegion(region, model);
     let tagged = region;
