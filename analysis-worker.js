@@ -1,6 +1,6 @@
 import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js';
 import { unifyCoplanarGroups } from './face-unification.js';
-import { recognizePrimitives } from './primitive-recognition.js?v=9';
+import { recognizePrimitives } from './primitive-recognition.js?v=10';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
 
