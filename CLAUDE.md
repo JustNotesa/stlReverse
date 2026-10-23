@@ -7,6 +7,11 @@
 
 ## Nach jeder Implementierung — Screenshots
 
+> **Update 2026-10-23 (User):** Firefox ist zum Testen NICHT mehr Pflicht. Testen so, wie es am besten
+> geht — z.B. im eingebauten Browser-Pane gegen `http://localhost:8888/popup.html`, Geometrie/Regression
+> per Node-Harness (`tests/pipeline.cjs`, `tests/occt-check.cjs`). Firefox-Spezifisches (Manifest, CSP,
+> `browser.*`) erst beim Add-on-Packaging prüfen. Der Playwright-Ablauf unten bleibt als Option.
+
 Screenshots **immer** mit dem **Playwright MCP** (Firefox) machen — kein Puppeteer, keine node-Skripte:
 
 ```bash
