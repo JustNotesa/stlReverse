@@ -1,4 +1,10 @@
 import * as THREE from './libs/three.module.js';
+
+// Farbton für normale (nicht erkannte) Regionen in Panel 2/3: Rot/Orange sind für erkannte
+// Bohrungen bzw. Verrundungen reserviert. Der Regenbogen läuft deshalb nur über Gelbgrün → Blau →
+// Violett (61°…299°). Vorher bekam die größte Region (Index 0) Farbton 0 = Rot und sah aus wie
+// eine erkannte Bohrung (z.B. Zylinder-Deckel).
+const regionHue = (idx, n) => 0.17 + 0.66 * (idx / Math.max(1, n));
 import { OrbitControls } from './libs/OrbitControls.js';
 
 // ── Module-level state ──────────────────────────────────────────────────────
@@ -273,7 +279,7 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
       // Erkannte Primitive hervorheben: Bohrungen rot, Verrundungen orange (statt Regenbogen-HSL).
       const col = group.primitive?.type === 'cylinder'
         ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff9500 : 0xff3b30)
-        : new THREE.Color().setHSL(idx / normalGroups.length, 0.75, 0.55);
+        : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.75, 0.55);
       for (let i = 0; i < triCount; i++) {
         const v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
         positions[p]   = v0[0]; positions[p+1] = v0[2]; positions[p+2] = v0[1];
@@ -447,7 +453,7 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     const isCyl = group.primitive?.type === 'cylinder';
     const col = isCyl
       ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : 0xff1744) // kräftiges Rot / Orange
-      : new THREE.Color().setHSL(idx / normalGroups.length, 0.30, 0.72);
+      : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.30, 0.72);
     const a = isCyl ? 0.96 : 0.26; // erkannte Features fast deckend, Rest stark durchscheinend
     for (let i = 0; i < triCount; i++) {
       const v0 = verts[i*3], v1 = verts[i*3+1], v2 = verts[i*3+2];
