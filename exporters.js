@@ -1161,6 +1161,261 @@ export function buildVolumeStepBrepV2(analysis) {
     return done;
   }
 
+  // ---- Body-Defeaturing v2b: Profil-Eckrundungen (senkrechte Kanten) bei Extrusionsteilen ----
+  // Nach v2 ist die Kontur einer Deckfläche P exakt der Wandquerschnitt. Verrundete senkrechte
+  // Kanten erscheinen dort als Bogenlauf (viele kleine gleichsinnige Knicke) zwischen zwei langen
+  // geraden Wänden A und B. Schärfen = Bogen durch den Schnittpunkt C der verlängerten Wände
+  // ersetzen. Weil die Wände ⊥ P stehen, gehört zu jeder 2D-Position im Profil eine senkrechte
+  // Kante: die Ersetzung gilt auf ALLEN Deckflächen (oben und unten) gleichzeitig, die Bogen-
+  // Wandstreifen entfallen, A und B werden bis zur neuen Ecke verlängert. Vollkreise (Löcher)
+  // haben keine geraden Nachbarn, Bögen zwischen parallelen Wänden (Langloch-Enden) keinen
+  // Schnittpunkt — beide bleiben. Läuft ein Bogen ohne Tangente in eine Ecke (Bogenradius größer
+  // als die Nachbarkante), wird der kurze Bogenabschnitt bis zur Ecke mitgenommen.
+  let cornersDefeatured = 0;
+  if (DEFEATURE && bandsDefeatured > 0) {
+    try {
+      cornersDefeatured = defeatureProfileCorners();
+    } catch (_) { cornersDefeatured = 0; /* Guard: jede Ecke wird erst nach allen Prüfungen angewandt */ }
+  }
+  function defeatureProfileCorners() {
+    const WALL_COS = 1e-3, PARALLEL_COS = 0.9999;
+    const ARC_MIN_DEG = 0.3, ARC_MAX_DEG = 35;
+    const MIN_LINE_SIN = Math.sin(10 * Math.PI / 180);
+    let done = 0;
+    for (let guard = 0; guard < 500; guard++) {
+      const plan = findCorner();
+      if (!plan) break;
+      applyCorner(plan);
+      done++;
+    }
+    return done;
+
+    function findCorner() {
+      const fds = faceDefs;
+      const nrm = fds.map((fd) => _norm3(fd.normal));
+      const edgeOwners = new Map();
+      fds.forEach((fd, fi) => {
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (L.circleRim) continue;
+          for (let i = 0; i < L.length; i++) {
+            const k = edgeKeyFn(L[i], L[(i + 1) % L.length]);
+            let o = edgeOwners.get(k); if (!o) { o = []; edgeOwners.set(k, o); }
+            o.push(fi);
+          }
+        }
+      });
+      for (let pi = 0; pi < fds.length; pi++) {
+        const P = fds[pi], d = nrm[pi];
+        const u = computeRefDir(d), v = _norm3(_cross3(d, u));
+        const to2 = (p) => [_dot3(p, u), _dot3(p, v)];
+        const key2 = (q) => `${fixZero(q[0], 4)},${fixZero(q[1], 4)}`;
+        for (const L of [P.outer, ...P.inner]) {
+          if (L.circleRim || L.length < 6) continue;
+          // Alle Kanten des Loops müssen an Wände ⊥ P grenzen (scharfe Kontur nach v2)
+          const owner = [];
+          let ok = true;
+          for (let i = 0; i < L.length; i++) {
+            const os = (edgeOwners.get(edgeKeyFn(L[i], L[(i + 1) % L.length])) || []).filter((fi) => fi !== pi);
+            if (os.length !== 1 || Math.abs(_dot3(nrm[os[0]], d)) > WALL_COS) { ok = false; break; }
+            owner.push(os[0]);
+          }
+          if (!ok) continue;
+          const n = L.length;
+          const q = L.map(to2);
+          const len = [], dir = [];
+          for (let i = 0; i < n; i++) {
+            const a = q[i], b = q[(i + 1) % n];
+            const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            len.push(l); dir.push(l > 0 ? [(b[0] - a[0]) / l, (b[1] - a[1]) / l] : [0, 0]);
+          }
+          // Knick am Punkt i (zwischen Kante i-1 und Kante i), vorzeichenbehaftet in Grad
+          const turn = [];
+          for (let i = 0; i < n; i++) {
+            const a = dir[(i - 1 + n) % n], b = dir[i];
+            turn.push(Math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]) * 180 / Math.PI);
+          }
+          const isArc = (i) => Math.abs(turn[i]) >= ARC_MIN_DEG && Math.abs(turn[i]) <= ARC_MAX_DEG;
+          // Vollkreis (Loch): keine Kante ist deutlich länger als die übrigen → kein gerader Nachbar
+          const sortedLen = len.slice().sort((x, y) => x - y);
+          let iLong = 0; for (let i = 1; i < n; i++) if (len[i] > len[iLong]) iLong = i;
+          if (len[iLong] < 3 * sortedLen[Math.floor(n / 2)]) continue;
+          // Durchlauf beginnt hinter der längsten Kante (= sicher an einer Lauf-Grenze). Ein Lauf
+          // endet an jeder LANGEN Kante: zwischen zwei Eckrundungen liegt oft ein gerades Stück,
+          // an das beide Bögen tangential anschließen (kleine Knicke an beiden Enden) — ohne diese
+          // Grenze wuchsen beim eBike zwei Rundungen samt Geraden zu einem „Bogen“ zusammen.
+          const s0 = (iLong + 1) % n;
+          for (let k = 0; k < n; ) {
+            const i0 = (s0 + k) % n;
+            if (!isArc(i0)) { k++; continue; }
+            const sg = Math.sign(turn[i0]);
+            let e = i0, cnt = 1;
+            const ch = [];
+            while (k + cnt < n && isArc((e + 1) % n) && Math.sign(turn[(e + 1) % n]) === sg) {
+              if (ch.length) { const srt = ch.slice().sort((x, y) => x - y); if (len[e] > 2.5 * srt[srt.length >> 1]) break; }
+              ch.push(len[e]); e = (e + 1) % n; cnt++;
+            }
+            k += cnt;
+            if (cnt < 2) continue;
+            const chords = [];
+            for (let c = 0, i = i0; c < cnt - 1; c++, i = (i + 1) % n) chords.push(len[i]);
+            chords.sort((x, y) => x - y);
+            const Lc = chords[Math.floor(chords.length / 2)];
+            // Kurze Bogenkanten an den Enden mitnehmen (Bogen läuft ohne Tangente in eine Ecke)
+            let j = i0, m = e, ext = 0;
+            while (ext < 3 && len[(j - 1 + n) % n] <= 1.5 * Lc) { j = (j - 1 + n) % n; ext++; }
+            ext = 0;
+            while (ext < 3 && len[m] <= 1.5 * Lc) { m = (m + 1) % n; ext++; }
+            const ia = (j - 1 + n) % n, ib = m;                // Kante A (endet in q[j]), Kante B (beginnt in q[m])
+            if (len[ia] < 3 * Lc || len[ib] < 3 * Lc) continue;
+            const dA = dir[ia], dB = dir[ib];
+            const cr = dA[0] * dB[1] - dA[1] * dB[0];
+            const dotAB = dA[0] * dB[0] + dA[1] * dB[1];
+            let pathLen = 0; for (let i = j; i !== m; i = (i + 1) % n) pathLen += len[i];
+            // Neue 2D-Lage der beiden Nahtpunkte q[j] (Ende A) und q[m] (Anfang B); null = bleibt.
+            let newA = null, newB = null, mode;
+            if (Math.abs(cr) >= MIN_LINE_SIN) {
+              // Fall „cross“: A und B schneiden sich → Bogen kollabiert auf den Schnittpunkt C
+              const wx = q[m][0] - q[j][0], wy = q[m][1] - q[j][1];
+              const t = (wx * dB[1] - wy * dB[0]) / cr;   // q[j] + t·dA = q[m] + s·dB
+              const s = (wx * dA[1] - wy * dA[0]) / cr;
+              if (t < -1e-6 || s > 1e-6) continue;        // C muss A nach vorn und B nach hinten verlängern
+              if (t > 2 * pathLen + 1e-6 || -s > 2 * pathLen + 1e-6) continue; // Plausibilität
+              newA = newB = [q[j][0] + t * dA[0], q[j][1] + t * dA[1]];
+              mode = 'cross';
+            } else if (dotAB < -0.98) {
+              // A ∥ B gegenläufig: die Rundung (Radius größer als die Kante) hat eine ganze Kante E
+              // ersetzt und endet auf einer Seite mit einer ECKE statt tangential. E ist eindeutig:
+              // sie beginnt an dieser Ecke und steht senkrecht auf A und B (eBike-Laschen: Ecke
+              // (5,35) → Lotfußpunkt (0,35), exakt wie in der Referenz „ohne rundungen“).
+              // Beidseitig tangential = Halbkreis (Langloch-Ende) → Konstruktion, bleibt.
+              const tanA = Math.abs(turn[j]) <= ARC_MAX_DEG, tanB = Math.abs(turn[m]) <= ARC_MAX_DEG;
+              if (!tanA && tanB) {
+                const s = (q[j][0] - q[m][0]) * dB[0] + (q[j][1] - q[m][1]) * dB[1];
+                if (s > 1e-6 || -s > 2 * pathLen + 1e-6) continue;
+                newB = [q[m][0] + s * dB[0], q[m][1] + s * dB[1]];
+                mode = 'endA';
+              } else if (tanA && !tanB) {
+                const t = (q[m][0] - q[j][0]) * dA[0] + (q[m][1] - q[j][1]) * dA[1];
+                if (t < -1e-6 || t > 2 * pathLen + 1e-6) continue;
+                newA = [q[j][0] + t * dA[0], q[j][1] + t * dA[1]];
+                mode = 'endB';
+              } else continue;
+            } else continue;
+            // Betroffene 2D-Positionen (q[j] … q[m])
+            const K = new Set();
+            for (let i = j; ; i = (i + 1) % n) { K.add(key2(q[i])); if (i === m) break; }
+            const kA = key2(q[j]), kB = key2(q[m]);
+            const lift = (c2, h) => [u[0] * c2[0] + v[0] * c2[1] + d[0] * h, u[1] * c2[0] + v[1] * c2[1] + d[1] * h, u[2] * c2[0] + v[2] * c2[1] + d[2] * h];
+            const removeSet = new Set(), moves = [], capEdits = [];
+            for (let fi = 0; fi < fds.length && ok; fi++) {
+              const fd = fds[fi];
+              const loops = [fd.outer, ...fd.inner];
+              let any = false, all = true, onlySeam = true;
+              for (const Lx of loops) for (const p of Lx) {
+                const kk = key2(to2(p));
+                if (K.has(kk)) { any = true; if (kk !== kA && kk !== kB) onlySeam = false; } else all = false;
+              }
+              if (!any) continue;
+              const c = Math.abs(_dot3(nrm[fi], d));
+              if (c <= WALL_COS) {
+                if (all) { if (fd.inner.length) { ok = false; break; } removeSet.add(fi); } // Bogenstreifen (ohne Löcher)
+                else if (onlySeam) moves.push(fi);
+                else { ok = false; break; }
+              } else if (c >= PARALLEL_COS) {
+                // Deckfläche: Punkte in K bilden je Loop EINEN zusammenhängenden Lauf → ersetzen
+                for (const Lx of loops) {
+                  if (Lx.circleRim) { if (Lx.some((p) => K.has(key2(to2(p))))) ok = false; continue; }
+                  const inK = Lx.map((p) => K.has(key2(to2(p))));
+                  const cntK = inK.filter(Boolean).length;
+                  if (!cntK) continue;
+                  if (cntK === Lx.length) { ok = false; break; }
+                  let st = 0; while (!(inK[st] && !inK[(st - 1 + Lx.length) % Lx.length])) { st++; if (st >= Lx.length) { ok = false; break; } }
+                  if (!ok) break;
+                  for (let r = 0; r < cntK; r++) if (!inK[(st + r) % Lx.length]) { ok = false; break; }
+                  if (!ok) break;
+                  const first = Lx[st], last = Lx[(st + cntK - 1) % Lx.length];
+                  const fk = key2(to2(first)), lk = key2(to2(last));
+                  if (!((fk === kA && lk === kB) || (fk === kB && lk === kA))) { ok = false; break; }
+                  let h = 0; for (let r = 0; r < cntK; r++) h += _dot3(d, Lx[(st + r) % Lx.length]); h /= cntK;
+                  // Ersatz in Laufrichtung: A-Seite, B-Seite (bleibende Punkte als Original-Objekt)
+                  const repA = newA ? lift(newA, h) : (fk === kA ? first : last);
+                  const repB = newB ? lift(newB, h) : (fk === kB ? first : last);
+                  const rep = mode === 'cross' ? [repA] : (fk === kA ? [repA, repB] : [repB, repA]);
+                  const out = [];
+                  for (let r = 0; r < Lx.length; r++) {
+                    const idx = (st + r) % Lx.length;
+                    if (r === 0) out.push(...rep);
+                    else if (!inK[idx]) out.push(Lx[idx]);
+                  }
+                  if (out.length < 3) { ok = false; break; }
+                  // einfach geblieben? (2D-Schnitttest der neuen Kontur)
+                  const o2 = out.map(to2), no = o2.length;
+                  const ori = (a, b, c2) => (b[0] - a[0]) * (c2[1] - a[1]) - (b[1] - a[1]) * (c2[0] - a[0]);
+                  for (let a = 0; a < no && ok; a++) for (let b = a + 2; b < no; b++) {
+                    if (a === 0 && b === no - 1) continue;
+                    const p1 = o2[a], p2 = o2[(a + 1) % no], p3 = o2[b], p4 = o2[(b + 1) % no];
+                    const d1 = ori(p3, p4, p1), d2 = ori(p3, p4, p2), d3 = ori(p1, p2, p3), d4 = ori(p1, p2, p4);
+                    if (((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12))) { ok = false; break; }
+                  }
+                  if (!ok) break;
+                  capEdits.push({ loop: Lx, out, h, repA, repB });
+                }
+              } else { ok = false; break; }
+            }
+            if (!ok) { ok = true; continue; }
+            if (!removeSet.size || !capEdits.length) continue;
+            // Fälle endA/endB: neue Wand E für die wiederhergestellte Kante. Ihre senkrechten
+            // Kanten müssen ALLE Höhenpunkte der Nachbarwände an den Nahtstellen enthalten
+            // (sonst T-Stoß). E's Außennormale = Laufrichtung × d (Material liegt links der Kontur).
+            let newWall = null;
+            if (mode !== 'cross') {
+              const ptsA = new Map(), ptsB = new Map();   // Höhe (gerundet) → Punkt nach dem Umbau
+              const addPt = (mp, p) => mp.set(_dot3(d, p).toFixed(5), p);
+              for (const ce of capEdits) { addPt(ptsA, ce.repA); addPt(ptsB, ce.repB); }
+              for (const fi of moves) for (const Lx of [fds[fi].outer, ...fds[fi].inner]) for (const p of Lx) {
+                const kk = key2(to2(p));
+                if (kk === kA) addPt(ptsA, newA ? lift(newA, _dot3(d, p)) : p);
+                else if (kk === kB) addPt(ptsB, newB ? lift(newB, _dot3(d, p)) : p);
+              }
+              const byH = (mp) => [...mp.values()].sort((a, b) => _dot3(d, a) - _dot3(d, b));
+              const colA = byH(ptsA), colB = byH(ptsB);
+              if (colA.length < 2 || colB.length < 2) continue;
+              // Umlauf: A unten → B unten → B hoch → A oben → A runter
+              const loopE = [colA[0], ...colB, ...colA.slice(1).reverse()];
+              const a2 = to2(colA[0]), b2 = to2(colB[0]);
+              const tE = _norm3([u[0] * (b2[0] - a2[0]) + v[0] * (b2[1] - a2[1]), u[1] * (b2[0] - a2[0]) + v[1] * (b2[1] - a2[1]), u[2] * (b2[0] - a2[0]) + v[2] * (b2[1] - a2[1])]);
+              const nE = _norm3(_cross3(tE, d));
+              let nx = 0, ny = 0, nz = 0;
+              for (let i = 0; i < loopE.length; i++) { const c3 = _cross3(loopE[i], loopE[(i + 1) % loopE.length]); nx += c3[0]; ny += c3[1]; nz += c3[2]; }
+              if (nx * nE[0] + ny * nE[1] + nz * nE[2] < 0) loopE.reverse();
+              let cx = 0, cy = 0, cz = 0; for (const p of loopE) { cx += p[0]; cy += p[1]; cz += p[2]; }
+              newWall = { outer: loopE, inner: [], normal: nE, centroid: [cx / loopE.length, cy / loopE.length, cz / loopE.length], group: null };
+            }
+            return { removeSet, moves, capEdits, newA, newB, kA, kB, to2, key2, lift, d, newWall };
+          }
+        }
+      }
+      return null;
+    }
+
+    function applyCorner(plan) {
+      const { removeSet, moves, capEdits, newA, newB, kA, kB, to2, key2, lift, d, newWall } = plan;
+      for (const { loop, out } of capEdits) { loop.length = 0; loop.push(...out); }
+      for (const fi of moves) {
+        const fd = faceDefs[fi];
+        for (const Lx of [fd.outer, ...fd.inner]) {
+          for (let i = 0; i < Lx.length; i++) {
+            const kk = key2(to2(Lx[i]));
+            if (kk === kA && newA) Lx[i] = lift(newA, _dot3(d, Lx[i]));
+            else if (kk === kB && newB) Lx[i] = lift(newB, _dot3(d, Lx[i]));
+          }
+        }
+      }
+      faceDefs = faceDefs.filter((_, i) => !removeSet.has(i));
+      if (newWall) faceDefs.push(newWall);
+    }
+  }
+
   // ---- Step 2: Shared vertex + edge registry ----
   const ptRegistry = new Map(); // key → { ptId, vtxId }
   // Gleiche Naht-Normalisierung wie vtxKey (siehe oben): -0.0/+0.0 vereinheitlichen,
@@ -1345,13 +1600,15 @@ export function buildVolumeStepBrepV2(analysis) {
   let asm = assemble(faceDefs, finalPlans);
   asm.report.filletsDefeatured = filletsDefeatured;
   asm.report.bandsDefeatured = bandsDefeatured;
+  asm.report.cornersDefeatured = cornersDefeatured;
   // Globaler Schutz: öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
   // die wasserdichte Baseline kann dadurch nie regressieren.
-  if ((asm.report.boresConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0) && !asm.report.watertight) {
+  if ((asm.report.boresConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
     asm = assemble(buildFaceDefs(null), []);
     asm.report.filletsDefeatured = 0;
     asm.report.bandsDefeatured = 0;
+    asm.report.cornersDefeatured = 0;
   }
   const allFaceIds = asm.faceIds;
   const report = asm.report;

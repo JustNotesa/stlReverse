@@ -11,3 +11,4 @@ playwright-report/
 *.log
 
 # Hinweis: tests/screenshots/ wird bewusst versioniert (visueller Verifikations-Nachweis).
+.claude/worktrees/
