@@ -159,6 +159,11 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Export ~2,5× schneller (2026-10-24)** — Profiler: ~40 % der Exportzeit in `vtxKey` (3× toFixed je
+  Punkt, tausendfach dieselben Punkte). Schlüssel je Punkt-Array per WeakMap gecacht (mit Koordinaten-Prüfung),
+  `fixZero` ohne zweites toFixed; v2-Runden bewerten nur noch berührte Kandidaten neu. eBike-Export
+  1,1–1,4 s → ~0,45 s, Ergebnisse identisch (Golden, v2, eBike, bore, collinear grün). Befund dabei: von den
+  2409 eBike-Facetten stammen fast alle vom gebogenen Kanal (~760 Zylinder-Streifen r≈2,48) → Agent E.
 - [x] **v2: Deckflächen-Wahl korrigiert + Härtetest integriert (2026-10-24)** — Härtetest (Agent A, `tests/fixtures-v2`,
   `npm run test:v2`) fand: v2 wählte bei Rundrechteck-Profilen mit in Z unterteilten Wänden eine SEITENWAND als
   Deckfläche (gierige Reihenfolge nach Punktzahl) → wasserdicht, aber nur teilweise entrundet (w1–w3). Fix:
