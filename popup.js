@@ -1,7 +1,7 @@
 import { formatBytes, describeDetailLevel } from './utils.js';
 import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=29';
 
-import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=25';
+import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=27';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=18';
 import {
   setStatus, setExportEnabled,
@@ -433,6 +433,7 @@ function setStepWatertightStatus(report) {
     const n = (v) => (Number.isFinite(v) ? v : 0);
     const done = [];
     if (n(report.boresConverted)) done.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
+    if (n(report.tubesConverted)) done.push(`${report.tubesConverted} gebogene${report.tubesConverted === 1 ? 'r Kanal' : ' Kanäle'} als exakte Fläche (${report.tubePieces} Stück)`);
     const rounds = [];
     if (n(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
     if (n(report.cornersDefeatured)) rounds.push(`${report.cornersDefeatured} gerundete Profilecke${report.cornersDefeatured === 1 ? '' : 'n'}`);

@@ -276,8 +276,11 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
     normalGroups.forEach((group, idx) => {
       const verts = group.vertices; // Array von [x,y,z]
       const triCount = Math.floor(verts.length / 3); // 3 Vertices pro Dreieck
-      // Erkannte Primitive hervorheben: Bohrungen rot, Verrundungen orange (statt Regenbogen-HSL).
-      const col = group.primitive?.type === 'cylinder'
+      // Erkannte Primitive hervorheben: gebogene Kanäle violett, Bohrungen rot, Verrundungen orange
+      // (statt Regenbogen-HSL). Kanäle zuerst: ihre Streifen tragen oft zusätzlich ein Zylinder-Tag.
+      const col = group.tube
+        ? new THREE.Color(0xaf52de)
+        : group.primitive?.type === 'cylinder'
         ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff9500 : 0xff3b30)
         : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.75, 0.55);
       for (let i = 0; i < triCount; i++) {
@@ -421,7 +424,10 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
   const boundaryEdgesByGroup = new Map(); // groupIdx → [{v0, v1}]
   for (const entry of edgeGroups.values()) {
     if (entry.groups.size !== 1) {
-      // Kante liegt zwischen zwei oder mehr Gruppen → Boundary für alle
+      // Kante liegt zwischen zwei oder mehr Gruppen → Boundary für alle. Ausnahme: Kanten INNERHALB
+      // eines gebogenen Kanals (alle Gruppen tragen group.tube) — der Kanal wird als durchgehende
+      // Dreh-/Rohrfläche exportiert, seine Streifen-Grenzen gibt es in der STEP nicht.
+      if ([...entry.groups].every((gi) => normalGroups[gi]?.tube)) continue;
       for (const gi of entry.groups) {
         if (!boundaryEdgesByGroup.has(gi)) boundaryEdgesByGroup.set(gi, []);
         boundaryEdgesByGroup.get(gi).push({ v0: entry.v0, v1: entry.v1 });
@@ -450,8 +456,10 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
   normalGroups.forEach((group, idx) => {
     const verts = group.vertices;
     const triCount = Math.floor(verts.length / 3);
-    const isCyl = group.primitive?.type === 'cylinder';
-    const col = isCyl
+    const isCyl = !!group.tube || group.primitive?.type === 'cylinder';
+    const col = group.tube
+      ? new THREE.Color(0xaf52de)                                                 // Kanal: violett
+      : isCyl
       ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : 0xff1744) // kräftiges Rot / Orange
       : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.30, 0.72);
     const a = isCyl ? 0.96 : 0.26; // erkannte Features fast deckend, Rest stark durchscheinend
@@ -500,8 +508,11 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
   // Quaternion auf die (geswappte) Achse ausrichten.
   const prims = analysis?.primitives;
   if (prims?.length) {
+    // Zylinder-Streifen gebogener Kanäle bekommen kein eigenes Overlay (der Kanal ist violett gefärbt)
+    const tubePrimIds = new Set(normalGroups.filter((g) => g.tube && g.primitive).map((g) => g.primitive.id));
     for (const p of prims) {
       if (p.type !== 'cylinder' || !p.full) continue; // Overlay nur für volle Bohrungen (Teil-Zylinder/Fillets nur farbig)
+      if (tubePrimIds.has(p.id)) continue;
       const cylGeo = new THREE.CylinderGeometry(p.radius, p.radius, p.height, 32, 1, true);
       const cyl = new THREE.Mesh(cylGeo, new THREE.MeshStandardMaterial({
         color: 0xff1744, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
