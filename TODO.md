@@ -134,11 +134,6 @@ Kreis-Kanten teilen.
   (z.B. lbracket fein: Punkte bei z=4/8/12/16), bleiben im STEP als Kette gerader Stücke. Gültig +
   wasserdicht, aber nicht minimal. Vertex mit genau 2 kollinearen Kanten in BEIDEN angrenzenden Loops
   entfernen (konsistent, sonst T-Junction).
-- [ ] **Defeaturing v2b: Profil-Eckrundungen (senkrechte Kanten) bei Extrusionsteilen** — nach v2 bleiben beim
-  eBike 6 verrundete Konturecken (4× R≈7, 2× R≈4,2), Referenz „ohne rundungen“ hat dort 90°-Ecken. Gemessen:
-  konstante Schnittflächen-Differenz 52,4 mm² auf JEDER Höhe = 524 mm³ = exakt der Rest zur Referenz. Ansatz:
-  Bogen-Lauf zwischen zwei geraden Wänden → Schnittpunkt der verlängerten Wände (Vollkreise/Löcher und Bögen
-  zwischen parallelen Wänden bleiben). Abnahme: Schnittflächen v2b == Referenz (1521,0 mm²), Volumen 14163 mm³.
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
 - [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
   Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
@@ -161,6 +156,16 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Body-Defeaturing v2b: Profil-Eckrundungen bei Extrusionsteilen (2026-10-24)** — nach v2 ist die
+  Deckflächen-Kontur der Wandquerschnitt; verrundete senkrechte Kanten erscheinen dort als Bogenlauf zwischen
+  zwei geraden Wänden. Fall „cross“: Bogen → Schnittpunkt der verlängerten Wände. Fall „end“: Wände gegenläufig
+  parallel, Rundung (Radius > Kantenlänge) hat eine ganze Kante ersetzt und endet in einer Ecke → Kante wird als
+  neue Wandfläche rekonstruiert (beginnt an der Ecke, senkrecht auf beiden Wänden). Gilt auf beiden Deckflächen
+  zugleich (gleiche 2D-Profilposition = gleiche senkrechte Kante). Läufe enden an langen Kanten (tangentiale
+  Bögen an beiden Enden einer Geraden wuchsen sonst zusammen). Vollkreise (Löcher) und beidseitig tangentiale
+  Halbkreise (Langloch-Enden) bleiben. **eBike: 6/6 Ecken, 2429 Flächen, Volumen 14163,0 mm³ = EXAKT die
+  Referenz „ohne rundungen“, Schnittflächen auf allen Höhen identisch (Δ ≤ 0,01 mm²)**, wasserdicht, occt ok.
+  Report-Feld `cornersDefeatured`. `exporters.js?v=25`.
 - [x] **Body-Defeaturing v2: Verrundungs-Bänder an Deckflächen von Extrusionsteilen (2026-10-24)** — 2,5D-Teile
   (Skizze extrudiert, Kanten verrundet) haben rund um jede Deckfläche ein geschlossenes Verrundungsband, das an
   geraden Konturabschnitten ein Zylinder, an Bögen ein Torus ist (v1 greift dort nicht). v2 behandelt das ganze

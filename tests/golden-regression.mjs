@@ -61,6 +61,7 @@ async function metrics(groups, defeature) {
     boresConverted: r.boresConverted,
     filletsDefeatured: r.filletsDefeatured ?? 0,
     bandsDefeatured: r.bandsDefeatured ?? 0,
+    cornersDefeatured: r.cornersDefeatured ?? 0,
     cylindrical: (res.step.match(/CYLINDRICAL_SURFACE\(/g) || []).length,
     conical: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
     occt: !!occt.success,
