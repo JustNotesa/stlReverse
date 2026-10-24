@@ -593,8 +593,8 @@ export function buildVolumeStepBrepV2(analysis) {
   // Kanten statt Dutzender Facetten-Planes. Nahtlose Form (2 volle Kreis-Bounds) — empirisch
   // bestätigt, dass occt-import-js (Panel 4) sie parst. Fallback-Ebenen schützen die
   // Wasserdicht-Baseline: (1) attemptBore→null bzw. sharpBorePlan→null pro Bohrung, (2) Rand-Match
-  // scheitert→facettiert, (3) globaler Schutz unten (öffnet die Umwandlung die Hülle → komplett
-  // facettiert neu bauen).
+  // scheitert→facettiert, (3) öffnet die Umwandlung die Hülle → mit Toggle erst ohne Bohrungen neu
+  // bauen (Defeaturing bleibt), (4) globaler Schutz unten → komplett facettiert neu bauen.
   // Bohrungen tragen group.primitive; über die Worker-Grenze strukturell geklont → Objekt-Identität
   // gebrochen, daher Gruppierung über prim.id (stabile Ganzzahl), nie ===.
   const boreById = new Map();
@@ -1981,7 +1981,13 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   runPipeline(true);
   let asm = assembleCurrent();
-  // Globaler Schutz: öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
+  // Fallback-Stufe 1 (nur mit Toggle): öffnet eine Bohrungs-Umwandlung die Hülle, ohne Bohrungen
+  // neu bauen (Defeaturing bleibt) — sonst verwarf der globale Fallback auch korrekte Bänder/Ecken.
+  if (DEFEATURE && finalPlans.length > 0 && !asm.report.watertight) {
+    runPipeline(false);
+    asm = assembleCurrent();
+  }
+  // Fallback-Stufe 2 (global): öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
   // die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung läuft auch
   // hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
