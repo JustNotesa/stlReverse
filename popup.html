@@ -106,14 +106,14 @@
       <section class="preview-panel pipeline-step" data-step="2">
         <h2><span class="step-badge">2</span> Flächen-Regionen</h2>
         <div id="features-viewer" class="viewer-3d"></div>
-        <p class="hint micro">Region-Growing auf Ebenen-Gleichung (Normal ≤2°, Offset ≤0.05 mm) + Face Unification koplanarer Patches.</p>
+        <p class="hint micro">Region-Growing auf Ebenen-Gleichung (Normal ≤2°, Offset ≤0.05 mm) + Face Unification koplanarer Patches. Erkannt: rot = Bohrung, orange = Verrundung, violett = gebogener Kanal.</p>
       </section>
 
       <!-- Pipeline Schritt 3: B-Rep Vorschau (Boundary-Loops) -->
       <section class="webgl-panel pipeline-step" data-step="3">
         <h2><span class="step-badge">3</span> B-Rep Vorschau</h2>
         <div id="brep-viewer" class="viewer-3d" data-state="empty"></div>
-        <p class="hint micro">Boundary-Loops der Regionen — entspricht dem, was V2 in die STEP schreibt.</p>
+        <p class="hint micro">Boundary-Loops der Regionen — so schreibt V2 die ebenen Flächen in die STEP; farbig hervorgehobene Merkmale (Bohrungen, Kanäle) werden dort zu echten CAD-Flächen.</p>
       </section>
 
       <!-- Pipeline Schritt 4: STEP-Viewer (occt-import-js) -->
