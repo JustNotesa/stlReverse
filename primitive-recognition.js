@@ -473,27 +473,69 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // (Phase 2 sieht sie unverändert), (c) PHASE1_BUDGET als hartes Sicherheitsnetz.
   const p1tried = new Uint8Array(T);
   const STRICT_PERP = 0.02; // |n·axis0| für „exakt senkrecht" (≈1.1°) — CAD-Prismen liegen bei ~1e-6
-  // Start-Achse einer Facette (Scharnier zum bestgekrümmten Nachbarn), gecacht. Für das
-  // gezielte Merken (p1Fail) ohne Rücksicht auf `visited` — es geht nur um „welche Achse
-  // würde diese Facette als Seed liefern?".
+  // Profilbreite: Ausdehnung einer Facette quer zur Achse `ax`, in ihrer eigenen Ebene. Mantel-
+  // Facetten eines Zylinders/einer Verrundung sind gleich breite, schmale Streifen; eine
+  // angrenzende EBENE ist ein breiter Streifen. Ohne diese Unterscheidung landeten die
+  // fernen Ebenen-Eckpunkte im Radius-Fit (Platte mit r=3-Verrundungen → Schein-Zylinder
+  // R≈19.5, empirisch belegt).
+  const profW = (ti, ax) => {
+    const d = norm(cross(ax, tris[ti].n));
+    let lo = Infinity, hi = -Infinity;
+    for (const vv of tris[ti].v) { const t = dot(vv, d); if (t < lo) lo = t; if (t > hi) hi = t; }
+    return hi - lo;
+  };
+  // Scharnier-Achse = gemeinsame Kante ti↔m (normiert) oder null.
+  const hingeAxis = (ti, m) => {
+    const sh = [];
+    for (const va of tris[ti].v) for (const vb of tris[m].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+    return sh.length === 2 ? norm(sub(sh[1], sh[0])) : null;
+  };
+  // Gekrümmte Nachbarn (Knick im Saat-Fenster), kleinster Knick zuerst; stabil sortiert →
+  // bei Gleichstand gewinnt wie bisher der erste in adj-Reihenfolge.
+  const hingeCands = (ti, skipVisited) => {
+    const cand = [];
+    for (const m of adj[ti]) {
+      if (skipVisited && visited[m]) continue;
+      const c = dot(tris[ti].n, tris[m].n);
+      if (c >= SEED_MIN_COS && c <= SEED_MAX_COS) cand.push({ m, c });
+    }
+    return cand.sort((a, b) => b.c - a.c);
+  };
+  // Saat-Scharnier einer Facette → { nb, axis, wSeed } oder null.
+  //  fallback=false (Regel-Durchlauf): der Nachbar mit dem KLEINSTEN Knick; besteht dessen Kante
+  //    den Profilbreiten-Test nicht (breiter Streifen neben schmalem → kein Mantel-Scharnier) → null.
+  //  fallback=true (Ausweich-Durchlauf): NUR wenn genau das passiert ist — dann der nächstgrößere
+  //    Knick, dessen Kante den Profiltest besteht. Grund: an einer verrundeten Loch-Mündung knickt
+  //    der erste Verrundungs-Ring (≈9–10°) SCHWÄCHER als die Wand selbst (32 Segmente = 11.25°) →
+  //    JEDE Wand-Facette nahm die Mündungs-Sehne als „Achse" und fiel am Profiltest durch; das
+  //    Loch bekam nie die exakte Kanten-Achse (eBike-Halter, Y-Löcher, empirisch belegt).
+  const seedHinge = (ti, skipVisited, fallback) => {
+    const cand = hingeCands(ti, skipVisited);
+    for (let i = 0; i < cand.length; i++) {
+      const m = cand[i].m;
+      const axis = hingeAxis(ti, m);
+      if (!axis) { if (fallback) continue; return null; }
+      const wSeed = profW(ti, axis);
+      if (wSeed > 2.5 * profW(m, axis)) { if (fallback) continue; return null; }
+      return (i > 0) === fallback ? { nb: m, axis, wSeed } : null;
+    }
+    return null;
+  };
+  // Start-Achse einer Facette im laufenden Durchlauf, gecacht. Für das gezielte Merken (p1Fail)
+  // ohne Rücksicht auf `visited` — es geht nur um „welche Achse würde diese Facette als Seed
+  // liefern?". Regel-Durchlauf: Scharnier mit kleinstem Knick (ohne Profiltest, wie bisher).
   const edgeAxisCache = new Float64Array(T * 3);
   const edgeAxisState = new Uint8Array(T); // 0 = unbekannt, 1 = vorhanden, 2 = keine
+  let p1fallback = false;
   const edgeAxisOf = (ti) => {
     if (edgeAxisState[ti] === 0) {
-      let nb = -1, bestC = -1;
-      for (const m of adj[ti]) {
-        const c = dot(tris[ti].n, tris[m].n);
-        if (c >= SEED_MIN_COS && c <= SEED_MAX_COS && c > bestC) { bestC = c; nb = m; }
-      }
+      let a = null;
+      if (p1fallback) { const h = seedHinge(ti, false, true); if (h) a = h.axis; }
+      else { const c = hingeCands(ti, false); if (c.length) a = hingeAxis(ti, c[0].m); }
       edgeAxisState[ti] = 2;
-      if (nb >= 0) {
-        const sh = [];
-        for (const va of tris[ti].v) for (const vb of tris[nb].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
-        if (sh.length === 2) {
-          const a = norm(sub(sh[1], sh[0]));
-          edgeAxisCache[ti * 3] = a[0]; edgeAxisCache[ti * 3 + 1] = a[1]; edgeAxisCache[ti * 3 + 2] = a[2];
-          edgeAxisState[ti] = 1;
-        }
+      if (a) {
+        edgeAxisCache[ti * 3] = a[0]; edgeAxisCache[ti * 3 + 1] = a[1]; edgeAxisCache[ti * 3 + 2] = a[2];
+        edgeAxisState[ti] = 1;
       }
     }
     return edgeAxisState[ti] === 1 ? [edgeAxisCache[ti * 3], edgeAxisCache[ti * 3 + 1], edgeAxisCache[ti * 3 + 2]] : null;
@@ -534,36 +576,20 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       }
     }
   };
-  for (let seed = 0; seed < T; seed++) {
+  // Zwei Durchläufe über alle Seeds: erst mit Regel-Scharnier, dann (it ≥ T) nur mit Ausweich-
+  // Scharnier (siehe seedHinge). Der Ausweich-Durchlauf sieht nur, was der erste übrig ließ —
+  // dessen Ergebnisse bleiben damit unverändert. Ausweich-Scharniere schon im ersten Durchlauf
+  // zerlegten z.B. die gebogene Bohrung des eBike-Halters anders (−1 Bohrung, empirisch belegt).
+  for (let it = 0; it < 2 * T; it++) {
+    const fallback = it >= T;
+    const seed = fallback ? it - T : it;
+    if (it === T) { p1fallback = true; p1tried.fill(0); edgeAxisState.fill(0); } // neue Start-Achsen
     if (visited[seed] || p1tried[seed]) continue;
     if (growWork > PHASE1_BUDGET) { phase1Truncated = true; break; }
-    let nb = -1, bestC = -1;
-    for (const m of adj[seed]) {
-      if (visited[m]) continue;
-      const c = dot(tris[seed].n, tris[m].n);
-      if (c >= SEED_MIN_COS && c <= SEED_MAX_COS && c > bestC) { bestC = c; nb = m; }
-    }
-    if (nb < 0) continue;
-    // Gemeinsame Kante von seed↔nb → Achsrichtung
-    const shared = [];
-    for (const va of tris[seed].v) {
-      for (const vb of tris[nb].v) { if (key(va) === key(vb)) { shared.push(va); break; } }
-    }
-    if (shared.length !== 2) continue;
-    const axis0 = norm(sub(shared[1], shared[0]));
-    // Profilbreite: Ausdehnung einer Facette quer zur Achse, in ihrer eigenen Ebene. Mantel-
-    // Facetten eines Zylinders/einer Verrundung sind gleich breite, schmale Streifen; eine
-    // angrenzende EBENE ist ein breiter Streifen. Ohne diese Unterscheidung landeten die
-    // fernen Ebenen-Eckpunkte im Radius-Fit (Platte mit r=3-Verrundungen → Schein-Zylinder
-    // R≈19.5, empirisch belegt).
-    const profW = (ti) => {
-      const d = norm(cross(axis0, tris[ti].n));
-      let lo = Infinity, hi = -Infinity;
-      for (const vv of tris[ti].v) { const t = dot(vv, d); if (t < lo) lo = t; if (t > hi) hi = t; }
-      return hi - lo;
-    };
-    const wSeed = profW(seed);
-    if (wSeed > 2.5 * profW(nb)) continue; // breiter Ebenen-Streifen neben schmalem Mantel: kein Seed
+    // Saat-Scharnier (gemeinsame Kante seed↔nb → Achsrichtung), nur über freie Nachbarn
+    const hinge = seedHinge(seed, true, fallback);
+    if (!hinge) continue;
+    const axis0 = hinge.axis, wSeed = hinge.wSeed;
     // Achsen-beschränkter Bootstrap-Patch (Normale ⊥ axis0, ähnliche Profilbreite) für den Radius-Fit
     const boot = [];
     {
@@ -575,7 +601,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
           boot.push(cur);
           for (const m of adj[cur]) {
             if (stamp[m] === gb || visited[m]) continue;
-            if (Math.abs(dot(tris[m].n, axis0)) <= AXIS_PERP && profW(m) <= 2.5 * wSeed) { stamp[m] = gb; next.push(m); }
+            if (Math.abs(dot(tris[m].n, axis0)) <= AXIS_PERP && profW(m, axis0) <= 2.5 * wSeed) { stamp[m] = gb; next.push(m); }
           }
         }
         layer = next;
