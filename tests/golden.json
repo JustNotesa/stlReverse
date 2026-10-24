@@ -85,7 +85,7 @@
   },
   "cone_flat.stl": {
     "bores": 0,
-    "fillets": 2,
+    "fillets": 0,
     "defeatureOn": {
       "exported": true,
       "faces": 50,
@@ -113,7 +113,7 @@
   },
   "cone_frustum.stl": {
     "bores": 0,
-    "fillets": 7,
+    "fillets": 0,
     "defeatureOn": {
       "exported": true,
       "faces": 50,
@@ -141,7 +141,7 @@
   },
   "cone_pointed.stl": {
     "bores": 0,
-    "fillets": 4,
+    "fillets": 0,
     "defeatureOn": {
       "exported": true,
       "faces": 49,
@@ -281,7 +281,7 @@
   },
   "dino_clip_v3_04-strong-closing.stl": {
     "bores": 4,
-    "fillets": 2,
+    "fillets": 0,
     "defeatureOn": {
       "exported": true,
       "faces": 2990,
@@ -309,7 +309,7 @@
   },
   "fischerEbike - FahrradLicht - mount unter sattel(ohne rundungen).stl": {
     "bores": 10,
-    "fillets": 3,
+    "fillets": 0,
     "defeatureOn": {
       "exported": true,
       "faces": 2367,
@@ -337,7 +337,7 @@
   },
   "fischerEbike - FahrradLicht - mount unter sattel.stl": {
     "bores": 10,
-    "fillets": 4,
+    "fillets": 1,
     "defeatureOn": {
       "exported": true,
       "faces": 2429,
