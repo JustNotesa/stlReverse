@@ -15,8 +15,9 @@
 // Regel: v2 muss je Körper ENTWEDER exakt richtig schärfen ODER sicher überspringen (Ergebnis
 // wasserdicht und identisch zum Netz mit Rundung). Zulässige Ergebnisse = „Varianten“: jede
 // Teilmenge der Rundungen scharf (eine Rundung = eine Säulen-Deckkante; v2 zählt sie in
-// bandsDefeatured, v1 in filletsDefeatured) — exakt nachgerechnet; dazu der dokumentierte
-// Bohrungs-Chamfer-Pfad (Mündung → Kegel; Volumen aus den emittierten Zylinder-/Kegel-Parametern).
+// bandsDefeatured, v1 in filletsDefeatured) — exakt nachgerechnet; dazu bei Bohrungen die scharfe
+// Bohrung (Ziel: v2 schärft die Mündung, Lochwand → Zylinder zwischen den Deckflächen) und der
+// Chamfer-Pfad (Mündung → Kegel, zulässig) — Volumen aus den emittierten Zylinder-/Kegel-Parametern.
 // Fasen dürfen nie verschwinden, bei Soll „skip“ muss bandsDefeatured = 0 sein.
 //   exakt     → OK
 //   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der STEP-Unsicherheit 0.01 mm)
@@ -263,7 +264,46 @@ function boreVariant(body, b, step, others) {
   const aLat = 2 * Math.PI * Rc * (rim[1] - rim[0]) + Math.PI * (Rc + mouth[0].r) * slant(mouth[0].r, rim[0] - mouth[0].z) + Math.PI * (Rc + mouth[1].r) * slant(mouth[1].r, mouth[1].z - rim[1]);
   return {
     label: `außen scharf + Bohrung→Zylinder R${Rc.toFixed(3)} (z ${rim[0].toFixed(3)}..${rim[1].toFixed(3)}) + 2 Kegel auf R${mouth[0].r.toFixed(3)}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
-    sharpCount: others, bores: 1, cones: 2, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: body.expect.mode === 'sharp',
+    // Seit „erst entrunden, dann Bohrungen“ ist die scharfe Bohrung (unten) das Ziel; der Kegel-Pfad
+    // bleibt zulässig (sicher), verfehlt aber das Ziel.
+    sharpCount: others, bores: 1, cones: 2, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: false,
+  };
+}
+
+// Scharfe Bohrungen (exporters.js: erst entrunden, dann Bohrungen): v2 schärft auch die Mündungs-
+// bänder, danach wird jede Lochwand zwischen den nun scharfen Kreisrändern der beiden Deckflächen
+// EINE CYLINDRICAL_SURFACE, keine Kegel. Alle Bohrungen `bores` gemeinsam: Volumen = alles scharf,
+// je Loch das Polygon durch den Kreis Rc ersetzt (Rc aus der emittierten STEP); Ränder müssen exakt
+// in den Deckebenen liegen.
+function boreSharpVariant(body, bores, step, sharpCount) {
+  const ent = new Map();
+  for (const line of step.split('\n')) { const m = line.match(/^#(\d+)=(.*);$/); if (m) ent.set(+m[1], m[2]); }
+  const pt = (i) => ent.get(i).match(/,\(([^()]*)\)\)$/)[1].split(',').map(Number);
+  const plac = (ref) => { const m = ent.get(+ref.slice(1)).match(/AXIS2_PLACEMENT_3D\('',(#\d+),(#\d+),(#\d+)\)/); return { loc: pt(+m[1].slice(1)), axis: pt(+m[2].slice(1)) }; };
+  const fail = (why) => ({ label: `Bohrung scharf→Zylinder: ${why}`, sharpCount, bores: bores.length, cones: 0, planar: false, volume: NaN, tol: tolAnalytic, target: false });
+  let v = meshVolume(buildMesh(sharpen(body))), aLat = 0, plaus = true;
+  const parts = [];
+  for (const b of bores) {
+    const col = body.columns[b.col];
+    const cx = col.profile.reduce((s, p) => s + p[0], 0) / col.profile.length, cy = col.profile.reduce((s, p) => s + p[1], 0) / col.profile.length;
+    let Rc = null; const circles = [];
+    for (const e of ent.values()) {
+      let m;
+      if ((m = e.match(/^CYLINDRICAL_SURFACE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05 && Math.abs(+m[2] - b.R) < 0.05) Rc = +m[2]; }
+      if ((m = e.match(/^CIRCLE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05) circles.push({ r: +m[2], z: p.loc[2] }); }
+    }
+    if (Rc === null) return fail(`kein Zylinder (${col.name})`);
+    const rim = circles.filter((c) => Math.abs(c.r - Rc) < 1e-6).map((c) => c.z).sort((x, y) => x - y);
+    if (rim.length !== 2 || circles.length !== 2) return fail(`Kreise ${rim.length}/${circles.length} (${col.name})`);
+    const H = col.z1 - col.z0;
+    v += Math.abs(polyArea(col.profile)) * H - Math.PI * Rc * Rc * H;
+    aLat += 2 * Math.PI * Rc * H;
+    plaus = plaus && Math.abs(Rc - b.R) < 0.02 && Math.abs(rim[0] - col.z0) < 1e-3 && Math.abs(rim[1] - col.z1) < 1e-3;
+    parts.push(`R${Rc.toFixed(3)} (z ${rim[0].toFixed(3)}..${rim[1].toFixed(3)})`);
+  }
+  return {
+    label: `alle Rundungen scharf + Bohrung→Zylinder ${parts.join(', ')}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    sharpCount, bores: bores.length, cones: 0, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: body.expect.mode === 'sharp',
   };
 }
 
@@ -382,7 +422,10 @@ async function checkBody(body, occt) {
   for (const [tag, r] of [['AN', on], ['v2', iso]]) {
     if (!(r.exported && r.occt && r.otris.length)) continue;
     const vs = planarVs.slice();
-    if (tag === 'AN') for (const b of body.boreChamfer || []) vs.push(boreVariant(body, b, r.step, roundedPairs(body).filter((p) => p.c !== b.col).length));
+    if (tag === 'AN' && body.boreChamfer) {
+      vs.push(boreSharpVariant(body, body.boreChamfer, r.step, roundedPairs(body).length));
+      for (const b of body.boreChamfer) vs.push(boreVariant(body, b, r.step, roundedPairs(body).filter((p) => p.c !== b.col).length));
+    }
     const m = matchVariants(r, vs, ctx);
     const res = { match: m.hit ? m.hit.label : null, tier: m.tier, target: m.hit ? m.hit.target : false, dV: m.dV, maxDist: m.maxDist };
     out[tag === 'AN' ? 'onMatch' : 'isoMatch'] = res;

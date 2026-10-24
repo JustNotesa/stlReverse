@@ -159,6 +159,17 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Bohrungen NACH dem Entrunden → echte Zylinder (Agent D, 2026-10-24)** — Mit „Verrundungen entfernen“
+  läuft erst v1/v2/v2b, dann die Bohrungs-Umwandlung. Neuer scharfer Pfad (`sharpBorePlan`/`convertSharpBores`):
+  Wand mit genau 2 Rand-Loops, die exakt Innen-Loops zweier paralleler Deckflächen sind; Achse/Radius per
+  Kreisfit aus den Rändern → CYLINDRICAL_SURFACE mit vollen Kreiskanten, keine Kegel-Fase mehr. Bohrungs-Abgleich
+  gehärtet (nur konkave Vollzylinder, Axial-Gate 0,05 mm absolut, Radius = gemessener Rand-Radius — **tragend,
+  nicht lockern**: alte R-relative Toleranzen ergaben nach v2 wasserdichte, aber falsche Körper, ΔV −746 mm³).
+  Fallback-Stufe 1: offene Hülle → erst ohne Bohrungen neu bauen, dann facettiert. eBike: 2429 → 2367 Flächen,
+  2 Zylinder (r=2,5 exakt), Facetten-Rest 2345, deckungsgleich. Offen: Mischfall (eine Mündung von v2 geschärft,
+  andere echte Fase) bleibt facettiert; Kreis-Orientierung beider Deckflächen (.T. bei gemeinsamer Achse)
+  für strenge CAD-Importer prüfen; `washer_filleted`-Sample hat konische Lochwand (bleibt Fase-Pfad, korrekt);
+  `npm run test:unit` (Jest) scheitert vorbestehend am Import `detectConicalFeatures`.
 - [x] **Export ~2,5× schneller (2026-10-24)** — Profiler: ~40 % der Exportzeit in `vtxKey` (3× toFixed je
   Punkt, tausendfach dieselben Punkte). Schlüssel je Punkt-Array per WeakMap gecacht (mit Koordinaten-Prüfung),
   `fixZero` ohne zweites toFixed; v2-Runden bewerten nur noch berührte Kandidaten neu. eBike-Export
