@@ -1597,15 +1597,139 @@ export function buildVolumeStepBrepV2(analysis) {
     };
   };
 
+  // ---- Kollineare Zwischenpunkte auf geraden Kanten entfernen ----
+  // Die Loops tragen ROH-Netzpunkte (wasserdicht, s. extractGroupFaces) — eine im Netz unterteilte
+  // gerade Kante (z.B. Seitenwand eines Extrusionsteils, entlang Z in Streifen tesselliert; oder die
+  // kanonischen Punkte einer defeatureten scharfen Kante) wird so im STEP zur Kette kurzer Stücke,
+  // die CAD als viele Kanten zeigt. Ein Punkt v fällt weg, wenn GENAU zwei Loops ihn nutzen, beide
+  // mit denselben Nachbarn a,b in Gegenrichtung (a→v→b / b→v→a = die zwei Seiten EINER Kante) und
+  // a,v,b kollinear sind (v zwischen a und b). Topologisch neutral: a–v und v–b (je 1×fwd/1×rev)
+  // werden zu a–b (1×fwd/1×rev) → Wasserdicht-Bilanz unverändert. Gesperrt, wenn a–b schon als
+  // Kante existiert (sonst non-manifold) oder ein Loop unter 3 Kanten fiele. Jede neue Kante merkt
+  // sich die geschluckten Punkte — ALLE müssen auf ihr liegen (keine Drift über lange Ketten).
+  // circleRim-Loops (analytische Kreise, keine Linien-Kanten) bleiben unberührt. Spiegelt die
+  // Emission in assemble(): Schlüssel = vtxKey (≡ ptKey), gleiche Nachbarpunkte werden übersprungen,
+  // Flächen mit < 3 Außen-Kanten bzw. Innen-Loops mit < 3 Kanten werden nicht emittiert.
+  const COLLINEAR_DIST = 1e-4;  // mm — Abstand jedes geschluckten Punktes zur neuen Kante a–b
+  const COLLINEAR_SIN = 1e-5;   // sin des Knickwinkels bei v (Ecken bleiben exakt erhalten)
+  const kinkSin = (a, v, b) => {
+    const d1 = _sub3(v, a), d2 = _sub3(b, v), c = _cross3(d1, d2);
+    return Math.hypot(c[0], c[1], c[2]) / ((Math.hypot(d1[0], d1[1], d1[2]) * Math.hypot(d2[0], d2[1], d2[2])) || 1);
+  };
+  const removeCollinearPoints = (fds) => {
+    // Schnellweg: die ERSTE Entfernung setzt einen Punkt voraus, der mit seinen direkten Loop-
+    // Nachbarn kollinear ist — gibt es keinen, entfällt der Schlüssel-/Map-Aufbau. Gekrümmte Netze
+    // (Kugel, Torus) haben keinen (50k-Kugel: ~60 ms gespart).
+    const anyKink = () => {
+      for (const fd of fds) {
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (L.circleRim) continue;
+          for (let i = 0, n = L.length; i < n; i++) if (kinkSin(L[(i - 1 + n) % n], L[i], L[(i + 1) % n]) < COLLINEAR_SIN) return true;
+        }
+      }
+      return false;
+    };
+    if (!anyKink()) return 0;
+    const recs = [];            // { pts, keys, prev, next, edges } — Loop als verkettete Liste
+    const mkRec = (L) => {
+      const n = L.length, keys = L.map(vtxKey);
+      const prev = new Int32Array(n), next = new Int32Array(n);
+      let edges = 0;
+      for (let i = 0; i < n; i++) { prev[i] = (i - 1 + n) % n; next[i] = (i + 1) % n; if (keys[i] !== keys[next[i]]) edges++; }
+      return { pts: L, keys, prev, next, edges, dead: null };
+    };
+    for (const fd of fds) {
+      const outer = mkRec(fd.outer);
+      if (outer.edges < 3) continue;               // assemble() überspringt die ganze Fläche
+      recs.push(outer);
+      for (const L of fd.inner) {
+        if (L.circleRim) continue;
+        const r = mkRec(L);
+        if (r.edges >= 3) recs.push(r);
+      }
+    }
+    // Kanten (Schlüsselpaar) → { n: Nutzungen, sw: geschluckte Punkte }; Punkt → Vorkommen
+    const ek = (k1, k2) => (k1 < k2 ? `${k1}|${k2}` : `${k2}|${k1}`);
+    const edgeMap = new Map();
+    const occ = new Map();
+    for (const r of recs) {
+      for (let i = 0; i < r.keys.length; i++) {
+        const k = r.keys[i], kn = r.keys[r.next[i]];
+        if (k !== kn) { const e = ek(k, kn), o = edgeMap.get(e); if (o) o.n++; else edgeMap.set(e, { n: 1, sw: null }); }
+        const oc = occ.get(k); if (oc) oc.push({ r, i }); else occ.set(k, [{ r, i }]);
+      }
+    }
+    const distToLine = (p, a, ab, abLen) => { const c = _cross3(_sub3(p, a), ab); return Math.hypot(c[0], c[1], c[2]) / abLen; };
+    const tryRemove = (kv) => {
+      const oc = occ.get(kv);
+      if (!oc || oc.length !== 2) return false;
+      const [o1, o2] = oc;
+      const r1 = o1.r, r2 = o2.r;
+      if (r1.pts === r2.pts || r1.edges < 4 || r2.edges < 4) return false;
+      const ia = r1.prev[o1.i], ib = r1.next[o1.i];
+      const ka = r1.keys[ia], kb = r1.keys[ib];
+      if (ka === kb || ka === kv || kb === kv) return false;
+      if (r2.keys[r2.prev[o2.i]] !== kb || r2.keys[r2.next[o2.i]] !== ka) return false; // b→v→a
+      const eab = ek(ka, kb);
+      if (edgeMap.has(eab)) return false;          // a–b existiert schon → wäre non-manifold
+      const a = r1.pts[ia], v = r1.pts[o1.i], b = r1.pts[ib];
+      const ab = _sub3(b, a), abLen = Math.hypot(ab[0], ab[1], ab[2]);
+      if (!(abLen > 0)) return false;
+      const t = _dot3(_sub3(v, a), ab) / (abLen * abLen);
+      if (!(t > 0 && t < 1)) return false;         // v muss ZWISCHEN a und b liegen
+      if (!(kinkSin(a, v, b) < COLLINEAR_SIN)) return false;
+      const eav = edgeMap.get(ek(ka, kv)), evb = edgeMap.get(ek(kv, kb));
+      if (!eav || !evb || eav.n !== 2 || evb.n !== 2) return false;
+      const sw = [v, ...(eav.sw || []), ...(evb.sw || [])];
+      for (const p of sw) if (!(distToLine(p, a, ab, abLen) < COLLINEAR_DIST)) return false;
+      // Anwenden: v in beiden Loops aushängen, Kanten-Buchhaltung nachziehen
+      for (const { r, i } of oc) {
+        const p = r.prev[i], n = r.next[i];
+        r.next[p] = n; r.prev[n] = p; r.edges--;
+        (r.dead || (r.dead = new Set())).add(i);
+      }
+      edgeMap.delete(ek(ka, kv)); edgeMap.delete(ek(kv, kb));
+      edgeMap.set(eab, { n: 2, sw });
+      occ.delete(kv);
+      return true;
+    };
+    // Iterieren bis stabil: nach jeder Entfernung die neuen Nachbarn a,b erneut prüfen
+    let removedCount = 0;
+    const work = [];
+    for (const [k, oc] of occ) if (oc.length === 2) work.push(k);
+    while (work.length) {
+      const kv = work.pop();
+      const oc = occ.get(kv);
+      if (!oc || oc.length !== 2) continue;
+      const { r, i } = oc[0];
+      const ka = r.keys[r.prev[i]], kb = r.keys[r.next[i]];
+      if (tryRemove(kv)) { removedCount++; work.push(ka, kb); }
+    }
+    if (removedCount) {
+      for (const r of recs) {
+        if (!r.dead) continue;
+        // in place verdichten: Loop-Objekt (fd.outer/inner) und Reihenfolge bleiben erhalten
+        let w = 0;
+        for (let i = 0; i < r.pts.length; i++) if (!r.dead.has(i)) r.pts[w++] = r.pts[i];
+        r.pts.length = w;
+      }
+    }
+    return removedCount;
+  };
+  removeCollinearPoints(faceDefs);
+
   let asm = assemble(faceDefs, finalPlans);
   asm.report.filletsDefeatured = filletsDefeatured;
   asm.report.bandsDefeatured = bandsDefeatured;
   asm.report.cornersDefeatured = cornersDefeatured;
   // Globaler Schutz: öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
-  // die wasserdichte Baseline kann dadurch nie regressieren.
+  // die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung läuft auch
+  // hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
   if ((asm.report.boresConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
-    asm = assemble(buildFaceDefs(null), []);
+    const fallbackDefs = buildFaceDefs(null);
+    removeCollinearPoints(fallbackDefs);
+    asm = assemble(fallbackDefs, []);
     asm.report.filletsDefeatured = 0;
     asm.report.bandsDefeatured = 0;
     asm.report.cornersDefeatured = 0;

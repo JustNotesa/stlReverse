@@ -12,7 +12,8 @@
     "test:bore": "node tests/bore-analytic-regression.mjs",
     "lint": "web-ext lint",
     "test:golden": "node tests/golden-regression.mjs",
-    "test:ebike": "node tests/ebike-scorecard.mjs"
+    "test:ebike": "node tests/ebike-scorecard.mjs",
+    "test:collinear": "node tests/collinear-regression.mjs"
   },
   "keywords": [],
   "author": "",
