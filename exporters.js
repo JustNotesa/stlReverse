@@ -997,17 +997,39 @@ export function buildVolumeStepBrepV2(analysis) {
     };
     const removed = new Set();
     buildOwners();
+    // Erst ALLE Kandidaten (Ebene P, Loop L) bewerten, dann den mit den MEISTEN anliegenden Wänden
+    // anwenden und neu bewerten. Die echte Deckfläche einer Extrusion grenzt an jede Profilwand;
+    // eine Seitenwand, die zufällig auch von einem Band umschlossen ist (Rundrechteck-Profile mit
+    // Eckradius ≈ Deck-Rundung), nur an Deck/Boden/Stirn. Die frühere gierige Reihenfolge nach
+    // Punktzahl nahm bei in Z unterteilten Wänden die Seitenwand zuerst → falsche, nur teilweise
+    // entrundete Geometrie (Härtetest w1–w3, wasserdicht und daher vom Verdikt nicht erkannt).
     let done = 0;
-    const order = fds.map((_, i) => i).sort((a, b) => fds[b].outer.length - fds[a].outer.length);
-    for (const pi of order) {
-      if (removed.has(pi)) continue;
+    const order = fds.map((_, i) => i);
+    for (let iter = 0; iter < 256; iter++) {
+      let best = null;
+      for (const pi of order) {
+        if (removed.has(pi)) continue;
+        for (const L of loopsOf(fds[pi])) {
+          const plan = evaluateBand(pi, L);
+          if (plan && (!best || plan.walls.size > best.walls.size)) best = plan;
+        }
+      }
+      if (!best) break;
+      applyBand(best);
+      done++;
+      buildOwners();
+    }
+    if (removed.size) faceDefs = faceDefs.filter((_, i) => !removed.has(i));
+    return done;
+
+    function evaluateBand(pi, L) {
       const P = fds[pi], d = nrm[pi];
-      if (Math.hypot(d[0], d[1], d[2]) < 0.5) continue;
+      if (Math.hypot(d[0], d[1], d[2]) < 0.5) return null;
       // Ebenen-Offset von P (Mittel über die Loop-Punkte)
       let off = 0, cnt = 0;
       for (const p of P.outer) { off += _dot3(d, p); cnt++; }
       off /= cnt;
-      for (const L of loopsOf(P)) {
+      {
         // (1) Jede Kante von L muss an GENAU eine Band-Fläche grenzen
         const Ledges = new Set();
         const seeds = new Set();
@@ -1021,14 +1043,14 @@ export function buildVolumeStepBrepV2(analysis) {
           if (c <= WALL_COS || c >= PARALLEL_COS || removed.has(others[0].fi)) { ok = false; break; }
           seeds.add(others[0].fi);
         }
-        if (!ok || !seeds.size) continue;
+        if (!ok || !seeds.size) return null;
         // Größenschranke: ein Verrundungsband ist schmal und umgibt eine größere Fläche. Ohne
         // Schranke wuchs auf feinen Kugeln von JEDEM Flächenstück ein riesiges Band (50k-Kugel:
         // 9 s → 50 s, O(n²)). Ringförmige Deckflächen (schmaler Kragen) bekommen Spielraum (3×).
         const BAND_AREA_MAX = 3 * fdArea(pi);
         let bandArea = 0;
         for (const fi of seeds) bandArea += fdArea(fi);
-        if (bandArea > BAND_AREA_MAX) continue;
+        if (bandArea > BAND_AREA_MAX) return null;
         // Teil-Ausdehnung erst NACH der billigen Schranke (O(Punkte) je neuer Richtung — auf
         // Tori/Kugeln hat jedes Flächenstück eine eigene Richtung)
         const RMAX = Math.min(5, 0.45 * extentAlong(d));
@@ -1060,7 +1082,7 @@ export function buildVolumeStepBrepV2(analysis) {
             }
           }
         }
-        if (!ok || !wallEdges.length) continue;
+        if (!ok || !wallEdges.length) return null;
         // (2b) „Wand“-Facetten, deren Ecken ALLE auf dem Band liegen, sind Splitter der Verrundung,
         // deren Normale zufällig ⊥ P steht (z.B. im Eck-Bereich, wo das Band um eine Konturecke
         // läuft). Als Wand würden sie beim Projizieren in P's Ebene kollabieren und die neue Kontur
@@ -1090,31 +1112,37 @@ export function buildVolumeStepBrepV2(analysis) {
             }
           }
         }
-        if (!ok || !wallEdges.length) continue;
+        if (!ok || !wallEdges.length) return null;
         // (3) Gekrümmt? Winkel der Band-Normalen zu P müssen deutlich streuen
         let angMin = 90, angMax = 0;
         for (const fi of band) {
           const ang = Math.acos(Math.min(1, Math.abs(_dot3(nrm[fi], d)))) * 180 / Math.PI;
           if (ang < angMin) angMin = ang; if (ang > angMax) angMax = ang;
         }
-        if (angMax - angMin < MIN_SPREAD_DEG) continue;
+        if (angMax - angMin < MIN_SPREAD_DEG) return null;
         // (4) Wand-Bandkante muss genau EIN geschlossener Ring sein
         const rings = chainEdges(wallEdges);
-        if (rings.length !== 1 || rings[0].length < 3) continue;
+        if (rings.length !== 1 || rings[0].length < 3) return null;
         const ring = rings[0];
         // (5) Projektion auf P (entlang d — bleibt auf jeder Wand, da Wände d enthalten)
         const proj = new Map();       // vtxKey(alt) → neuer Punkt
         const newLoop = [];
+        let hLo = Infinity, hHi = -Infinity;
         for (const p of ring) {
           const h = _dot3(d, p) - off;
+          if (Math.abs(h) < hLo) hLo = Math.abs(h); if (Math.abs(h) > hHi) hHi = Math.abs(h);
           if (Math.abs(h) < 1e-6 || Math.abs(h) > RMAX) { ok = false; break; }
           const q = [p[0] - d[0] * h, p[1] - d[1] * h, p[2] - d[2] * h];
           proj.set(vtxKey(p), q);
           if (!newLoop.length || vtxKey(newLoop[newLoop.length - 1]) !== vtxKey(q)) newLoop.push(q);
         }
-        if (!ok) continue;
+        if (!ok) return null;
+        // Gleichmäßige Bandtiefe: bei einer echten Deckfläche liegt die ganze Bandkante auf EINER
+        // Höhe über P (= Verrundungsradius). Schwankt sie (Deck-Rundung vs. Eckradius), ist P eine
+        // Seitenwand, um die zufällig auch ein Band läuft → nicht diese Fläche entrunden.
+        if (hHi - hLo > Math.max(0.01, 0.02 * hHi)) return null;
         if (newLoop.length > 1 && vtxKey(newLoop[0]) === vtxKey(newLoop[newLoop.length - 1])) newLoop.pop();
-        if (newLoop.length < 3) continue;
+        if (newLoop.length < 3) return null;
         // Nur Wände und Band dürfen die verschobenen Punkte benutzen (sonst Riss/T-Junction)
         for (let fi = 0; fi < fds.length && ok; fi++) {
           if (band.has(fi) || walls.has(fi) || removed.has(fi)) continue;
@@ -1123,7 +1151,7 @@ export function buildVolumeStepBrepV2(analysis) {
             if (!ok) break;
           }
         }
-        if (!ok) continue;
+        if (!ok) return null;
         // (6) Orientierung wie der alte Loop, und die neue Kontur muss einfach sein (2D in P)
         const u = computeRefDir(d), v = _norm3(_cross3(d, u));
         const to2 = (p) => [_dot3(p, u), _dot3(p, v)];
@@ -1143,22 +1171,22 @@ export function buildVolumeStepBrepV2(analysis) {
             if (segX(new2[i], new2[(i + 1) % n2], new2[j], new2[(j + 1) % n2])) { ok = false; break; }
           }
         }
-        if (!ok) continue;
-        // (7) Anwenden: P bekommt die Wandkontur, Wände werden bis P verlängert, Band entfällt
-        L.length = 0; L.push(...newLoop);
-        for (const wi of walls) {
-          const W = fds[wi];
-          for (const Lw of [W.outer, ...W.inner]) {
-            for (let i = 0; i < Lw.length; i++) { const q = proj.get(vtxKey(Lw[i])); if (q) Lw[i] = q; }
-          }
-        }
-        for (const fi of band) removed.add(fi);
-        done++;
-        buildOwners();
+        if (!ok) return null;
+        return { L, newLoop, walls, band, proj };
       }
     }
-    if (removed.size) faceDefs = faceDefs.filter((_, i) => !removed.has(i));
-    return done;
+
+    // (7) Anwenden: P bekommt die Wandkontur, Wände werden bis P verlängert, Band entfällt
+    function applyBand({ L, newLoop, walls, band, proj }) {
+      L.length = 0; L.push(...newLoop);
+      for (const wi of walls) {
+        const W = fds[wi];
+        for (const Lw of [W.outer, ...W.inner]) {
+          for (let i = 0; i < Lw.length; i++) { const q = proj.get(vtxKey(Lw[i])); if (q) Lw[i] = q; }
+        }
+      }
+      for (const fi of band) removed.add(fi);
+    }
   }
 
   // ---- Body-Defeaturing v2b: Profil-Eckrundungen (senkrechte Kanten) bei Extrusionsteilen ----
