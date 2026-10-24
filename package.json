@@ -11,7 +11,8 @@
     "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/e2e/",
     "test:bore": "node tests/bore-analytic-regression.mjs",
     "lint": "web-ext lint",
-    "test:golden": "node tests/golden-regression.mjs"
+    "test:golden": "node tests/golden-regression.mjs",
+    "test:tube": "node tests/tube-regression.mjs"
   },
   "keywords": [],
   "author": "",
