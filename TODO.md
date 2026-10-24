@@ -130,10 +130,6 @@ Kreis-Kanten teilen.
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
-- [ ] **Kollineare Zwischenpunkte auf geraden Kanten entfernen** — Kanten, die im Netz unterteilt waren
-  (z.B. lbracket fein: Punkte bei z=4/8/12/16), bleiben im STEP als Kette gerader Stücke. Gültig +
-  wasserdicht, aber nicht minimal. Vertex mit genau 2 kollinearen Kanten in BEIDEN angrenzenden Loops
-  entfernen (konsistent, sonst T-Junction).
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
 - [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
   Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
@@ -166,6 +162,16 @@ Kreis-Kanten teilen.
   Halbkreise (Langloch-Enden) bleiben. **eBike: 6/6 Ecken, 2429 Flächen, Volumen 14163,0 mm³ = EXAKT die
   Referenz „ohne rundungen“, Schnittflächen auf allen Höhen identisch (Δ ≤ 0,01 mm²)**, wasserdicht, occt ok.
   Report-Feld `cornersDefeatured`. `exporters.js?v=25`.
+- [x] **Kollineare Zwischenpunkte auf geraden Kanten entfernt (2026-10-24)** — im Netz unterteilte gerade Kanten
+  (Extrusions-Wände in Z-Streifen, kanonische Punkte defeatureter Kanten, Facetten-Mäntel) waren im STEP Ketten
+  kurzer Stücke. `removeCollinearPoints` (exporters.js, direkt vor `assemble`, auch im facettierten Fallback):
+  Punkt fällt weg, wenn genau 2 Loops ihn nutzen, mit denselben Nachbarn a,b gegenläufig, a,v,b kollinear (v
+  zwischen a und b, sin < 1e-5, ALLE geschluckten Punkte < 1e-4 mm von a–b); gesperrt, wenn a–b schon existiert
+  oder ein Loop < 3 Kanten bekäme; circleRim-Loops unberührt. Topologisch neutral (Wasserdicht-Bilanz bleibt).
+  **lbracket fein: 42 → 18 Kanten, 36 → 12 Ecken = identisch zum unverteilten Netz, senkrechte Kanten je EIN
+  Stück.** cylinder 378 → 189, cone_pointed 432 → 96, plate_4fillets 24 → 12 (an) / 168 → 84 (aus); Flächenzahlen
+  unverändert (Golden grün), occt-Volumen/-Fläche gleich (rel. ≤ 2e-6). Schnellweg ohne kollineare Punkte
+  (50k-Kugel/Torus ~5 ms). Test: `node tests/collinear-regression.mjs`.
 - [x] **Body-Defeaturing v2: Verrundungs-Bänder an Deckflächen von Extrusionsteilen (2026-10-24)** — 2,5D-Teile
   (Skizze extrudiert, Kanten verrundet) haben rund um jede Deckfläche ein geschlossenes Verrundungsband, das an
   geraden Konturabschnitten ein Zylinder, an Bögen ein Torus ist (v1 greift dort nicht). v2 behandelt das ganze
