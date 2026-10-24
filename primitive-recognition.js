@@ -755,6 +755,11 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       else if (resc) region = region.concat(resc.touched); // gescheiterten Regrow mit verbrauchen
     }
     if (!v.ok) { failRegion(); continue; }
+    // Teil-Zylinder (Verrundung) nur, wenn er ein echtes Prisma ist (alle inneren Scharniere ∥ Achse)
+    // — wie in Phase 1. Ohne diese Prüfung hielt Phase 2 Stücke von Kegelmänteln, Torus-Bändern und
+    // Bohrungsbruchstücke für „Verrundungen“ (cone_frustum: 7 Schein-Fillets); v1 wollte sie dann
+    // entfernen, öffnete die Hülle und der Export fiel komplett auf facettiert zurück.
+    if (!v.full && !isPrism(tagged, v.axis)) { failRegion(); continue; }
 
     acceptPrim(v, tagged, region);
   }
