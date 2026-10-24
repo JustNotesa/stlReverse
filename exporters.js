@@ -603,6 +603,26 @@ export function buildVolumeStepBrepV2(analysis) {
       e.groups.push(group);
     }
   }
+  // Nur KONKAVE Vollzylinder sind Bohrungen (Loch im Material: die Außennormalen der Wand zeigen
+  // zur Achse). Ein konvexer Vollzylinder (Welle, Zapfen, Rohr-Außenwand) wird von der Erkennung
+  // ebenfalls als 'bore' getaggt — seine Ränder liegen aber auf AUSSEN-Loops der Deckflächen; als
+  // Bohrung behandelt, fand der Rand-Abgleich einen falschen Innen-Loop (Rohr Ra=40/Ri=38: Rand der
+  // Außenwand ↔ Innen-Loop R38) → Hülle offen → globaler Fallback verwarf alles.
+  const isConcaveBore = (entry) => {
+    const axis = _norm3(entry.prim.axis), ap = entry.prim.axisPoint;
+    let s = 0, w = 0;
+    for (const g of entry.groups) {
+      const vs = g.vertices;
+      if (!vs.length || !Array.isArray(g.normal)) continue;
+      let cx = 0, cy = 0, cz = 0; for (const v of vs) { cx += v[0]; cy += v[1]; cz += v[2]; }
+      const d = _sub3([cx / vs.length, cy / vs.length, cz / vs.length], ap), al = _dot3(d, axis);
+      const rad = _norm3([d[0] - axis[0] * al, d[1] - axis[1] * al, d[2] - axis[2] * al]);
+      const wt = vs.length / 3;
+      s += _dot3(_norm3(g.normal), rad) * wt; w += wt;
+    }
+    return w > 0 && s / w < -0.5; // Wand: −1 (zur Achse), konvexer Mantel: +1
+  };
+  for (const [k, e] of boreById) if (!isConcaveBore(e)) boreById.delete(k);
 
   // Rand-Geometrie aus der Vereinigung der Facetten extrahieren: Randkanten (genau 1× genutzt)
   // → geschlossene Loops. Durchgangsloch = genau 2 koaxiale Rand-Kreise; sonst Fallback (null).
@@ -629,13 +649,17 @@ export function buildVolumeStepBrepV2(analysis) {
       let st = 0; for (const pt of loop) st += _dot3(_sub3(pt, ap), axis);
       const meanT = st / loop.length;
       const center = [ap[0] + axis[0] * meanT, ap[1] + axis[1] * meanT, ap[2] + axis[2] * meanT];
+      let sr = 0;
       for (const pt of loop) {
         const w = _sub3(pt, center), along = _dot3(w, axis);
         const perp = Math.hypot(w[0] - axis[0] * along, w[1] - axis[1] * along, w[2] - axis[2] * along);
         if (Math.abs(perp - R) > tol) return null;
+        sr += perp;
       }
       const rimKey = `${fixZero(center[0], 3)},${fixZero(center[1], 3)},${fixZero(center[2], 3)}|${fixZero(R, 3)}`;
-      rims.push({ center, axis, radius: R, refDir, rimKey, meanT });
+      // loopR = GEMESSENER Radius des Rand-Loops (Mittel der Achsabstände) — Referenz für den
+      // Direkt-Abgleich; `radius` (Fit des Primitivs) bleibt die Geometrie der Kreiskante.
+      rims.push({ center, axis, radius: R, refDir, rimKey, meanT, loopR: sr / loop.length });
     }
     rims.sort((a, b) => a.meanT - b.meanT); // [unten, oben]
     if (rims[0].rimKey === rims[1].rimKey) return null; // null-Höhe / kollabiert
@@ -644,6 +668,13 @@ export function buildVolumeStepBrepV2(analysis) {
 
   // Innen-Loop einer Flachfläche rein GEOMETRISCH einem Rand zuordnen (simplifyLoop kann die
   // Polygon-Auflösung verändert haben → niemals über Vertex-Mengen vergleichen).
+  // Ein Direkt-Treffer IST derselbe Kantenzug wie der Bohrungsrand → gleiche Höhe und gleicher
+  // Radius bis auf Rundung. Daher absolute bzw. am GEMESSENEN Rand-Radius geeichte Toleranzen:
+  // die früheren R-relativen (axial 0.1·R, radial 0.06·R) ordneten bei kleiner Mündungsrundung an
+  // großem Radius den Rand einem Loop ANDERER Höhe/anderen Radius zu (Platte Ø20 mit r=0.5: Rand
+  // des Bohrungskerns z≈0.4/R10 ↔ Mündungskreis z=0/R10.5) → Verrundungsfacetten blieben übrig →
+  // Hülle offen → globaler Fallback verwarf auch korrekte v2-Bänder.
+  const RIM_AXIAL_TOL = 0.05;
   const innerMatchesRim = (loop, normal, rim) => {
     if (Math.abs(_dot3(normal, rim.axis)) < 0.985) return false; // Wand ~⟂ zur Achse (≤10°)
     let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
@@ -653,14 +684,19 @@ export function buildVolumeStepBrepV2(analysis) {
     // Der Radialtest unten ist achsen-blind (projiziert den Achsanteil weg) — ohne dieses Gate würde
     // ein koaxialer Ring am ANDEREN Loch-Ende fälschlich matchen (geometrisch falsche Fläche, aber
     // topologisch wasserdicht → vom Verdikt NICHT gefangen). Trennt auch dünne Platten korrekt auf.
-    if (Math.abs(_dot3(_sub3(c, rim.center), rim.axis)) > Math.max(0.05, 0.1 * rim.radius)) return false;
+    if (Math.abs(_dot3(_sub3(c, rim.center), rim.axis)) > RIM_AXIAL_TOL) return false;
+    // Radius: Mittel des Loops = gemessener Rand-Radius (exakt passend), Einzelpunkte mit der
+    // Form-Toleranz aus attemptBore.
     const radTol = Math.max(0.1, 0.06 * rim.radius);
+    const loopR = Number.isFinite(rim.loopR) ? rim.loopR : rim.radius;
+    let sr = 0;
     for (const p of loop) {
       const w = _sub3(p, rim.center), along = _dot3(w, rim.axis);
       const perp = Math.hypot(w[0] - rim.axis[0] * along, w[1] - rim.axis[1] * along, w[2] - rim.axis[2] * along);
-      if (Math.abs(perp - rim.radius) > radTol) return false;
+      if (Math.abs(perp - loopR) > radTol) return false;
+      sr += perp;
     }
-    return true;
+    return Math.abs(sr / loop.length - loopR) <= Math.max(0.02, 0.002 * loopR);
   };
 
   // Tentative Pläne (Zylinder-Ränder). Erfolgreiche Bohrungs-Gruppen vorerst überspringen.
