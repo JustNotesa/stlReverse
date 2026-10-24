@@ -13,7 +13,8 @@
     "lint": "web-ext lint",
     "test:golden": "node tests/golden-regression.mjs",
     "test:ebike": "node tests/ebike-scorecard.mjs",
-    "test:collinear": "node tests/collinear-regression.mjs"
+    "test:collinear": "node tests/collinear-regression.mjs",
+    "test:v2": "node tests/fixtures-v2/check.mjs --quick"
   },
   "keywords": [],
   "author": "",

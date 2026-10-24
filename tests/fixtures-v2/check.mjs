@@ -162,6 +162,46 @@ const roundedPairs = (body) => {
   return out;
 };
 
+// Profil-Eckrundungen schärfen wie v2b (exporters.js defeatureProfileCorners): Bogenlauf (kleine
+// gleichsinnige Knicke, endet an langen Kanten) zwischen zwei geraden Kanten → Schnittpunkt der
+// verlängerten Kanten. Vollkreise (keine deutlich längere Kante) und Bögen zwischen parallelen
+// Kanten bleiben. Für die idealen Testprofile genügen die tangentialen Fälle („cross“).
+function sharpenProfile2D(pts) {
+  const n = pts.length;
+  if (n < 6) return pts;
+  const len = [], dir = [], turn = [];
+  for (let i = 0; i < n; i++) { const a = pts[i], b = pts[(i + 1) % n]; const l = Math.hypot(b[0] - a[0], b[1] - a[1]); len.push(l); dir.push([(b[0] - a[0]) / l, (b[1] - a[1]) / l]); }
+  for (let i = 0; i < n; i++) { const a = dir[(i - 1 + n) % n], b = dir[i]; turn.push(Math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]) * 180 / Math.PI); }
+  const sorted = len.slice().sort((x, y) => x - y);
+  let iLong = 0; for (let i = 1; i < n; i++) if (len[i] > len[iLong]) iLong = i;
+  if (len[iLong] < 3 * sorted[n >> 1]) return pts;                 // Vollkreis
+  const isArc = (i) => Math.abs(turn[i]) >= 0.3 && Math.abs(turn[i]) <= 35;
+  const repl = new Map();                                           // Index j → { m, C }
+  const s0 = (iLong + 1) % n;
+  for (let k = 0; k < n; ) {
+    const i0 = (s0 + k) % n;
+    if (!isArc(i0)) { k++; continue; }
+    const sg = Math.sign(turn[i0]); let e = i0, cnt = 1; const ch = [];
+    while (k + cnt < n && isArc((e + 1) % n) && Math.sign(turn[(e + 1) % n]) === sg) {
+      if (ch.length) { const srt = ch.slice().sort((x, y) => x - y); if (len[e] > 2.5 * srt[srt.length >> 1]) break; }
+      ch.push(len[e]); e = (e + 1) % n; cnt++;
+    }
+    k += cnt;
+    if (cnt < 2) continue;
+    const ia = (i0 - 1 + n) % n, ib = e, dA = dir[ia], dB = dir[ib];
+    const cr = dA[0] * dB[1] - dA[1] * dB[0];
+    if (Math.abs(cr) < Math.sin(10 * Math.PI / 180)) continue;
+    const wx = pts[e][0] - pts[i0][0], wy = pts[e][1] - pts[i0][1];
+    const t = (wx * dB[1] - wy * dB[0]) / cr;
+    repl.set(i0, { m: e, C: [pts[i0][0] + t * dA[0], pts[i0][1] + t * dA[1]] });
+  }
+  if (!repl.size) return pts;
+  const out = []; const skip = new Set();
+  for (const [j, { m }] of repl) for (let i = j; ; i = (i + 1) % n) { if (i !== j) skip.add(i); if (i === m) break; }
+  for (let i = 0; i < n; i++) { if (repl.has(i)) out.push(repl.get(i).C); else if (!skip.has(i)) out.push(pts[i]); }
+  return out;
+}
+
 // Zulässige planare Ergebnisse: jede Teilmenge der Rundungen scharf
 function variantsFor(body, vMeshParsed, heavy) {
   const pairs = roundedPairs(body);
@@ -177,6 +217,15 @@ function variantsFor(body, vMeshParsed, heavy) {
       volume: m === 0 ? vMeshParsed : meshVolume(tris), tol: tolPlanar,
       target: body.expect.mode === 'sharp' ? m === all : m === 0,
     });
+  }
+  // v2b (seit 2026-10-24): nach den Deck-Bändern werden auch die senkrechten Profil-Eckrundungen
+  // geschärft (eBike-Referenz „ohne rundungen“ hat dort scharfe Ecken) → zusätzliche Ziel-Variante.
+  if (pairs.length) {
+    const bodyP = { ...body, columns: body.columns.map((col) => ({ ...col, profile: sharpenProfile2D(col.profile) })) };
+    if (bodyP.columns.some((col, i) => col.profile.length !== body.columns[i].profile.length)) {
+      const tris = f32(buildMesh(sharpen(bodyP)));
+      vs.push({ label: 'alle Rundungen + Profilecken scharf (v2b)', sharpCount: pairs.length, planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: body.expect.mode === 'sharp' });
+    }
   }
   return vs;
 }
