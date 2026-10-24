@@ -340,8 +340,19 @@ export function buildVolumeStepBrepV2(analysis) {
   // sin(2π) ≈ -2.4e-16 → geometrisch identische Punkte bekommen y = -0.0 statt +0.0.
   // Ohne diese Normalisierung hashen sie auf "-0.0000" vs "0.0000" → die Kanten
   // entlang der Naht finden ihren Partner nicht → Hülle bleibt offen (Kegel-Bug).
-  const fixZero = (v, dp) => { const r = +Number(v).toFixed(dp); return (r === 0 ? 0 : r).toFixed(dp); };
-  const vtxKey = (v) => `${fixZero(v[0], VKEY_DP)},${fixZero(v[1], VKEY_DP)},${fixZero(v[2], VKEY_DP)}`;
+  // (Gleiches Ergebnis wie `(+v.toFixed(dp) || 0).toFixed(dp)`, nur ohne zweites toFixed.)
+  const fixZero = (v, dp) => { const s = Number(v).toFixed(dp); return s.charCodeAt(0) === 45 && +s === 0 ? s.slice(1) : s; };
+  // Schlüssel je Punkt-Array merken: Defeaturing/Verschmelzen fragen dieselben Punkte tausendfach
+  // ab (eBike: ~40 % der Exportzeit in toFixed). Die Koordinaten werden mitgeprüft, damit ein
+  // nachträglich verändertes Array nie einen veralteten Schlüssel liefert.
+  const vkCache = new WeakMap();
+  const vtxKey = (v) => {
+    const c = vkCache.get(v);
+    if (c && c.x === v[0] && c.y === v[1] && c.z === v[2]) return c.k;
+    const k = `${fixZero(v[0], VKEY_DP)},${fixZero(v[1], VKEY_DP)},${fixZero(v[2], VKEY_DP)}`;
+    if (v && typeof v === 'object') vkCache.set(v, { x: v[0], y: v[1], z: v[2], k });
+    return k;
+  };
   const edgeKeyFn = (a, b) => {
     const ka = vtxKey(a), kb = vtxKey(b);
     return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
@@ -1003,21 +1014,37 @@ export function buildVolumeStepBrepV2(analysis) {
     // Eckradius ≈ Deck-Rundung), nur an Deck/Boden/Stirn. Die frühere gierige Reihenfolge nach
     // Punktzahl nahm bei in Z unterteilten Wänden die Seitenwand zuerst → falsche, nur teilweise
     // entrundete Geometrie (Härtetest w1–w3, wasserdicht und daher vom Verdikt nicht erkannt).
+    // Umsetzung in Runden: alle Kandidaten bewerten, nach Wandanzahl absteigend anwenden; ein
+    // Kandidat wird nur dann neu bewertet, wenn eine zuvor angewendete Änderung seine Flächen
+    // (P, Band, Wände) berührt hat. Eine weitere Runde fängt Kandidaten, die erst durch andere
+    // möglich wurden. (Vorher: nach JEDER Anwendung alles neu bewerten — eBike ~1 s langsamer.)
     let done = 0;
-    const order = fds.map((_, i) => i);
-    for (let iter = 0; iter < 256; iter++) {
-      let best = null;
-      for (const pi of order) {
+    for (let round = 0; round < 16; round++) {
+      const cands = [];
+      for (let pi = 0; pi < fds.length; pi++) {
         if (removed.has(pi)) continue;
-        for (const L of loopsOf(fds[pi])) {
-          const plan = evaluateBand(pi, L);
-          if (plan && (!best || plan.walls.size > best.walls.size)) best = plan;
-        }
+        for (const L of loopsOf(fds[pi])) { const plan = evaluateBand(pi, L); if (plan) cands.push({ pi, L, plan }); }
       }
-      if (!best) break;
-      applyBand(best);
-      done++;
-      buildOwners();
+      if (!cands.length) break;
+      cands.sort((a, b) => b.plan.walls.size - a.plan.walls.size);
+      const touched = new Set();
+      const hit = (set) => { for (const fi of set) if (touched.has(fi)) return true; return false; };
+      let applied = 0;
+      for (const c of cands) {
+        if (removed.has(c.pi)) continue;
+        let plan = c.plan;
+        if (touched.has(c.pi) || hit(plan.band) || hit(plan.walls)) {
+          plan = evaluateBand(c.pi, c.L);                  // Umgebung hat sich geändert → neu bewerten
+          if (!plan) continue;
+        }
+        applyBand(plan);
+        buildOwners();
+        done++; applied++;
+        touched.add(c.pi);
+        for (const fi of plan.band) touched.add(fi);
+        for (const fi of plan.walls) touched.add(fi);
+      }
+      if (!applied) break;
     }
     if (removed.size) faceDefs = faceDefs.filter((_, i) => !removed.has(i));
     return done;
