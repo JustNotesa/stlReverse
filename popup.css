@@ -179,6 +179,11 @@ main {
   border-color: rgba(224, 179, 77, 0.55);
   background: rgba(224, 179, 77, 0.14);
 }
+/* Zweite Zeile: was die Rekonstruktion gemacht hat (Zylinder, entfernte Rundungen) */
+.watertight-detail {
+  font-weight: 500;
+  opacity: 0.85;
+}
 
 .progress-steps {
   list-style: none;
