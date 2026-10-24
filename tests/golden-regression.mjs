@@ -10,7 +10,7 @@
 //
 // Läuft die ECHTE Worker-Pipeline (gleiche Module, gleiche Reihenfolge wie analysis-worker.js):
 //   parseStl → simplifyMesh (>50k) → buildNormalGroups → unifyCoplanarGroups →
-//   recognizePrimitives → buildVolumeStepBrepV2 (Defeaturing-Toggle AN und AUS)
+//   recognizePrimitives → detectTubes → buildVolumeStepBrepV2 (Defeaturing-Toggle AN und AUS)
 //
 // Ausführen:   npm run test:golden            (Exit 0 = alles wie erwartet, 1 = Abweichung)
 // Bewusst übernehmen (nach Prüfung des Diffs!):  npm run test:golden -- --update
@@ -23,6 +23,7 @@ import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
+import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 
 const require = createRequire(import.meta.url);
@@ -45,6 +46,7 @@ function pipeline(mesh) {
     .sort((a, b) => b.vertices.length - a.vertices.length);
   const t0 = performance.now();
   const { stats } = recognizePrimitives(groups);
+  detectTubes(groups); // Kanal-Erkennung wie im Worker (taggt group.tube) — Laufzeit zählt mit
   const recogMs = performance.now() - t0;
   return { groups, stats, recogMs };
 }

@@ -2,6 +2,7 @@ import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=2';
 import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=11';
+import { detectTubes } from './tube-sweep.js?v=1';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
 
@@ -177,6 +178,21 @@ self.addEventListener('message', (event) => {
         id,
         progress: { step: 'worker', detail: `Primitiv-Erkennung übersprungen: ${e?.message || e}`, ratio: 0.95 }
       });
+    }
+
+    // Kanal-Erkennung (tube-sweep.js): gebogene Rohre (Kreisprofil entlang Biarc-Bahn) → group.tube.
+    // Wie die Primitiv-Erkennung rein additiv (Tags), gekapselt: ein Fehler lässt Kanäle facettiert.
+    try {
+      const { tubes, stats } = detectTubes(analysis.normalGroups);
+      analysis.tubeStats = { candidates: stats.candidates, tubes: tubes.length };
+      if (tubes.length) {
+        self.postMessage({
+          id,
+          progress: { step: 'worker', detail: `Kanal-Erkennung: ${tubes.length} gebogene Kanäle erkannt`, ratio: 0.97 }
+        });
+      }
+    } catch (e) {
+      analysis.tubeStats = { candidates: 0, tubes: 0 };
     }
 
     self.postMessage({ id, ok: true, analysis });

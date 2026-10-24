@@ -12,6 +12,7 @@ import {
   mapOutlinePointToDxf, mapOutlinePointToStep,
   defaultBounds, rectangleFromBounds
 } from './utils.js';
+import { matchTubeMouths } from './tube-sweep.js';
 
 export function buildOutlinesDxf(outlines) {
   const lines = [];
@@ -771,6 +772,37 @@ export function buildVolumeStepBrepV2(analysis) {
     });
   }
 
+  // ---- Gebogene Kanäle (tube-sweep.js): Rohr-Pläne analog zu den Bohrungs-Plänen ----
+  // detectTubes (Worker/Pipeline) hat die Kanal-Gruppen mit group.tube = spec getaggt (Biarc-Bahn,
+  // Profilkreis, Mündungskurven). Pro Kanal müssen BEIDE Mündungen als Innen-Loop einer ebenen
+  // Fläche gefunden werden → diese Loops werden zur analytischen Mündungskurve (circleRim-Mechanik
+  // wie bei Bohrungen), die Kanal-Facetten entfallen, assemble() emittiert die Flächenkette.
+  // Scheitert das Matching → Kanal bleibt facettiert; öffnet die Kette die Hülle → globaler Fallback.
+  // Gruppierung über spec.id (Objekt-Identität geht an der Worker-Grenze verloren).
+  const tubePlans = [];
+  {
+    const byId = new Map();
+    for (const g of normalGroups) {
+      const sp = g.tube;
+      if (!sp || !Array.isArray(sp.pieces) || !Array.isArray(sp.curves)) continue;
+      let e = byId.get(sp.id);
+      if (!e) { e = { spec: sp, groups: new Set() }; byId.set(sp.id, e); }
+      e.groups.add(g);
+    }
+    const boreGroups = new Set();
+    for (const pl of finalPlans) for (const g of pl.groups) boreGroups.add(g);
+    for (const e of byId.values()) {
+      if ([...e.groups].some((g) => boreGroups.has(g))) continue;
+      const rest = faceDefs.filter((fd) => !e.groups.has(fd.group));
+      let hits = null;
+      try { hits = matchTubeMouths(e.spec, rest, (inner) => !!inner.circleRim); } catch (_) { hits = null; }
+      if (!hits) continue;
+      for (const h of hits) h.inner.circleRim = { ...e.spec.curves[h.curveIndex], rimKey: `tube${e.spec.id}:${h.curveIndex}` };
+      tubePlans.push(e);
+      faceDefs = rest;
+    }
+  }
+
   // ---- Body-Defeaturing: Gerade-Kanten-Verrundungen → scharfe Kante ----
   // Erkannte Teil-Zylinder-Fillets (kind='fillet') zwischen genau ZWEI Ebenen werden entfernt:
   // die Fillet-Facetten entfallen, die Rand-Vertices beider Nachbar-Ebenen wandern auf deren
@@ -1476,13 +1508,27 @@ export function buildVolumeStepBrepV2(analysis) {
   const circleUse = new Map();      // rimKey → { fwd, rev }
   const getOrCreateCircleEdge = (rimKey, geom) => {
     if (!circleRegistry.has(rimKey)) {
-      const placId = addAxis2Placement3D(geom.center, geom.axis, geom.refDir);
-      const circleId = addCircle(placId, geom.radius);
-      const v = getVertex([
-        geom.center[0] + geom.radius * geom.refDir[0],
-        geom.center[1] + geom.radius * geom.refDir[1],
-        geom.center[2] + geom.radius * geom.refDir[2],
-      ]);
+      // Geschlossene Kurve: CIRCLE (Standard), ELLIPSE (schräge Kanal-Mündung an Geradenstück) oder
+      // B_SPLINE_CURVE_WITH_KNOTS (schräge Mündung an Bogenstück, aus tube-sweep.js). Ein Vertex.
+      let circleId, vpt;
+      if (geom.kind === 'bspline') {
+        const cps = geom.ctrl.map((p) => addPoint(p));
+        circleId = id++;
+        entities.push(`#${circleId}=B_SPLINE_CURVE_WITH_KNOTS('',3,(${cps.map((c) => `#${c}`).join(',')}),.UNSPECIFIED.,.T.,.F.,(${geom.mults.join(',')}),(${geom.knots.map(toStep).join(',')}),.UNSPECIFIED.);`);
+        vpt = geom.vertex;
+      } else {
+        const placId = addAxis2Placement3D(geom.center, geom.axis, geom.refDir);
+        if (geom.kind === 'ellipse') {
+          circleId = id++;
+          entities.push(`#${circleId}=ELLIPSE('',#${placId},${toStep(geom.radius)},${toStep(geom.semi2)});`);
+        } else circleId = addCircle(placId, geom.radius);
+        vpt = [
+          geom.center[0] + geom.radius * geom.refDir[0],
+          geom.center[1] + geom.radius * geom.refDir[1],
+          geom.center[2] + geom.radius * geom.refDir[2],
+        ];
+      }
+      const v = getVertex(vpt);
       const ecId = addEdgeCurve(v.vtxId, v.vtxId, circleId);
       circleRegistry.set(rimKey, { ecId });
     }
@@ -1516,7 +1562,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
   // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
   const entMark = entities.length, idMark = id;
-  const assemble = (faceDefsArg, plans) => {
+  const assemble = (faceDefsArg, plans, tubesArg = []) => {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
@@ -1574,6 +1620,45 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
 
+    // Kanal-Flächenketten (tube-sweep.js): Stück k zwischen Kurve k und k+1. Profil ⟂ Bahn (γ=0):
+    // Gerade → CYLINDRICAL_SURFACE, Bogen → TOROIDAL_SURFACE. Profil geneigt (γ≠0, Profilkreis auf
+    // der Mündungsfläche skizziert): Gerade → SURFACE_OF_LINEAR_EXTRUSION, Bogen →
+    // SURFACE_OF_REVOLUTION des Profilkreises — beides exakt die gezogene Fläche.
+    // Orientierung: Flächennormale zeigt in den Hohlraum. Kurven mit sense +1 laufen positiv um die
+    // Bahnrichtung: Anfangskurve wird .F., Endkurve .T. benutzt (sense −1 umgekehrt); die ebene
+    // Mündungsfläche benutzt ihre Kurve .T. → jede Kurve genau 1× vor, 1× zurück.
+    for (const tp of tubesArg) {
+      const sp = tp.spec, r = sp.radius, tilted = Math.abs(sp.gamma) > 1e-9;
+      const keyOf = (k) => `tube${sp.id}:${k}`;
+      sp.pieces.forEach((pc, k) => {
+        let surf, sameSense;
+        const profCircle = () => addCircle(addAxis2Placement3D(pc.profC, pc.profM, computeRefDir(pc.profM)), r);
+        if (pc.kind === 'line') {
+          sameSense = false; // Normale zeigt von der Achse weg
+          if (!tilted) surf = addCylindricalSurface(addAxis2Placement3D(pc.profC, pc.dir, computeRefDir(pc.dir)), r);
+          else {
+            const sc = profCircle(), vec = addVector(addDirection(pc.dir), 1);
+            surf = id++; entities.push(`#${surf}=SURFACE_OF_LINEAR_EXTRUSION('',#${sc},#${vec});`);
+          }
+        } else if (!tilted) {
+          sameSense = false; // Torus-Normale zeigt vom Seelenkreis weg
+          surf = id++; entities.push(`#${surf}=TOROIDAL_SURFACE('',#${addAxis2Placement3D(pc.O, pc.axis, pc.ea)},${toStep(pc.R)},${toStep(r)});`);
+        } else {
+          sameSense = true; // u = Drehwinkel (Bahnrichtung), v = Profil → Normale zeigt zum Profilmittelpunkt
+          const sc = profCircle();
+          const a1 = id++; entities.push(`#${a1}=AXIS1_PLACEMENT('',#${addPoint(pc.O)},#${addDirection(pc.axis)});`);
+          surf = id++; entities.push(`#${surf}=SURFACE_OF_REVOLUTION('',#${sc},#${a1});`);
+        }
+        const c0 = sp.curves[k], c1 = sp.curves[k + 1];
+        const e0 = getOrCreateCircleEdge(keyOf(k), c0), e1 = getOrCreateCircleEdge(keyOf(k + 1), c1);
+        const f0 = c0.sense < 0, f1 = c1.sense > 0;
+        useCircle(keyOf(k), f0); useCircle(keyOf(k + 1), f1);
+        const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(e0.ecId, f0)]));
+        const ib = addFaceBound(addEdgeLoop([addOrientedEdge(e1.ecId, f1)]));
+        faceIds.push(addAdvancedFace([ob, ib], surf, sameSense));
+      });
+    }
+
     // Wasserdicht-Verdikt: Linien-Kanten (edgeUse) UND Kreis-Kanten (circleUse) nach denselben
     // Regeln zählen (1× = Randkante, >2 = non-manifold, 2 aber nicht 1fwd/1rev = Orientierungsfehler).
     let bE = 0, nmE = 0, oD = 0;
@@ -1593,18 +1678,20 @@ export function buildVolumeStepBrepV2(analysis) {
         boundaryEdges: bE, nonManifoldEdges: nmE, orientationDefects: oD,
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
+        tubesConverted: tubesArg.length,
+        tubePieces: tubesArg.reduce((n, tp) => n + tp.spec.pieces.length, 0),
       },
     };
   };
 
-  let asm = assemble(faceDefs, finalPlans);
+  let asm = assemble(faceDefs, finalPlans, tubePlans);
   asm.report.filletsDefeatured = filletsDefeatured;
   asm.report.bandsDefeatured = bandsDefeatured;
   asm.report.cornersDefeatured = cornersDefeatured;
   // Globaler Schutz: öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
   // die wasserdichte Baseline kann dadurch nie regressieren.
-  if ((asm.report.boresConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
+  if ((asm.report.boresConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
     asm = assemble(buildFaceDefs(null), []);
     asm.report.filletsDefeatured = 0;
     asm.report.bandsDefeatured = 0;
