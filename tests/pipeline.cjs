@@ -1,5 +1,5 @@
 // Node-Variante der Worker-Pipeline (parseStl → buildNormalGroups → unifyCoplanarGroups →
-// recognizePrimitives → buildVolumeStepBrepV2) für Tests ohne Browser. Nutzt dieselben
+// recognizePrimitives → detectTubes → buildVolumeStepBrepV2) für Tests ohne Browser. Nutzt dieselben
 // Module wie analysis-worker.js — keine Kopien mehr (die liefen früher auseinander).
 const path = require('path');
 const fs = require('fs');
@@ -20,12 +20,14 @@ async function analyze(sampleFile, { withExport = true } = {}) {
   const { unified } = unifyCoplanarGroups(groups);
   groups = unified.sort((a, b) => b.vertices.length - a.vertices.length);
   const { primitives, stats } = recognizePrimitives(groups);
+  const { detectTubes } = await import(path.join(ROOT, 'tube-sweep.js'));
+  const { stats: tubeStats } = detectTubes(groups);
   let res = null;
   if (withExport) {
     const { buildVolumeStepBrepV2 } = await import(path.join(ROOT, 'exporters.js'));
     res = buildVolumeStepBrepV2({ normalGroups: groups });
   }
-  return { groups, recogStats: stats, primitives, res };
+  return { groups, recogStats: stats, tubeStats, primitives, res };
 }
 
 module.exports = { analyze, buildNormalGroups };

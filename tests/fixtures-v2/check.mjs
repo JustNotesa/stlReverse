@@ -36,6 +36,7 @@ import { parseStl, simplifyMesh } from '../../analysis-core.js';
 import { buildNormalGroups } from '../../region-growing.js';
 import { unifyCoplanarGroups } from '../../face-unification.js';
 import { recognizePrimitives } from '../../primitive-recognition.js';
+import { detectTubes } from '../../tube-sweep.js';
 
 // Anderen Exporter prüfen (z. B. einen Fix-Kandidaten): V2_EXPORTER=/pfad/exporters.js node …
 const { buildVolumeStepBrepV2 } = await import(process.env.V2_EXPORTER ? pathToFileURL(process.env.V2_EXPORTER).href : '../../exporters.js');
@@ -70,6 +71,7 @@ function pipeline(mesh) {
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified
     .sort((a, b) => b.vertices.length - a.vertices.length);
   const { stats } = recognizePrimitives(groups);
+  detectTubes(groups); // Kanal-Erkennung wie im Worker (taggt group.tube)
   return { groups, stats, ms: performance.now() - t0 };
 }
 

@@ -10,7 +10,7 @@
 //
 // Läuft die ECHTE Worker-Pipeline (gleiche Module, gleiche Reihenfolge wie analysis-worker.js):
 //   parseStl → simplifyMesh (>50k) → buildNormalGroups → unifyCoplanarGroups →
-//   recognizePrimitives → buildVolumeStepBrepV2 (Defeaturing-Toggle AN und AUS)
+//   recognizePrimitives → detectTubes → buildVolumeStepBrepV2 (Defeaturing-Toggle AN und AUS)
 //
 // Ausführen:   npm run test:golden            (Exit 0 = alles wie erwartet, 1 = Abweichung)
 // Bewusst übernehmen (nach Prüfung des Diffs!):  npm run test:golden -- --update
@@ -23,6 +23,7 @@ import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
+import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 
 const require = createRequire(import.meta.url);
@@ -45,6 +46,7 @@ function pipeline(mesh) {
     .sort((a, b) => b.vertices.length - a.vertices.length);
   const t0 = performance.now();
   const { stats } = recognizePrimitives(groups);
+  detectTubes(groups); // Kanal-Erkennung wie im Worker (taggt group.tube) — Laufzeit zählt mit
   const recogMs = performance.now() - t0;
   return { groups, stats, recogMs };
 }
@@ -62,6 +64,8 @@ async function metrics(groups, defeature) {
     filletsDefeatured: r.filletsDefeatured ?? 0,
     bandsDefeatured: r.bandsDefeatured ?? 0,
     cornersDefeatured: r.cornersDefeatured ?? 0,
+    tubesConverted: r.tubesConverted ?? 0,
+    tubePieces: r.tubePieces ?? 0,
     cylindrical: (res.step.match(/CYLINDRICAL_SURFACE\(/g) || []).length,
     conical: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
     occt: !!occt.success,
@@ -113,7 +117,7 @@ for (const f of files) {
   const entry = { bores: stats.bores, fillets: stats.fillets, defeatureOn: on, defeatureOff: off };
   next[f] = entry;
   const flag = recogMs > RECOG_LIMIT_MS ? '  ⚠ LANGSAM' : '';
-  origLog(`${f.padEnd(70)} ${String(Math.round(recogMs)).padStart(6)} ms  faces=${on.faces}/${off.faces} wt=${on.watertight} bores=${on.boresConverted} cone=${on.conical} bands=${on.bandsDefeatured}${flag}`);
+  origLog(`${f.padEnd(70)} ${String(Math.round(recogMs)).padStart(6)} ms  faces=${on.faces}/${off.faces} wt=${on.watertight} bores=${on.boresConverted} cone=${on.conical} bands=${on.bandsDefeatured} tubes=${on.tubesConverted}${flag}`);
   if (recogMs > RECOG_LIMIT_MS) failures.push(`${f}: Erkennung ${Math.round(recogMs)} ms > ${RECOG_LIMIT_MS} ms (O(n²)-Regression?)`);
   if (!UPDATE) {
     const g = golden[f];

@@ -7,7 +7,7 @@
 //
 // Gemessen:
 //   1. Export-Report (wasserdicht, Flächen, entfernte Bänder/Ecken, umgewandelte Bohrungen)
-//   2. Analytische Flächen in der STEP (CYLINDRICAL / TOROIDAL / CONICAL / PLANE)
+//   2. Analytische Flächen in der STEP (CYLINDRICAL / TOROIDAL / CONICAL / Dreh-/Extrusionsfläche / PLANE)
 //   3. FACETTEN-REST: Ebenen, deren Normale nicht achsparallel ist. Der Halter ist ein
 //      rechtwinkliges Teil — jede schräge Ebene bildet eine gekrümmte Fläche (Loch, Kanal)
 //      nach. Ziel: 0.
@@ -24,6 +24,7 @@ import { parseStl } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
+import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 
 const require = createRequire(import.meta.url);
@@ -73,12 +74,14 @@ const stepStats = (step) => {
   return {
     faces: count(/^ADVANCED_FACE\(/), plane: count(/^PLANE\(/), cylinder: count(/^CYLINDRICAL_SURFACE\(/),
     torus: count(/^TOROIDAL_SURFACE\(/), cone: count(/^CONICAL_SURFACE\(/), skewPlanes: skew,
+    revolution: count(/^SURFACE_OF_REVOLUTION\(/), extrusion: count(/^SURFACE_OF_LINEAR_EXTRUSION\(/),
   };
 };
 
 const mesh = load(FILLETED), ref = load(REFERENCE);
 const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
 recognizePrimitives(groups);
+detectTubes(groups); // Kanal-Erkennung wie im Worker (taggt group.tube)
 const t0 = performance.now();
 const res = buildVolumeStepBrepV2({ normalGroups: groups });
 const ms = performance.now() - t0;
@@ -92,7 +95,7 @@ const vS = volume(trisStep), vR = volume(tRef);
 const fails = [];
 origLog('eBike-Scorecard (verrundet → „Verrundungen entfernen“ an)');
 origLog(`  Export:      ${r.faceCount} Flächen, wasserdicht=${r.watertight}, Bänder=${r.bandsDefeatured ?? 0}, Ecken=${r.cornersDefeatured ?? 0}, Bohrungen=${r.boresConverted}, ${Math.round(ms)} ms, occt=${occ.success ? 'ok' : 'FEHLER'}`);
-origLog(`  Flächenarten: PLANE ${st.plane} · CYLINDRICAL ${st.cylinder} · TOROIDAL ${st.torus} · CONICAL ${st.cone}`);
+origLog(`  Flächenarten: PLANE ${st.plane} · CYLINDRICAL ${st.cylinder} · TOROIDAL ${st.torus} · CONICAL ${st.cone} · REVOLUTION ${st.revolution} · LINEAR_EXTRUSION ${st.extrusion}`);
 origLog(`  Facetten-Rest (schräge Ebenen, Ziel 0): ${st.skewPlanes}`);
 origLog(`  Volumen:     ${vS.toFixed(1)} mm³  (Referenz ${vR.toFixed(1)}, Δ ${(vS - vR).toFixed(1)} = ${((vS - vR) / vR * 100).toFixed(3)} %)`);
 const ys = [0.05, 0.5, 3, 5, 8.5, 9.95];
