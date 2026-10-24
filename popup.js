@@ -427,6 +427,23 @@ function setStepWatertightStatus(report) {
   if (watertight) {
     el.textContent = `✓ Wasserdicht: ${faceCount} Flächen, alle ${edgeCount} Kanten genau 1× vor- und 1× rückwärts genutzt → geschlossener Körper.`;
     el.dataset.state = 'ok';
+    // Was die Rekonstruktion gemacht hat (nur wenn etwas passiert ist): echte CAD-Flächen statt
+    // Facetten und entfernte Verrundungen — sonst sieht man dem Verdikt nicht an, warum die
+    // Flächenzahl mit „Verrundungen entfernen“ so viel kleiner ist.
+    const n = (v) => (Number.isFinite(v) ? v : 0);
+    const done = [];
+    if (n(report.boresConverted)) done.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
+    const rounds = [];
+    if (n(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
+    if (n(report.cornersDefeatured)) rounds.push(`${report.cornersDefeatured} gerundete Profilecke${report.cornersDefeatured === 1 ? '' : 'n'}`);
+    if (n(report.filletsDefeatured)) rounds.push(`${report.filletsDefeatured} Kanten-Verrundung${report.filletsDefeatured === 1 ? '' : 'en'}`);
+    if (rounds.length) done.push(`scharf gemacht: ${rounds.join(', ')}`);
+    if (done.length) {
+      const detail = document.createElement('span');
+      detail.className = 'watertight-detail';
+      detail.textContent = done.join(' · ');
+      el.append(document.createElement('br'), detail);
+    }
   } else {
     const parts = [];
     if (boundaryEdges)      parts.push(`${boundaryEdges} offene Kante${boundaryEdges === 1 ? '' : 'n'}`);
