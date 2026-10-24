@@ -32,6 +32,7 @@ import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
+import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -49,6 +50,7 @@ function exportFor(file) {
   groups = unified.sort((a, b) => b.vertices.length - a.vertices.length);
   const analysis = { normalGroups: groups };
   try { recognizePrimitives(analysis.normalGroups); } catch (e) { /* Erkennung optional — Export läuft trotzdem */ }
+  try { detectTubes(analysis.normalGroups); } catch (e) { /* Kanal-Erkennung optional, wie im Worker */ }
   const res = buildVolumeStepBrepV2(analysis);
   return { res, tris: mesh.faces.length };
 }

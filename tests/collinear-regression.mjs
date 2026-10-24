@@ -24,6 +24,7 @@ import { parseStl } from '../analysis-core.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
+import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 
 const require = createRequire(import.meta.url);
@@ -54,6 +55,7 @@ function exportFor(name, defeature) {
   const mesh = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   recognizePrimitives(groups);
+  detectTubes(groups);
   return buildVolumeStepBrepV2({ normalGroups: groups, defeature });
 }
 
