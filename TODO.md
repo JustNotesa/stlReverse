@@ -129,15 +129,19 @@ Kreis-Kanten teilen.
   = nächste Recognition-Etappe (analog zur Bohrungs-Härtung). (b) Ebene↔gekrümmt-Streifen (eBike-
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
-  (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
+  (torus-proto). GEBOGENE Löcher: seit 2026-10-24 exakt (tube-sweep.js, s. Erledigt).
 - [ ] **Kollineare Zwischenpunkte auf geraden Kanten entfernen** — Kanten, die im Netz unterteilt waren
   (z.B. lbracket fein: Punkte bei z=4/8/12/16), bleiben im STEP als Kette gerader Stücke. Gültig +
   wasserdicht, aber nicht minimal. Vertex mit genau 2 kollinearen Kanten in BEIDEN angrenzenden Loops
   entfernen (konsistent, sonst T-Junction).
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
-- [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
-  Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
-  Segment finden → entlang der Kette weiterlaufen → als ein Feature taggen (Panel 3), Export bleibt facettiert.
+- [ ] **Gebogene Kanäle — Rest-Fälle** (Basis erledigt, s. Erledigt 2026-10-24 „tube-sweep.js“):
+  - Panel 2/3: Kanal-Gruppen (`group.tube`) farbig markieren (aktuell nur im Export sichtbar).
+  - Nicht-ebene Bahnen (3D-Biarcs), Sackkanäle (1 Mündung), Mündung auf gekrümmter Fläche/Verrundung,
+    Kanäle in Gruppen, die sich mit anderen Flächen eine Region teilen → bleiben derzeit facettiert.
+  - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
+  - eBike rechts: Modell-Restfehler im Bogen bis 0.037 mm (Profil-Neigung dort ~1° anders) — prüfen.
+  - Cache-Buster: `tube-sweep.js?v=1` im Worker neu; `analysis-worker.js`/`exporters.js` beim Merge hochzählen.
 - [ ] **Review der Etappen 05fb3c3…6d67e62 abschließen** — Workflow-Lauf `wf_a998fde1-33d` wurde durch einen
   Absturz unterbrochen (Bereiche: Erkennung, Fasen-Export, Defeaturing, STEP-Gültigkeit, Integration).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
@@ -156,6 +160,22 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Gebogene Kanäle exakt (tube-sweep.js, 2026-10-24)** — neues Modul, läuft nach `recognizePrimitives`
+  (Worker + Test-Pipelines), taggt `group.tube`. Erkennung: konkav gekrümmte Komponenten mit genau 2 ebenen
+  Mündungen → Querschnitts-Marsch → Profil. **Befund eBike:** die Kanäle sind KEINE senkrechten Kreisrohre —
+  der Profilkreis R2.5 liegt auf der Deckfläche, die Bahn startet geneigt (links γ = 24.1°, rechts −20.9°);
+  Normalschnitte sind Ellipsen 2.5 × 2.27/2.33. Export daher exakt als gezogenes Profil:
+  γ = 0 → CYLINDRICAL/TOROIDAL_SURFACE, γ ≠ 0 → SURFACE_OF_LINEAR_EXTRUSION/SURFACE_OF_REVOLUTION; Übergänge =
+  starr mitgeführter Profilkreis (teilen sich exakt 1 Kante), schräge Mündung = ELLIPSE bzw. periodischer
+  B-Spline (Schnitt End-Stück ∩ Ebene). Bahn: Anker-Kette (exakte Geraden/Bögen) oder vereinfachte Biarc-Kette.
+  **eBike ohne Rundungen: 2367 → 47 Flächen** (27 Rotationsflächen + 2 Bohrungs-Zylinder), wasserdicht, occt ok,
+  Volumen +0.047 % (occt fein: −0.046 %, Netz ist einbeschrieben). Bahn ↔ Profilschnitt-Mittelpunkte max 0.0085
+  mm, Netz-Vertex ↔ Fläche max 0.032/0.037 mm. eBike mit Rundungen (gleiche Kanäle): 4608 → 2288 (Toggle aus),
+  2429 → 109 (an). Synthetik `npm run test:tube`: Gerade+Bogen+Gerade → exakt 2 Zylinder + 1 Torus (R/Winkel auf
+  0.005 mm/0.01°), schräger Austritt → ELLIPSE, γ = 20° → Rotation/Extrusion (γ = 19.99°), Delle/Mündungs-
+  Fehler/Orientierungsfehler → facettiert + dicht. Report-Felder `tubesConverted`, `tubePieces`.
+  Grenze des Wasserdicht-Zählers: eine konsistent umgedrehte Übergangskurve (beide Nutzungen) bleibt „dicht“,
+  occt wählt dann das Komplementär-Band → Orientierung ist per occt-Volumen belegt (Probe: +400 % bei Fehler).
 - [x] **Body-Defeaturing v2b: Profil-Eckrundungen bei Extrusionsteilen (2026-10-24)** — nach v2 ist die
   Deckflächen-Kontur der Wandquerschnitt; verrundete senkrechte Kanten erscheinen dort als Bogenlauf zwischen
   zwei geraden Wänden. Fall „cross“: Bogen → Schnittpunkt der verlängerten Wände. Fall „end“: Wände gegenläufig
