@@ -130,6 +130,13 @@ Kreis-Kanten teilen.
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher (grün umrandet) bleiben in jedem Fall facettiert.
+- [ ] **v2: verpasste Fälle aus dem Härtetest (sicher übersprungen, aber nicht entrundet)** — schmale Deckfläche
+  (Rippe 40×4: Band > 3× Deckfläche), großer Radius r > 5 mm (RMAX = 5), dünne Platte (RMAX = 0,45·Höhe < r),
+  dünne Rohre/Ringe. `node tests/fixtures-v2/check.mjs --only l,s,t2`. Schranken sind Laufzeit-/Sicherheitsnetze;
+  feiner begründen (z.B. Band-Breite statt Fläche).
+- [ ] **v2: feine Rundungen (N ≥ 32) versetzen Deckebene um µm** — Region-Growing schlägt die flachste Bandschicht
+  der Deckfläche zu; Ebene aus dem Mittel der Loop-Punkte. ≤ r·(1−cos 2°), unter STEP-Unsicherheit. Abhilfe:
+  exakte Ebene aus der ursprünglichen Deckflächen-Gruppe. `check.mjs --only m32,m64`.
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
 - [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
   Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
@@ -152,6 +159,14 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **v2: Deckflächen-Wahl korrigiert + Härtetest integriert (2026-10-24)** — Härtetest (Agent A, `tests/fixtures-v2`,
+  `npm run test:v2`) fand: v2 wählte bei Rundrechteck-Profilen mit in Z unterteilten Wänden eine SEITENWAND als
+  Deckfläche (gierige Reihenfolge nach Punktzahl) → wasserdicht, aber nur teilweise entrundet (w1–w3). Fix:
+  alle Kandidaten bewerten, den mit den meisten anliegenden Wänden zuerst anwenden, neu bewerten; dazu
+  gleichmäßige Bandtiefe (Bandkante auf einer Höhe über P, ≤ max(0,01; 2 %)). w1–w3 jetzt exakt (inkl. v2b:
+  scharfe Profilecken), Golden/Kurztest grün, eBike unverändert deckungsgleich mit der Referenz.
+  Ebenfalls integriert: kollineare Zwischenpunkte (Agent B, `npm run test:collinear`), Erkennung der eBike-Y-
+  Bohrungen (Agent C: Ausweich-Scharnier, wenn der erste Mündungsring flacher knickt als die Lochwand).
 - [x] **Body-Defeaturing v2b: Profil-Eckrundungen bei Extrusionsteilen (2026-10-24)** — nach v2 ist die
   Deckflächen-Kontur der Wandquerschnitt; verrundete senkrechte Kanten erscheinen dort als Bogenlauf zwischen
   zwei geraden Wänden. Fall „cross“: Bogen → Schnittpunkt der verlängerten Wände. Fall „end“: Wände gegenläufig
