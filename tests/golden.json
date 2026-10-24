@@ -340,13 +340,13 @@
     "fillets": 1,
     "defeatureOn": {
       "exported": true,
-      "faces": 2429,
+      "faces": 2367,
       "watertight": true,
-      "boresConverted": 0,
+      "boresConverted": 2,
       "filletsDefeatured": 0,
       "bandsDefeatured": 6,
       "cornersDefeatured": 6,
-      "cylindrical": 0,
+      "cylindrical": 2,
       "conical": 0,
       "occt": true
     },

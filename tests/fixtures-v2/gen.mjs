@@ -309,7 +309,8 @@ export const bodyVolume = (body) => meshVolume(buildMesh(body));
 // ── Testkörper ──────────────────────────────────────────────────────────────
 // expect.mode: 'sharp' = v2 soll schärfen (Soll = Volumen scharf); 'skip' = v2 muss überspringen
 // (Soll = Volumen MIT Rundung, also das Netz selbst). Varianten (zulässige Ergebnisse) baut
-// check.mjs aus diesen Angaben; Zusatz-Varianten (Bohrungs-Chamfer-Pfad) siehe `boreChamfer`.
+// check.mjs aus diesen Angaben; Zusatz-Varianten für Bohrungen mit Mündungsrundung (scharfe Bohrung =
+// Ziel, Bohrungs-Chamfer-Pfad = zulässig) siehe `boreChamfer`.
 const R = (r, N = 8) => ({ kind: 'round', r, N });
 const plate = (profile, H, cap, extra = {}) => ({ name: 'aussen', profile, z0: 0, z1: H, bottom: cap, top: cap, ...extra });
 
@@ -328,7 +329,8 @@ export const BODIES = [
       { name: 'loch', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: R(1), top: R(1) },
     ],
     expect: { mode: 'sharp', bands: 4 },
-    // Mündungs-Verrundungen nimmt (dokumentiert) der Bohrungs-Chamfer-Pfad VOR v2: Zylinder + 2 Kegel
+    // Mündungs-Verrundungen: v2 schärft sie, danach Lochwand → Zylinder (scharfe Bohrung, Ziel);
+    // der Bohrungs-Chamfer-Pfad (Zylinder + 2 Kegel) bleibt zulässig
     boreChamfer: [{ col: 1, R: 4, seg: 32, r: 1, H: 10 }],
   },
   {
@@ -527,6 +529,11 @@ export const BODIES = [
       { name: 'loch3', profile: circleProfile(40, 20, 5, 40, true), z0: 0, z1: 8, bottom: R(0.8), top: R(0.8) },
     ],
     expect: { mode: 'sharp', bands: 8 },
+    boreChamfer: [
+      { col: 1, R: 3, seg: 24, r: 0.8, H: 8 },
+      { col: 2, R: 3, seg: 24, r: 0.8, H: 8 },
+      { col: 3, R: 5, seg: 40, r: 0.8, H: 8 },
+    ],
   },
   {
     id: 's', extra: true, file: 'v2_x_grosser_radius',
