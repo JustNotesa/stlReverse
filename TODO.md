@@ -134,8 +134,12 @@ Kreis-Kanten teilen.
   (z.B. lbracket fein: Punkte bei z=4/8/12/16), bleiben im STEP als Kette gerader Stücke. Gültig +
   wasserdicht, aber nicht minimal. Vertex mit genau 2 kollinearen Kanten in BEIDEN angrenzenden Loops
   entfernen (konsistent, sonst T-Junction).
-- [ ] **Defeaturing v2: Verrundung zwischen Ebene und GEKRÜMMTER Fläche** (eBike-Außenkontur) und Ecken,
-  an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück) — v1 überspringt diese Fälle bewusst.
+- [ ] **Defeaturing v2b: Profil-Eckrundungen (senkrechte Kanten) bei Extrusionsteilen** — nach v2 bleiben beim
+  eBike 6 verrundete Konturecken (4× R≈7, 2× R≈4,2), Referenz „ohne rundungen“ hat dort 90°-Ecken. Gemessen:
+  konstante Schnittflächen-Differenz 52,4 mm² auf JEDER Höhe = 524 mm³ = exakt der Rest zur Referenz. Ansatz:
+  Bogen-Lauf zwischen zwei geraden Wänden → Schnittpunkt der verlängerten Wände (Vollkreise/Löcher und Bögen
+  zwischen parallelen Wänden bleiben). Abnahme: Schnittflächen v2b == Referenz (1521,0 mm²), Volumen 14163 mm³.
+- [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
 - [ ] **Rohrbogen-Erkenner (gebogene Bohrung)** — eine gebogene Bohrung ist lokal eine Kette exakter
   Zylinder-Segmente (alle Längskanten eines Segments parallel). Statt Brute-Force (O(T²), s. Erledigt) gezielt:
   Segment finden → entlang der Kette weiterlaufen → als ein Feature taggen (Panel 3), Export bleibt facettiert.
@@ -157,6 +161,16 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Body-Defeaturing v2: Verrundungs-Bänder an Deckflächen von Extrusionsteilen (2026-10-24)** — 2,5D-Teile
+  (Skizze extrudiert, Kanten verrundet) haben rund um jede Deckfläche ein geschlossenes Verrundungsband, das an
+  geraden Konturabschnitten ein Zylinder, an Bögen ein Torus ist (v1 greift dort nicht). v2 behandelt das ganze
+  Band: Wände stehen ⊥ zur Deckfläche → Wandpunkte an der Bandkante werden entlang der Deckflächen-Normale auf
+  die Deckebene geschoben (bleiben exakt auf der Wand), neue Kontur = Wandquerschnitt. Schutz: nur geschlossene
+  Ringbänder, Band nur an Deckfläche + Wände, gekrümmt (Fasen bleiben), Kontur einfach, Splitter-Facetten mit
+  zufällig ⊥ Normale zum Band (sonst 6 Orientierungsfehler am eBike), Größenschranke Band ≤ 3× Deckfläche (sonst
+  O(n²) auf Kugeln: 50k-Kugel 50 s). **eBike: 6 Bänder (je Deckfläche Außenrand + 2 Löcher), 4608 → 2499 Flächen,
+  wasserdicht, occt ok.** Exaktheit belegt: Schnittfläche in den Verrundungszonen = voller Wandquerschnitt
+  (1468,6 mm² auf allen Höhen). Report-Feld `bandsDefeatured`, im Golden-Test. `exporters.js?v=24`.
 - [x] **Kanten-Verrundungen werden AUTOMATISCH erkannt → Body-Defeaturing greift ohne Hand-Tagging
   (2026-10-23)** — Phase 1 der Erkennung prüft Teil-Umläufe jetzt streng als gerade Kanten-Verrundung:
   echtes Prisma (alle inneren Scharnier-Kanten ∥ Achse, billig zuerst) → reguläre Gates inkl. „nur von

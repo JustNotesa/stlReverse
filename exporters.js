@@ -934,6 +934,233 @@ export function buildVolumeStepBrepV2(analysis) {
     }
   }
 
+  // ---- Body-Defeaturing v2: Verrundungs-BAND zwischen Ebene und senkrechten Wänden ----
+  // Typisch für 2,5D-Teile (Skizze extrudiert, Kanten verrundet): ein geschlossenes Band aus
+  // Verrundungs-Facetten läuft rund um einen Loop einer Ebene P (Deckfläche) und verbindet sie
+  // mit Wänden, die SENKRECHT auf P stehen (Normale ⊥ P). Entlang gerader Konturabschnitte ist
+  // das Band ein Zylinder, an Konturbögen ein Torus — v1 (zwei Ebenen) greift dort nicht.
+  // Gelöst als Ganzes: weil die Wände P's Normale enthalten, lässt sich jeder Wandpunkt an der
+  // Bandkante entlang dieser Normale auf P schieben, ohne die Wand zu verlassen. Die neue Kontur
+  // von P ist exakt der Wandquerschnitt in P's Ebene (= die scharfe Kante, die der Konstrukteur
+  // verrundet hat), für gerade UND gekrümmte Konturabschnitte. Die Band-Facetten entfallen.
+  // Konservativ: nur geschlossene Ringbänder (Loop von P komplett verrundet, Band grenzt nur an
+  // P und Wände), Band muss gekrümmt sein (keine Fasen), neue Kontur muss einfach sein. Jede
+  // Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt + der globale Fallback.
+  let bandsDefeatured = 0;
+  if (DEFEATURE) {
+    try {
+      bandsDefeatured = defeatureBands();
+    } catch (_) { bandsDefeatured = 0; /* Guard: Änderungen werden erst nach allen Prüfungen angewandt */ }
+  }
+  function defeatureBands() {
+    const WALL_COS = 1e-3;          // |n_W·d| ≤ … → Wand steht senkrecht auf P (CAD-Extrusion: ~1e-7)
+    const PARALLEL_COS = 0.9995;    // |n·d| ≥ … → (fast) parallel zu P → kein Band-Element
+    const MIN_SPREAD_DEG = 10;      // Band muss gekrümmt sein (Fasen bleiben unangetastet)
+    const fds = faceDefs;
+    const loopsOf = (fd) => [fd.outer, ...fd.inner].filter((L) => !L.circleRim);
+    // Kante → [{ fi, loop }] über alle Flächen (gemeinsame Kanten = gemeinsame Punkt-Schlüssel).
+    // Nach jedem angewandten Band neu aufgebaut (verschobene Wandpunkte ändern Kanten-Schlüssel).
+    let edgeOwners;
+    const buildOwners = () => {
+      edgeOwners = new Map();
+      fds.forEach((fd, fi) => {
+        if (removed.has(fi)) return;
+        for (const L of loopsOf(fd)) {
+          for (let i = 0; i < L.length; i++) {
+            const k = edgeKeyFn(L[i], L[(i + 1) % L.length]);
+            let o = edgeOwners.get(k); if (!o) { o = []; edgeOwners.set(k, o); }
+            o.push({ fi, loop: L });
+          }
+        }
+      });
+    };
+    const nrm = fds.map((fd) => _norm3(fd.normal));
+    // Polygonfläche je Fläche (Außen minus Innen), lazy — für die Band-Größenschranke
+    const areaCache = new Map();
+    const loopArea = (L, n) => { let sx = 0, sy = 0, sz = 0; for (let i = 0; i < L.length; i++) { const c = _cross3(L[i], L[(i + 1) % L.length]); sx += c[0]; sy += c[1]; sz += c[2]; } return Math.abs(sx * n[0] + sy * n[1] + sz * n[2]) / 2; };
+    const fdArea = (fi) => {
+      if (!areaCache.has(fi)) { const fd = fds[fi]; let a = loopArea(fd.outer, nrm[fi]); for (const L of fd.inner) a -= loopArea(L, nrm[fi]); areaCache.set(fi, Math.max(0, a)); }
+      return areaCache.get(fi);
+    };
+    // Ausdehnung des Teils entlang einer Richtung (für die maximale Bandtiefe), gecacht
+    const allPts = [];
+    for (const fd of fds) for (const p of fd.outer) allPts.push(p);
+    const extentCache = new Map();
+    const extentAlong = (d) => {
+      const key = d.map((x) => x.toFixed(3)).join(',');
+      if (!extentCache.has(key)) {
+        let lo = Infinity, hi = -Infinity;
+        for (const p of allPts) { const t = _dot3(d, p); if (t < lo) lo = t; if (t > hi) hi = t; }
+        extentCache.set(key, hi - lo);
+      }
+      return extentCache.get(key);
+    };
+    const removed = new Set();
+    buildOwners();
+    let done = 0;
+    const order = fds.map((_, i) => i).sort((a, b) => fds[b].outer.length - fds[a].outer.length);
+    for (const pi of order) {
+      if (removed.has(pi)) continue;
+      const P = fds[pi], d = nrm[pi];
+      if (Math.hypot(d[0], d[1], d[2]) < 0.5) continue;
+      // Ebenen-Offset von P (Mittel über die Loop-Punkte)
+      let off = 0, cnt = 0;
+      for (const p of P.outer) { off += _dot3(d, p); cnt++; }
+      off /= cnt;
+      for (const L of loopsOf(P)) {
+        // (1) Jede Kante von L muss an GENAU eine Band-Fläche grenzen
+        const Ledges = new Set();
+        const seeds = new Set();
+        let ok = true;
+        for (let i = 0; i < L.length && ok; i++) {
+          const k = edgeKeyFn(L[i], L[(i + 1) % L.length]);
+          Ledges.add(k);
+          const others = (edgeOwners.get(k) || []).filter((o) => o.fi !== pi);
+          if (others.length !== 1) { ok = false; break; }
+          const c = Math.abs(_dot3(nrm[others[0].fi], d));
+          if (c <= WALL_COS || c >= PARALLEL_COS || removed.has(others[0].fi)) { ok = false; break; }
+          seeds.add(others[0].fi);
+        }
+        if (!ok || !seeds.size) continue;
+        // Größenschranke: ein Verrundungsband ist schmal und umgibt eine größere Fläche. Ohne
+        // Schranke wuchs auf feinen Kugeln von JEDEM Flächenstück ein riesiges Band (50k-Kugel:
+        // 9 s → 50 s, O(n²)). Ringförmige Deckflächen (schmaler Kragen) bekommen Spielraum (3×).
+        const BAND_AREA_MAX = 3 * fdArea(pi);
+        let bandArea = 0;
+        for (const fi of seeds) bandArea += fdArea(fi);
+        if (bandArea > BAND_AREA_MAX) continue;
+        // Teil-Ausdehnung erst NACH der billigen Schranke (O(Punkte) je neuer Richtung — auf
+        // Tori/Kugeln hat jedes Flächenstück eine eigene Richtung)
+        const RMAX = Math.min(5, 0.45 * extentAlong(d));
+        // (2) Band wachsen: Nachbarn sind Band (schräg + nah an P), Wand (⊥ P) oder P (nur über L)
+        const band = new Set(seeds), queue = [...seeds];
+        const wallEdges = [];          // { a, b } Bandkante zu einer Wand
+        const walls = new Set();
+        while (queue.length && ok) {
+          const fi = queue.pop();
+          const fd = fds[fi];
+          for (const p of fd.outer) if (Math.abs(_dot3(d, p) - off) > RMAX) { ok = false; break; }
+          if (!ok) break;
+          for (const Lb of loopsOf(fd)) {
+            for (let i = 0; i < Lb.length && ok; i++) {
+              const a = Lb[i], b = Lb[(i + 1) % Lb.length];
+              const k = edgeKeyFn(a, b);
+              const others = (edgeOwners.get(k) || []).filter((o) => o.fi !== fi);
+              if (others.length !== 1) { ok = false; break; }
+              const ni = others[0].fi;
+              if (band.has(ni)) continue;
+              if (ni === pi) { if (!Ledges.has(k)) ok = false; continue; }
+              if (removed.has(ni)) { ok = false; break; }
+              const c = Math.abs(_dot3(nrm[ni], d));
+              if (c <= WALL_COS) { walls.add(ni); wallEdges.push({ v0: a, v1: b }); continue; }
+              if (c >= PARALLEL_COS) { ok = false; break; }
+              band.add(ni); queue.push(ni);
+              bandArea += fdArea(ni);
+              if (bandArea > BAND_AREA_MAX || band.size > 50000) ok = false;
+            }
+          }
+        }
+        if (!ok || !wallEdges.length) continue;
+        // (2b) „Wand“-Facetten, deren Ecken ALLE auf dem Band liegen, sind Splitter der Verrundung,
+        // deren Normale zufällig ⊥ P steht (z.B. im Eck-Bereich, wo das Band um eine Konturecke
+        // läuft). Als Wand würden sie beim Projizieren in P's Ebene kollabieren und die neue Kontur
+        // liefe gleichsinnig um sie herum (eBike: 6 Orientierungsfehler) → zum Band schlagen und
+        // die Grenze zu den echten Wänden neu bestimmen.
+        {
+          const bandPts = new Set();
+          for (const fi of band) for (const Lb of loopsOf(fds[fi])) for (const p of Lb) bandPts.add(vtxKey(p));
+          for (const wi of [...walls]) {
+            const W = fds[wi];
+            if ([W.outer, ...W.inner].every((Lw) => Lw.every((p) => bandPts.has(vtxKey(p))))) { walls.delete(wi); band.add(wi); }
+          }
+          wallEdges.length = 0; walls.clear();
+          for (const fi of band) {
+            for (const Lb of loopsOf(fds[fi])) {
+              for (let i = 0; i < Lb.length && ok; i++) {
+                const a = Lb[i], b = Lb[(i + 1) % Lb.length];
+                const k = edgeKeyFn(a, b);
+                const others = (edgeOwners.get(k) || []).filter((o) => o.fi !== fi);
+                if (others.length !== 1) { ok = false; break; }
+                const ni = others[0].fi;
+                if (band.has(ni)) continue;
+                if (ni === pi) { if (!Ledges.has(k)) ok = false; continue; }
+                if (Math.abs(_dot3(nrm[ni], d)) <= WALL_COS && !removed.has(ni)) { walls.add(ni); wallEdges.push({ v0: a, v1: b }); continue; }
+                ok = false;
+              }
+            }
+          }
+        }
+        if (!ok || !wallEdges.length) continue;
+        // (3) Gekrümmt? Winkel der Band-Normalen zu P müssen deutlich streuen
+        let angMin = 90, angMax = 0;
+        for (const fi of band) {
+          const ang = Math.acos(Math.min(1, Math.abs(_dot3(nrm[fi], d)))) * 180 / Math.PI;
+          if (ang < angMin) angMin = ang; if (ang > angMax) angMax = ang;
+        }
+        if (angMax - angMin < MIN_SPREAD_DEG) continue;
+        // (4) Wand-Bandkante muss genau EIN geschlossener Ring sein
+        const rings = chainEdges(wallEdges);
+        if (rings.length !== 1 || rings[0].length < 3) continue;
+        const ring = rings[0];
+        // (5) Projektion auf P (entlang d — bleibt auf jeder Wand, da Wände d enthalten)
+        const proj = new Map();       // vtxKey(alt) → neuer Punkt
+        const newLoop = [];
+        for (const p of ring) {
+          const h = _dot3(d, p) - off;
+          if (Math.abs(h) < 1e-6 || Math.abs(h) > RMAX) { ok = false; break; }
+          const q = [p[0] - d[0] * h, p[1] - d[1] * h, p[2] - d[2] * h];
+          proj.set(vtxKey(p), q);
+          if (!newLoop.length || vtxKey(newLoop[newLoop.length - 1]) !== vtxKey(q)) newLoop.push(q);
+        }
+        if (!ok) continue;
+        if (newLoop.length > 1 && vtxKey(newLoop[0]) === vtxKey(newLoop[newLoop.length - 1])) newLoop.pop();
+        if (newLoop.length < 3) continue;
+        // Nur Wände und Band dürfen die verschobenen Punkte benutzen (sonst Riss/T-Junction)
+        for (let fi = 0; fi < fds.length && ok; fi++) {
+          if (band.has(fi) || walls.has(fi) || removed.has(fi)) continue;
+          for (const Lx of [fds[fi].outer, ...fds[fi].inner]) {
+            for (const p of Lx) if (proj.has(vtxKey(p))) { ok = false; break; }
+            if (!ok) break;
+          }
+        }
+        if (!ok) continue;
+        // (6) Orientierung wie der alte Loop, und die neue Kontur muss einfach sein (2D in P)
+        const u = computeRefDir(d), v = _norm3(_cross3(d, u));
+        const to2 = (p) => [_dot3(p, u), _dot3(p, v)];
+        const area2 = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a[0] * b[1] - b[0] * a[1]; } return s / 2; };
+        const old2 = L.map(to2);
+        let new2 = newLoop.map(to2);
+        if (Math.sign(area2(old2)) !== Math.sign(area2(new2))) { newLoop.reverse(); new2 = new2.reverse(); }
+        const segX = (p1, p2, p3, p4) => {
+          const o = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+          const d1 = o(p3, p4, p1), d2 = o(p3, p4, p2), d3 = o(p1, p2, p3), d4 = o(p1, p2, p4);
+          return ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12));
+        };
+        const n2 = new2.length;
+        for (let i = 0; i < n2 && ok; i++) {
+          for (let j = i + 2; j < n2; j++) {
+            if (i === 0 && j === n2 - 1) continue;
+            if (segX(new2[i], new2[(i + 1) % n2], new2[j], new2[(j + 1) % n2])) { ok = false; break; }
+          }
+        }
+        if (!ok) continue;
+        // (7) Anwenden: P bekommt die Wandkontur, Wände werden bis P verlängert, Band entfällt
+        L.length = 0; L.push(...newLoop);
+        for (const wi of walls) {
+          const W = fds[wi];
+          for (const Lw of [W.outer, ...W.inner]) {
+            for (let i = 0; i < Lw.length; i++) { const q = proj.get(vtxKey(Lw[i])); if (q) Lw[i] = q; }
+          }
+        }
+        for (const fi of band) removed.add(fi);
+        done++;
+        buildOwners();
+      }
+    }
+    if (removed.size) faceDefs = faceDefs.filter((_, i) => !removed.has(i));
+    return done;
+  }
+
   // ---- Step 2: Shared vertex + edge registry ----
   const ptRegistry = new Map(); // key → { ptId, vtxId }
   // Gleiche Naht-Normalisierung wie vtxKey (siehe oben): -0.0/+0.0 vereinheitlichen,
@@ -1117,12 +1344,14 @@ export function buildVolumeStepBrepV2(analysis) {
 
   let asm = assemble(faceDefs, finalPlans);
   asm.report.filletsDefeatured = filletsDefeatured;
+  asm.report.bandsDefeatured = bandsDefeatured;
   // Globaler Schutz: öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
   // die wasserdichte Baseline kann dadurch nie regressieren.
-  if ((asm.report.boresConverted > 0 || filletsDefeatured > 0) && !asm.report.watertight) {
+  if ((asm.report.boresConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0) && !asm.report.watertight) {
     asm = assemble(buildFaceDefs(null), []);
     asm.report.filletsDefeatured = 0;
+    asm.report.bandsDefeatured = 0;
   }
   const allFaceIds = asm.faceIds;
   const report = asm.report;

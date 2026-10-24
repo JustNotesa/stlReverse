@@ -60,6 +60,7 @@ async function metrics(groups, defeature) {
     watertight: r.watertight,
     boresConverted: r.boresConverted,
     filletsDefeatured: r.filletsDefeatured ?? 0,
+    bandsDefeatured: r.bandsDefeatured ?? 0,
     cylindrical: (res.step.match(/CYLINDRICAL_SURFACE\(/g) || []).length,
     conical: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
     occt: !!occt.success,
@@ -111,7 +112,7 @@ for (const f of files) {
   const entry = { bores: stats.bores, fillets: stats.fillets, defeatureOn: on, defeatureOff: off };
   next[f] = entry;
   const flag = recogMs > RECOG_LIMIT_MS ? '  ⚠ LANGSAM' : '';
-  origLog(`${f.padEnd(70)} ${String(Math.round(recogMs)).padStart(6)} ms  faces=${on.faces}/${off.faces} wt=${on.watertight} bores=${on.boresConverted} cone=${on.conical}${flag}`);
+  origLog(`${f.padEnd(70)} ${String(Math.round(recogMs)).padStart(6)} ms  faces=${on.faces}/${off.faces} wt=${on.watertight} bores=${on.boresConverted} cone=${on.conical} bands=${on.bandsDefeatured}${flag}`);
   if (recogMs > RECOG_LIMIT_MS) failures.push(`${f}: Erkennung ${Math.round(recogMs)} ms > ${RECOG_LIMIT_MS} ms (O(n²)-Regression?)`);
   if (!UPDATE) {
     const g = golden[f];
