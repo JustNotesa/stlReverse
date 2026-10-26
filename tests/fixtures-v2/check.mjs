@@ -18,6 +18,7 @@
 // bandsDefeatured, v1 in filletsDefeatured) — exakt nachgerechnet; dazu bei Bohrungen die scharfe
 // Bohrung (Ziel: v2 schärft die Mündung, Lochwand → Zylinder zwischen den Deckflächen) und der
 // Chamfer-Pfad (Mündung → Kegel, zulässig) — Volumen aus den emittierten Zylinder-/Kegel-Parametern.
+// Kreisrunde Außenwände (Rohr) darf der Mantel-Pfad als CYLINDRICAL_SURFACE liefern (mantleInfo).
 // Fasen dürfen nie verschwinden, bei Soll „skip“ muss bandsDefeatured = 0 sein.
 //   exakt     → OK
 //   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der STEP-Unsicherheit 0.01 mm)
@@ -233,6 +234,41 @@ function variantsFor(body, vMeshParsed, heavy) {
   return vs;
 }
 
+// Konvexe Außenmäntel (exporters.js, Mantel-Pfad): die Außenwand einer kreisrunden Säule wird
+// EINE CYLINDRICAL_SURFACE Rm, sobald beide Ränder Außen-Loops ebener Deckflächen sind (mit Toggle
+// auch nach dem Schärfen der Deck-Verrundungen, z. B. Rohr h/u2/u). Je umgewandeltem Mantel ist das
+// Profil-Polygon durch den Kreis Rm ersetzt (Rm aus der emittierten STEP); seine zwei Kreise müssen
+// exakt in den Deckebenen liegen. Ohne Mantel-Zylinder in der STEP: dv = 0 (facettiert).
+function mantleInfo(body, ent, plac) {
+  const out = { dv: 0, aLat: 0, radii: [], parts: [], plaus: true };
+  for (const col of body.columns) {
+    const n = col.profile.length;
+    if (polyArea(col.profile) <= 0 || n < 9) continue;             // nur Außenkonturen (CCW)
+    const cx = col.profile.reduce((s, p) => s + p[0], 0) / n, cy = col.profile.reduce((s, p) => s + p[1], 0) / n;
+    const rs = col.profile.map((p) => Math.hypot(p[0] - cx, p[1] - cy)), R = rs.reduce((s, r) => s + r, 0) / n;
+    if (rs.some((r) => Math.abs(r - R) > 1e-6 * Math.max(1, R))) continue; // kein Kreisprofil
+    let Rm = null; const zs = [];
+    for (const e of ent.values()) {
+      const m = e.match(/^CYLINDRICAL_SURFACE\('',(#\d+),([\d.]+)\)/);
+      if (m) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05 && Math.abs(+m[2] - R) < 0.05) Rm = +m[2]; }
+    }
+    if (Rm === null) continue;
+    for (const e of ent.values()) {
+      const m = e.match(/^CIRCLE\('',(#\d+),([\d.]+)\)/);
+      if (m) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05 && Math.abs(+m[2] - Rm) < 1e-6) zs.push(p.loc[2]); }
+    }
+    zs.sort((x, y) => x - y);
+    const H = col.z1 - col.z0;
+    out.dv += (Math.PI * Rm * Rm - polyArea(col.profile)) * H;
+    out.aLat += 2 * Math.PI * Rm * H;
+    out.radii.push(Rm);
+    out.plaus = out.plaus && zs.length === 2 && Math.abs(zs[0] - col.z0) < 1e-3 && Math.abs(zs[1] - col.z1) < 1e-3;
+    out.parts.push(`Mantel→Zylinder R${Rm.toFixed(3)}`);
+  }
+  return out;
+}
+const isMantleCircle = (mi, c) => mi.radii.some((Rm) => Math.abs(c.r - Rm) < 1e-6);
+
 // Bohrungs-Chamfer-Pfad (läuft VOR v2): Lochwand → CYLINDRICAL_SURFACE Rc zwischen zwei Kreisen,
 // Mündungs-Verrundung → Kegel von Rc auf den Mündungskreis R2 in der Deckebene. Parameter aus der
 // emittierten STEP lesen (der Rand sitzt da, wo die Bohrungs-Erkennung die Wand enden lässt — oft
@@ -252,20 +288,21 @@ function boreVariant(body, b, step, others) {
   }
   const fail = (why) => ({ label: `Bohrung→Zylinder+Kegel: ${why}`, sharpCount: others, bores: 1, cones: 2, planar: false, volume: NaN, tol: tolAnalytic, target: false });
   if (Rc === null) return fail('kein Zylinder');
+  const mi = mantleInfo(body, ent, plac);
   const rim = circles.filter((c) => Math.abs(c.r - Rc) < 1e-6).map((c) => c.z).sort((x, y) => x - y);
-  const mouth = circles.filter((c) => c.r > Rc + 0.02).sort((x, y) => x.z - y.z);
+  const mouth = circles.filter((c) => c.r > Rc + 0.02 && !isMantleCircle(mi, c)).sort((x, y) => x.z - y.z);
   if (rim.length !== 2 || mouth.length !== 2) return fail(`Kreise ${rim.length}/${mouth.length}`);
   const frustum = (r1, r2, h) => (Math.PI * h / 3) * (r1 * r1 + r1 * r2 + r2 * r2);
-  let v = meshVolume(buildMesh(sharpen(body))) + Math.abs(polyArea(col.profile)) * (col.z1 - col.z0);
+  let v = meshVolume(buildMesh(sharpen(body))) + Math.abs(polyArea(col.profile)) * (col.z1 - col.z0) + mi.dv;
   v -= Math.PI * Rc * Rc * (rim[1] - rim[0]) + frustum(Rc, mouth[0].r, rim[0] - mouth[0].z) + frustum(Rc, mouth[1].r, mouth[1].z - rim[1]);
   const R2nom = b.R + b.r / Math.cos(Math.PI / b.seg);
-  const plaus = Math.abs(Rc - b.R) < 0.02 && mouth.every((m) => Math.abs(m.r - R2nom) < 0.02) && Math.abs(mouth[0].z - col.z0) < 1e-3 && Math.abs(mouth[1].z - col.z1) < 1e-3
+  const plaus = mi.plaus && Math.abs(Rc - b.R) < 0.02 && mouth.every((m) => Math.abs(m.r - R2nom) < 0.02) && Math.abs(mouth[0].z - col.z0) < 1e-3 && Math.abs(mouth[1].z - col.z1) < 1e-3
     && rim[0] > col.z0 && rim[0] <= col.z0 + b.r + 1e-3 && rim[1] < col.z1 && rim[1] >= col.z1 - b.r - 1e-3;
   // Toleranz ∝ Mantelfläche: occt facettiert Zylinder/Kegel mit Sehnenfehler ~linearDeflection
   const slant = (r2, h) => Math.hypot(r2 - Rc, h);
-  const aLat = 2 * Math.PI * Rc * (rim[1] - rim[0]) + Math.PI * (Rc + mouth[0].r) * slant(mouth[0].r, rim[0] - mouth[0].z) + Math.PI * (Rc + mouth[1].r) * slant(mouth[1].r, mouth[1].z - rim[1]);
+  const aLat = mi.aLat + 2 * Math.PI * Rc * (rim[1] - rim[0]) + Math.PI * (Rc + mouth[0].r) * slant(mouth[0].r, rim[0] - mouth[0].z) + Math.PI * (Rc + mouth[1].r) * slant(mouth[1].r, mouth[1].z - rim[1]);
   return {
-    label: `außen scharf + Bohrung→Zylinder R${Rc.toFixed(3)} (z ${rim[0].toFixed(3)}..${rim[1].toFixed(3)}) + 2 Kegel auf R${mouth[0].r.toFixed(3)}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    label: `außen scharf${mi.parts.length ? ' + ' + mi.parts.join(', ') : ''} + Bohrung→Zylinder R${Rc.toFixed(3)} (z ${rim[0].toFixed(3)}..${rim[1].toFixed(3)}) + 2 Kegel auf R${mouth[0].r.toFixed(3)}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
     // Seit „erst entrunden, dann Bohrungen“ ist die scharfe Bohrung (unten) das Ziel; der Kegel-Pfad
     // bleibt zulässig (sicher), verfehlt aber das Ziel.
     sharpCount: others, bores: 1, cones: 2, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: false,
@@ -283,7 +320,8 @@ function boreSharpVariant(body, bores, step, sharpCount) {
   const pt = (i) => ent.get(i).match(/,\(([^()]*)\)\)$/)[1].split(',').map(Number);
   const plac = (ref) => { const m = ent.get(+ref.slice(1)).match(/AXIS2_PLACEMENT_3D\('',(#\d+),(#\d+),(#\d+)\)/); return { loc: pt(+m[1].slice(1)), axis: pt(+m[2].slice(1)) }; };
   const fail = (why) => ({ label: `Bohrung scharf→Zylinder: ${why}`, sharpCount, bores: bores.length, cones: 0, planar: false, volume: NaN, tol: tolAnalytic, target: false });
-  let v = meshVolume(buildMesh(sharpen(body))), aLat = 0, plaus = true;
+  const mi = mantleInfo(body, ent, plac);
+  let v = meshVolume(buildMesh(sharpen(body))) + mi.dv, aLat = mi.aLat, plaus = mi.plaus;
   const parts = [];
   for (const b of bores) {
     const col = body.columns[b.col];
@@ -295,8 +333,9 @@ function boreSharpVariant(body, bores, step, sharpCount) {
       if ((m = e.match(/^CIRCLE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05) circles.push({ r: +m[2], z: p.loc[2] }); }
     }
     if (Rc === null) return fail(`kein Zylinder (${col.name})`);
-    const rim = circles.filter((c) => Math.abs(c.r - Rc) < 1e-6).map((c) => c.z).sort((x, y) => x - y);
-    if (rim.length !== 2 || circles.length !== 2) return fail(`Kreise ${rim.length}/${circles.length} (${col.name})`);
+    const own = circles.filter((c) => !isMantleCircle(mi, c));   // Kreise eines koaxialen Außenmantels zählen nicht
+    const rim = own.filter((c) => Math.abs(c.r - Rc) < 1e-6).map((c) => c.z).sort((x, y) => x - y);
+    if (rim.length !== 2 || own.length !== 2) return fail(`Kreise ${rim.length}/${own.length} (${col.name})`);
     const H = col.z1 - col.z0;
     v += Math.abs(polyArea(col.profile)) * H - Math.PI * Rc * Rc * H;
     aLat += 2 * Math.PI * Rc * H;
@@ -304,7 +343,7 @@ function boreSharpVariant(body, bores, step, sharpCount) {
     parts.push(`R${Rc.toFixed(3)} (z ${rim[0].toFixed(3)}..${rim[1].toFixed(3)})`);
   }
   return {
-    label: `alle Rundungen scharf + Bohrung→Zylinder ${parts.join(', ')}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    label: `alle Rundungen scharf + Bohrung→Zylinder ${parts.join(', ')}${mi.parts.length ? ' + ' + mi.parts.join(', ') : ''}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
     sharpCount, bores: bores.length, cones: 0, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: body.expect.mode === 'sharp',
   };
 }
