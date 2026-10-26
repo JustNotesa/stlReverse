@@ -15,7 +15,8 @@ npm run test:unit
 npm run test:golden      # Kennzahlen je Sample vs. tests/golden.json
 npm run test:v2          # Härtetest kurz (voll: node tests/fixtures-v2/check.mjs)
 npm run test:ebike       # Scorecard verrundetes eBike (47 Flächen)
-npm run test:tube        # 6 Synthetik-Kanäle
+npm run test:tube        # 13 Synthetik-Kanäle (A–F, U-Bögen R 4/4.2/7/12, S-Kurve mit 1 mm
+                         # Zwischengerade, D-Profile → facettiert); je Fall step-strict + occt-Volumen
 npm run test:bore        # Dünnplatten-Bohrungen → CYLINDRICAL_SURFACE
 npm run test:mantel      # Außenmäntel (Welle/Scheibe/Rohr) + Bohrungs-Gates (D-Loch, schräg,
                          # gemischte Mündungen) + Fallback-Stufen; je Fall step-strict + occt-Volumen
