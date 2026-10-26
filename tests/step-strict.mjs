@@ -347,6 +347,21 @@ if (isMain) {
       console.log(`${ok ? '✅' : '❌'} ${'Selbsttest offene Hülle (Würfel ohne Deckel)'.padEnd(64)} offen: ${open.violations.length} Verstöße/${open.stats.openEdges} Randkanten, als CLOSED_SHELL: ${closed.violations.length} Verstöße`);
       if (!ok) bad++;
     }
+    // Großer, schräg im Raum liegender Quader (300×200×120 mm, float32 wie aus einer STL): lange
+    // schräge Kanten/Flächen — mit 6-stelligen DIRECTIONs lagen die Kanten-Enden bis 1.2e-4 mm
+    // neben ihrer LINE (vertex-curve), Ränder 9.6e-5 mm neben der PLANE.
+    {
+      const ax = [0.3, 0.7, 0.2].map((x, _, a) => x / Math.hypot(...a)), ang = 0.6, c = Math.cos(ang), s = Math.sin(ang);
+      const T = (v) => { const d = (ax[0] * v[0] + ax[1] * v[1] + ax[2] * v[2]) * (1 - c); return [v[0] * c + (ax[1] * v[2] - ax[2] * v[1]) * s + ax[0] * d + 400, v[1] * c + (ax[2] * v[0] - ax[0] * v[2]) * s + ax[1] * d - 300, v[2] * c + (ax[0] * v[1] - ax[1] * v[0]) * s + ax[2] * d + 250].map(Math.fround); };
+      const faces = [];
+      const quad = (...q) => { for (const t of [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]) { const u = t[1].map((x, i) => x - t[0][i]), v = t[2].map((x, i) => x - t[0][i]); const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]; const l = Math.hypot(...n); faces.push({ vertices: t, normal: n.map((x) => x / l) }); } };
+      const [A, B, C, D, E, F, G, H] = [[0, 0, 0], [300, 0, 0], [300, 200, 0], [0, 200, 0], [0, 0, 120], [300, 0, 120], [300, 200, 120], [0, 200, 120]].map(T);
+      quad(A, D, C, B); quad(E, F, G, H); quad(A, B, F, E); quad(B, C, G, F); quad(C, D, H, G); quad(D, A, E, H);
+      console.log = () => {};
+      const res = buildVolumeStepBrepV2({ normalGroups: unifyCoplanarGroups(buildNormalGroups({ faces })).unified });
+      console.log = log;
+      bad += summarize('Selbsttest schräger Quader 300 mm (Rundung der Richtungen)', checkStepStrict(res.step));
+    }
   }
   console.log(bad ? `\n❌ ${bad} Verstöße` : '\n✅ alle STEP-Dateien streng gültig');
   process.exit(bad ? 1 : 0);

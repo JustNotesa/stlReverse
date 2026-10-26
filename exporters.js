@@ -231,6 +231,14 @@ export function buildVolumeStepBrepV2(analysis) {
     const t = Number(v).toFixed(6).replace(/(\.\d*?)0+$/, '$1');
     return t.includes('.') ? t : t + '.';
   };
+  // Richtungen mit 12 Nachkommastellen: mit 6 lag bei langen schrägen Kanten/Flächen allein die
+  // Rundung der Richtung daneben (schräger 300-mm-Quader: Kanten-Ende 1.2e-4 mm neben seiner LINE,
+  // Rand 9.6e-5 mm neben der PLANE — strikte Importer, tests/step-strict.mjs). Punkte bleiben bei 6.
+  const toStepDir = (v) => {
+    if (!Number.isFinite(v)) return '0.';
+    const t = Number(v).toFixed(12).replace(/(\.\d*?)0+$/, '$1');
+    return t.includes('.') ? t : t + '.';
+  };
 
   // ---- Entity helpers ----
   const addPoint = (pt) => {
@@ -242,7 +250,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const len = Math.hypot(vec[0], vec[1], vec[2]) || 1;
     const d = vec.map((v) => v / len || 0);
     const did = id++;
-    entities.push(`#${did}=DIRECTION('',(${d.map(toStep).join(',')}));`);
+    entities.push(`#${did}=DIRECTION('',(${d.map((x) => toStepDir(x)).join(',')}));`);
     return did;
   };
   const addVector = (dirId, mag) => {
@@ -376,7 +384,14 @@ export function buildVolumeStepBrepV2(analysis) {
   // Zeichenketten-Schlüssel kosteten bei der Ebenheits-Zerlegung am 50k-Stressnetz spürbar Zeit.
   const VID_M = 67108864;                                    // 2^26 Punkte → Schlüssel < 2^52
   const vidOf = new Map(), vidKeys = [];
-  const vid = (p) => { const k = vtxKey(p); let i = vidOf.get(k); if (i === undefined) { i = vidKeys.length; vidOf.set(k, i); vidKeys.push(k); } return i; };
+  const vid = (p) => {
+    const k = vtxKey(p), c = vkCache.get(p);                  // Nummer im vtxKey-Cache-Eintrag merken
+    if (c && c.k === k && c.i !== undefined) return c.i;
+    let i = vidOf.get(k);
+    if (i === undefined) { i = vidKeys.length; vidOf.set(k, i); vidKeys.push(k); }
+    if (c && c.k === k) c.i = i;
+    return i;
+  };
   const edgeNum = (a, b) => { const ia = vid(a), ib = vid(b); return ia < ib ? ia * VID_M + ib : ib * VID_M + ia; };
 
   // Chain boundary edges into closed loops (ordered 3D point lists).
@@ -2971,10 +2986,15 @@ export function buildVolumeStepTriangles(analysis) {
   };
 
   const addPoint = (pt) => { const pid = id++; entities.push(`#${pid}=CARTESIAN_POINT('',(${pt.map(toStep).join(',')}));`); return pid; };
+  const toStepDir = (v) => {   // Richtungen mit 12 Nachkommastellen (s. buildVolumeStepBrepV2)
+    if (!Number.isFinite(v)) return '0.';
+    const t = Number(v).toFixed(12).replace(/(\.\d*?)0+$/, '$1');
+    return t.includes('.') ? t : t + '.';
+  };
   const addDirection = (vec) => {
     const len = Math.hypot(vec[0], vec[1], vec[2]) || 1;
     const d = vec.map(v => v / len || 0);
-    const did = id++; entities.push(`#${did}=DIRECTION('',(${d.map(toStep).join(',')}));`); return did;
+    const did = id++; entities.push(`#${did}=DIRECTION('',(${d.map((x) => toStepDir(x)).join(',')}));`); return did;
   };
   const addVector = (dirId, mag) => { const vid = id++; entities.push(`#${vid}=VECTOR('',#${dirId},${toStep(mag)});`); return vid; };
   const addVertex = (ptId) => { const vid = id++; entities.push(`#${vid}=VERTEX_POINT('',#${ptId});`); return vid; };
