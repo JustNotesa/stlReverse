@@ -163,9 +163,17 @@ const f32 = (tris) => { const m = new Map(); return tris.map((t) => t.map((p) =>
 // Rundungen eines Körpers: je Säule und Ende mit konvexer/konkaver Rundung ein Eintrag (Senkung mit
 // verrundeten Kanten: EIN Eintrag — scharf heißt dort: Kegel bleibt, nur die Rundungen fallen weg)
 const isRounded = (spec) => ['round', 'concave'].includes(spec?.kind) || (spec?.kind === 'countersink' && (spec.r > 0 || spec.rw > 0));
+// runs: zusammenhängende verrundete Kanten-Abschnitte (spec.edges, zyklisch) — v2 entfernt je Abschnitt
+// höchstens ein (offenes) Band, d.h. eine Rundung kann bis zu `runs` Bänder zählen
+const edgeRuns = (spec, n) => {
+  if (!spec?.edges) return 1;
+  const set = new Set(spec.edges);
+  let runs = 0; for (let e = 0; e < n; e++) if (set.has(e) && !set.has((e - 1 + n) % n)) runs++;
+  return Math.max(1, runs);
+};
 const roundedPairs = (body) => {
   const out = [];
-  body.columns.forEach((col, c) => { for (const end of ['bottom', 'top']) if (isRounded(col[end])) out.push({ c, end, key: `${col.name || 'S' + c}.${end === 'top' ? 'oben' : 'unten'}` }); });
+  body.columns.forEach((col, c) => { for (const end of ['bottom', 'top']) if (isRounded(col[end])) out.push({ c, end, runs: edgeRuns(col[end], col.profile.length), key: `${col.name || 'S' + c}.${end === 'top' ? 'oben' : 'unten'}` }); });
   return out;
 };
 
@@ -220,7 +228,7 @@ function variantsFor(body, vMeshParsed, heavy) {
     const tris = f32(buildMesh(sharpen(body, (c, end) => S.some((p) => p.c === c && p.end === end))));
     vs.push({
       label: m === 0 ? 'Rundung bleibt (übersprungen)' : m === all ? 'alle Rundungen scharf' : `scharf: ${S.map((p) => p.key).join('+')}`,
-      sharpCount: S.length, planar: true, tris,
+      sharpCount: S.length, sharpMax: S.reduce((s, p) => s + p.runs, 0), planar: true, tris,
       volume: m === 0 ? vMeshParsed : meshVolume(tris), tol: tolPlanar,
       target: body.expect.mode === 'sharp' ? m === all : m === 0,
     });
@@ -231,7 +239,7 @@ function variantsFor(body, vMeshParsed, heavy) {
     const bodyP = { ...body, columns: body.columns.map((col) => ({ ...col, profile: sharpenProfile2D(col.profile) })) };
     if (bodyP.columns.some((col, i) => col.profile.length !== body.columns[i].profile.length)) {
       const tris = f32(buildMesh(sharpen(bodyP)));
-      vs.push({ label: 'alle Rundungen + Profilecken scharf (v2b)', sharpCount: pairs.length, planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: body.expect.mode === 'sharp' });
+      vs.push({ label: 'alle Rundungen + Profilecken scharf (v2b)', sharpCount: pairs.length, sharpMax: pairs.reduce((s, p) => s + p.runs, 0), planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: body.expect.mode === 'sharp' });
     }
   }
   return vs;
@@ -364,7 +372,7 @@ function matchVariants(r, vs, ctx) {
   const tried = [];
   const countsOk = (v) => {
     const why = [];
-    if (r.bands > v.sharpCount || (r.bands < v.sharpCount && !r.fillets && !(v.bores && r.bores))) why.push(`bands ${r.bands}≠${v.sharpCount}`);
+    if (r.bands > (v.sharpMax ?? v.sharpCount) || (r.bands < v.sharpCount && !r.fillets && !(v.bores && r.bores))) why.push(`bands ${r.bands}≠${v.sharpCount}`);
     if (v.planar && (r.cyl || r.cones)) why.push('analytische Flächen');
     if (!v.planar && (r.bores !== v.bores || r.cones !== v.cones)) why.push(`bores/cones ${r.bores}/${r.cones}`);
     return why;

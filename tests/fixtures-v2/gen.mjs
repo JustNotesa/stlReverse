@@ -370,9 +370,9 @@ export const BODIES = [
   },
   {
     id: 'd', file: 'v2_d_zwei_kanten',
-    desc: 'Rechteck 40×30×10, Verrundung r=1.5 nur an 2 von 4 Deck-Kanten (oben: y=0,x=40; unten: y=0,y=30)',
+    desc: 'Rechteck 40×30×10, Verrundung r=1.5 nur an 2 von 4 Deck-Kanten (oben: y=0,x=40; unten: y=0,y=30) — offenes Band',
     columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'round', r: 1.5, N: 8, edges: [0, 2] }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 1] } })],
-    expect: { mode: 'skip' },
+    expect: { mode: 'sharp' },
   },
   {
     id: 'e', file: 'v2_e_fase45',
@@ -683,6 +683,33 @@ export const BODIES = [
     id: 'x7', extra: true, file: 'v2_x_fase_rundung_oben',
     desc: 'Rechteck 40×30×10, oben 45°-Fase (Tiefe 1.5), nur die Kante Fase → Deckfläche r=0.5 verrundet (Ziel: scharfe Fase)',
     columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, N: 8 } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  // ── Offene Bänder: nur ein zusammenhängender Teil der Deck-Kontur verrundet (wie d) ──
+  {
+    id: 'd2', extra: true, file: 'v2_x_drei_kanten',
+    desc: 'Rechteck 40×30×10, Verrundung r=1.5 oben an 3 von 4 Kanten (beide Enden an derselben Stirnwand), unten scharf',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 1, 2] } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'd3', extra: true, file: 'v2_x_offen_eckbogen',
+    desc: 'Rechteck 40×30 mit EINER senkrechten Eckrundung R5 (8 Seg., unten rechts) ×10, Verrundung r=1 oben an Unterseite + Eckbogen + rechter Seite',
+    // Profil: (0,0) → (35,0) → Bogen um (35,5) bis (40,5) → (40,30) → (0,30); Kanten 0 … 9 verrundet
+    columns: [plate([[0, 0], ...Array.from({ length: 9 }, (_, k) => { const a = -PI / 2 + (PI / 2) * k / 8; return [35 + 5 * Math.cos(a), 5 + 5 * Math.sin(a)]; }), [40, 30], [0, 30]], 10, null,
+      { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'd4', extra: true, file: 'v2_x_offen_schraeg',
+    desc: 'Trapez (0,0)-(40,0)-(30,30)-(0,30) ×10, Verrundung r=1.5 oben an Unterkante + schräger Kante (stumpfe Gehrung, schräge Stirnwand)',
+    columns: [plate([[0, 0], [40, 0], [30, 30], [0, 30]], 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 1] } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'd5', extra: true, file: 'v2_x_offen_innenecke',
+    desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben nur an den zwei Kanten der einspringenden Ecke',
+    columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [2, 3] } })],
     expect: { mode: 'sharp', bands: 1 },
   },
   // ── Bandform (ersetzt die Schranken RMAX/Bandfläche ≤ 3× Deckfläche): Kuppe ≠ Verrundung ──

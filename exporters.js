@@ -1025,13 +1025,14 @@ export function buildVolumeStepBrepV2(analysis) {
   // Bandkante entlang dieser Normale auf P schieben, ohne die Wand zu verlassen. Die neue Kontur
   // von P ist exakt der Wandquerschnitt in P's Ebene (= die scharfe Kante, die der Konstrukteur
   // verrundet hat), für gerade UND gekrümmte Konturabschnitte. Die Band-Facetten entfallen.
-  // Konservativ: nur geschlossene Ringbänder (Loop von P komplett verrundet, Band grenzt nur an
-  // P und Wände), Band muss an P UND an den Wänden tangential anschließen (Verrundung — keine Fase,
-  // keine Senkung) und im Querschnitt ein Kreisbogen sein, Band muss schmal sein (Bandform, s.
-  // evaluateBand), neue Kontur muss einfach sein. Liegt zwischen Rundung und Wand ein Kegel/eine
-  // Fase (Senkung mit verrundeter Kante), wird nur die Rundung geschärft, der Kegel bleibt (schräge
-  // Wand, s. splitTiltedWall). Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt + der
-  // globale Fallback.
+  // Konservativ: nur geschlossene Ringbänder (Loop von P komplett verrundet) oder EIN verrundeter
+  // Abschnitt des Loops, der an zwei Stirnwänden endet (offenes Band, Rest des Loops scharf). Das
+  // Band grenzt nur an P und Wände, schließt an P UND an die Wände tangential an (Verrundung —
+  // keine Fase, keine Senkung), ist im Querschnitt ein Kreisbogen und schmal (Bandform, s.
+  // evaluateBand); die neue Kontur muss einfach sein. Liegt zwischen Rundung und Wand ein Kegel/
+  // eine Fase (Senkung mit verrundeter Kante), wird nur die Rundung geschärft, der Kegel bleibt
+  // (schräge Wand, s. splitTiltedWall). Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt
+  // + der globale Fallback.
   // (Aufruf in runPipeline() unten.)
   let bandsDefeatured = 0;
   function defeatureBands() {
@@ -1165,22 +1166,37 @@ export function buildVolumeStepBrepV2(analysis) {
       off /= cnt;
       {
         // (1) Jede Kante von L muss an GENAU eine Band-Fläche grenzen — und zwar tangential (Knick
-        //     ≤ 25°, s. TANGENT_COS): eine Fase oder Senkung an P ist keine Verrundung.
-        const Ledges = new Set();
+        //     ≤ 25°, s. TANGENT_COS): eine Fase oder Senkung an P ist keine Verrundung. Offenes Band:
+        //     ist nur EIN zusammenhängender Abschnitt von L verrundet, grenzt der Rest direkt an
+        //     Wände ⊥ P (scharfe Kanten) — die beiden Wände an den Enden des Abschnitts sind die
+        //     Stirnwände, auf denen das Band mit seinem Rundungsprofil endet (s. (4)).
+        const Ledges = new Set();      // Kanten des verrundeten Abschnitts
         const seeds = new Set();
+        const lNb = [];                // je Kante von L: Nachbarfläche, Band-Kante?
         let ok = true, lenL = 0;
         for (let i = 0; i < L.length && ok; i++) {
           const a = L[i], b = L[(i + 1) % L.length];
           const k = edgeKeyFn(a, b);
-          Ledges.add(k);
           const others = (edgeOwners.get(k) || []).filter((o) => o.fi !== pi);
-          if (others.length !== 1) { ok = false; break; }
-          const c = Math.abs(_dot3(nrm[others[0].fi], d));
-          if (c < TANGENT_COS || c >= PARALLEL_COS || removed.has(others[0].fi)) { ok = false; break; }
-          seeds.add(others[0].fi);
-          lenL += Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+          if (others.length !== 1 || removed.has(others[0].fi)) { ok = false; break; }
+          const ni = others[0].fi, c = Math.abs(_dot3(nrm[ni], d));
+          const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+          if (c >= TANGENT_COS && c < PARALLEL_COS) { Ledges.add(k); seeds.add(ni); lNb.push({ ni, band: true }); lenL += len; }
+          else if (c <= WALL_COS) lNb.push({ ni, band: false });
+          else { ok = false; break; }
         }
         if (!ok || !seeds.size) return null;
+        // Offenes Band: genau ein Abschnitt (zyklisch) von Band-Kanten; A/B = Anfangs-/Endpunkt auf L,
+        // endA/endB = Stirnwände (Nachbarn der scharfen Kanten davor/danach)
+        let open = null;
+        if (lNb.some((x) => !x.band)) {
+          const n = L.length;
+          const starts = [];
+          for (let i = 0; i < n; i++) if (lNb[i].band && !lNb[(i - 1 + n) % n].band) starts.push(i);
+          if (starts.length !== 1) return null;
+          let e = starts[0]; while (lNb[(e + 1) % n].band) e = (e + 1) % n;
+          open = { s: starts[0], e, A: L[starts[0]], B: L[(e + 1) % n], endA: lNb[(starts[0] - 1 + n) % n].ni, endB: lNb[(e + 1) % n].ni };
+        }
         // Laufzeit-Vorfilter: die Saat (erste Bandschicht) einer Verrundung ist ein schmaler Streifen
         // entlang L. Ist sie größer als 3× P, ist P keine Deckfläche, sondern ein Stück einer fein
         // tessellierten Kugel/eines Torus (Nachbarn so groß wie P) → verwerfen, ohne zu wachsen.
@@ -1251,8 +1267,10 @@ export function buildVolumeStepBrepV2(analysis) {
                 if (Math.abs(_dot3(nrm[ni], d)) <= WALL_COS && !removed.has(ni)) {
                   // (3) Tangential an die Wand? Die angrenzende Band-Facette muss fast ⊥ P stehen
                   // (Knick zur Wand ≤ 25°). Senkung: Kegel (45°) grenzt an die Bohrungswand → 45°.
-                  if (Math.abs(_dot3(nrm[fi], d)) > TANGENT_SIN) nonTangent = true;
-                  walls.add(ni); wallEdges.push({ v0: a, v1: b, wi: ni, bi: fi }); continue;
+                  // (Stirnwände eines offenen Bandes schneiden das Rundungsprofil quer — kein Knick.)
+                  const isEnd = open && (ni === open.endA || ni === open.endB);
+                  if (!isEnd && Math.abs(_dot3(nrm[fi], d)) > TANGENT_SIN) nonTangent = true;
+                  walls.add(ni); wallEdges.push({ v0: a, v1: b, wi: ni, bi: fi, end: isEnd }); continue;
                 }
                 ok = false;
               }
@@ -1263,6 +1281,7 @@ export function buildVolumeStepBrepV2(analysis) {
         // (3b) Nicht tangential an die Wände: nur zulässig, wenn zwischen Rundung und Wand eine
         // Kegel-/Fasen-Lage liegt (Senkung mit verrundeter Kante) — die wird zur schrägen Wand.
         let tilt = null, wallAng = 90;
+        if (nonTangent && open) return null;
         if (nonTangent) {
           tilt = splitTiltedWall(pi, band, wallEdges, Ledges, d);
           if (!tilt) return null;
@@ -1271,17 +1290,25 @@ export function buildVolumeStepBrepV2(analysis) {
         }
         // (Gekrümmt ist das Band damit von selbst: tangential an P und an die Wände → die Band-
         // Normalen überstreichen mindestens 25°…65° zu P; reine Fasen scheitern schon an (1).)
-        // (4) Wand-Bandkante muss genau EIN geschlossener Ring sein
-        const rings = chainEdges(wallEdges);
-        if (rings.length !== 1 || rings[0].length < 3) return null;
-        const ring = rings[0];
+        // (4) Wand-Bandkante muss genau EIN geschlossener Ring sein — offenes Band: EIN Weg von A nach
+        // B über die Stirnwand bei A (Rundungsprofil, Tiefe 0 → r), die Seitenwände (Tiefe r) und die
+        // Stirnwand bei B (r → 0); `ring` = die Punkte dazwischen (ohne A und B, die bleiben).
+        let ring;
+        if (!open) {
+          const rings = chainEdges(wallEdges);
+          if (rings.length !== 1 || rings[0].length < 3) return null;
+          ring = rings[0];
+        } else {
+          ring = openBandPath(open, wallEdges, d, off);
+          if (!ring) return null;
+        }
         // (5) Projektion auf P (entlang d — bleibt auf jeder Wand, da Wände d enthalten; schräge
         // Kegel-Wände: entlang ihrer Mantellinie, s. splitTiltedWall)
         const proj = new Map();       // vtxKey(alt) → neuer Punkt
         let hLo = Infinity, hHi = -Infinity;
         for (const p of ring) {
           const h = _dot3(d, p) - off;
-          if (Math.abs(h) < hLo) hLo = Math.abs(h); if (Math.abs(h) > hHi) hHi = Math.abs(h);
+          if (!open || open.side.has(vtxKey(p))) { if (Math.abs(h) < hLo) hLo = Math.abs(h); if (Math.abs(h) > hHi) hHi = Math.abs(h); }
           if (Math.abs(h) < 1e-6 || Math.abs(h) > H_MAX) { ok = false; break; }
           const q = tilt ? tilt.project(p, h) : [p[0] - d[0] * h, p[1] - d[1] * h, p[2] - d[2] * h];
           if (!q) { ok = false; break; }
@@ -1307,7 +1334,7 @@ export function buildVolumeStepBrepV2(analysis) {
             for (const Lb of loopsOf(fds[fi])) for (const p of Lb) { note(p, ang); pts.set(vtxKey(p), p); }
           }
           for (const p of L) note(p, 0);
-          for (const p of ring) note(p, wallAng);
+          for (const p of ring) if (!open || open.side.has(vtxKey(p))) note(p, wallAng);
           const invR = (1 - Math.cos(wallAng * Math.PI / 180)) / hHi;
           for (const [k, p] of pts) {
             const al = Math.acos(Math.max(-1, Math.min(1, 1 - Math.abs(_dot3(d, p) - off) * invR))) * 180 / Math.PI;
@@ -1318,8 +1345,13 @@ export function buildVolumeStepBrepV2(analysis) {
         // Ebene von P und die echte(n) Ebene(n) seiner Wand/Wände setzen (kleinste Verschiebung; an
         // der Ecke zweier Wände = Schnittpunkt dreier Ebenen). Nur µm-Korrekturen (≤ SNAP_MAX), und
         // nur für alle Punkte gemeinsam — sonst bleibt die einfache Projektion.
-        const planes = tilt ? null : snapProjection(pi, proj, wallEdges, d);
+        const planes = tilt || open ? null : snapProjection(pi, proj, wallEdges, d);
         const newLoop = [];
+        if (open) {
+          // L ohne den verrundeten Abschnitt (B … A, scharfe Kanten bleiben), dann der projizierte Weg
+          const n = L.length;
+          for (let i = (open.e + 1) % n; ; i = (i + 1) % n) { newLoop.push(L[i]); if (i === open.s) break; }
+        }
         for (const p of ring) {
           const q = proj.get(vtxKey(p));
           if (!newLoop.length || vtxKey(newLoop[newLoop.length - 1]) !== vtxKey(q)) newLoop.push(q);
@@ -1357,6 +1389,47 @@ export function buildVolumeStepBrepV2(analysis) {
         if (!ok) return null;
         return { pi, L, newLoop, walls, band, proj, planes };
       }
+    }
+
+    // (4) Offenes Band: Weg der Wand-Bandkanten von A nach B → Punkte zwischen A und B | null. Er muss
+    // jede Kante genau einmal benutzen, auf der Stirnwand bei A beginnen (Tiefe steigt von 0 auf die
+    // Bandtiefe), dann nur Seitenwände in Bandtiefe und am Ende die Stirnwand bei B (Tiefe fällt auf 0).
+    // Merkt sich die Seitenwand-Punkte in open.side (für Bandtiefe und Rundungsprofil).
+    function openBandPath(open, wallEdges, d, off) {
+      const adj = new Map();
+      wallEdges.forEach((e, idx) => {
+        for (const [p, q] of [[e.v0, e.v1], [e.v1, e.v0]]) { const k = vtxKey(p); let a = adj.get(k); if (!a) { a = []; adj.set(k, a); } a.push({ q, idx }); }
+      });
+      const kA = vtxKey(open.A), kB = vtxKey(open.B);
+      if (kA === kB || (adj.get(kA) || []).length !== 1 || (adj.get(kB) || []).length !== 1) return null;
+      const used = new Set(), path = [];
+      let k = kA;
+      for (let guard = 0; guard <= wallEdges.length; guard++) {
+        const nx = (adj.get(k) || []).filter((x) => !used.has(x.idx));
+        if (k !== kA && k !== kB && (adj.get(k) || []).length !== 2) return null;   // verzweigt
+        if (k === kB) break;
+        if (nx.length !== 1) return null;
+        used.add(nx[0].idx);
+        k = vtxKey(nx[0].q);
+        if (k !== kB) path.push(nx[0].q);
+      }
+      if (k !== kB || used.size !== wallEdges.length || !path.length) return null;
+      // Abschnitte: Stirnwand A … Seitenwände … Stirnwand B
+      const depth = (p) => Math.abs(_dot3(d, p) - off);
+      const seq = [open.A, ...path, open.B];
+      const kinds = [];               // je Kante des Weges: 'A' | 'S' | 'B'
+      for (let i = 0; i + 1 < seq.length; i++) {
+        const e = wallEdges[[...adj.get(vtxKey(seq[i]))].find((x) => vtxKey(x.q) === vtxKey(seq[i + 1])).idx];
+        kinds.push(!e.end ? 'S' : e.wi === open.endA && (!kinds.length || kinds[kinds.length - 1] === 'A') ? 'A' : e.wi === open.endB ? 'B' : 'X');
+      }
+      const ord = kinds.join('');
+      if (!/^A+S+B+$/.test(ord)) return null;
+      const nA = ord.indexOf('S'), nB = ord.lastIndexOf('S') + 1;
+      for (let i = 1; i <= nA; i++) if (depth(seq[i]) < depth(seq[i - 1]) - 1e-6) return null;              // Profil A: Tiefe steigt
+      for (let i = nB; i + 1 < seq.length; i++) if (depth(seq[i + 1]) > depth(seq[i]) + 1e-6) return null;   // Profil B: Tiefe fällt
+      open.side = new Set();
+      for (let i = nA; i <= nB; i++) open.side.add(vtxKey(seq[i]));
+      return path;
     }
 
     // (3b) Senkung/Fase mit verrundeter Deck-Kante: das Band (Rundung + Kegel) reicht bis zur Bohrungs-
