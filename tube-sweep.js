@@ -956,15 +956,18 @@ function mergePieces(pcs) {
 // Profil-Lage entlang der Kette: Profilkreis (Mittelpunkt c, Normale m) starr mitbewegt.
 // Für einen Vertex v die Profil-Ebene suchen, in der er liegt ((v − P(s))·m(s) = 0), dann
 // Abstand |v − P(s)| − r. Geradenstück: Ebenen parallel → linear lösbar; Bogen: Bisektion.
-function vertexResidual(v, pieces3, mOf, r) {
-  let best = Infinity;
+// Optional (out = { B }): out.phi = Profilwinkel des Vertex in seiner Profilebene, Bezug ist die
+// Bahn-Ebenen-Normale B (auf die Profilebene projiziert) — für die Facetten-Prüfung (s. fitTube).
+function vertexResidual(v, pieces3, mOf, r, out = null) {
+  let best = Infinity, bestW = null, bestM = null;
   for (const pc of pieces3) {
     if (pc.kind === 'line') {
       const m = pc.profM || mOf(pc.dir), tm = dot(pc.dir, m);
       const s = dot(sub(v, pc.p0), m) / tm;
       if (s < -0.02 || s > pc.len + 0.02) continue; // Rand-Toleranz 0.02 mm Weglänge
-      const res = len(sub(v, addv(pc.p0, mul(pc.dir, s)))) - r;
-      if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) best = res; // nur plausible Wurzel (nahe am Profil)
+      const foot = addv(pc.p0, mul(pc.dir, s));
+      const res = len(sub(v, foot)) - r;
+      if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) { best = res; if (out) { bestW = sub(v, foot); bestM = m; } } // nur plausible Wurzel (nahe am Profil)
       continue;
     }
     // Schnelltest: grober Abstand zum Bogen
@@ -984,10 +987,21 @@ function vertexResidual(v, pieces3, mOf, r) {
       if (f0 === 0 || f0 * f1 < 0) {
         let a = th0, b = th1, fa = f0;
         for (let it = 0; it < 50; it++) { const m = 0.5 * (a + b), fm = f(m); if (fa * fm <= 0) b = m; else { a = m; fa = fm; } }
-        const res = len(sub(v, P(0.5 * (a + b)))) - r;
-        if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) best = res; // nur plausible Wurzel
+        const thR = 0.5 * (a + b), Pr = P(thR);
+        const res = len(sub(v, Pr)) - r;
+        if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) { // nur plausible Wurzel
+          best = res;
+          if (out) { bestW = sub(v, Pr); bestM = pc.profM ? rotAbout(pc.profM, pc.axis, thR) : mOf(Tt(thR)); }
+        }
       }
       th0 = th1; f0 = f1;
+    }
+  }
+  if (out) {
+    out.phi = NaN;
+    if (bestW) {
+      const m = norm(bestM), b1 = norm(sub(out.B, mul(m, dot(out.B, m)))), b2 = cross(m, b1);
+      out.phi = Math.atan2(dot(bestW, b2), dot(bestW, b1));
     }
   }
   return best;
@@ -1082,6 +1096,8 @@ const MAX_KINK = 0.1 * DEG;   // erlaubter Tangenten-Knick beim Vereinfachen der
 const VERT_TOL = 0.05;        // Netz-Vertex ↔ Modell-Fläche (mm); gemessen eBike rechts bis 0.04 (Bogen)
 const MOUTH_TOL = 0.03;       // Mündungs-Loop ↔ Mündungskurve (mm)
 const GAP_TOL = 1e-6;         // γ = 0: Rand-Kurve ↔ Zylinder/Torus aus der Bahn (mm), sonst Stück als Sweep-Fläche
+const FACET_SPAN_K = 1.75;    // Dreieck quer zur Bahn breiter als K × typische Umfangsteilung → verdächtig …
+const SAG_MIN = 0.01;         // … wenn seine Sehne dabei mehr als SAG_MIN (mm) vom Profilkreis abweicht
 
 
 function fitTube(T, cand, keyOf, loops) {
@@ -1453,18 +1469,42 @@ function fitTube(T, cand, keyOf, loops) {
   // (7) Vertex-Prüfung gegen das Modell (Netz-Vertices liegen bei CAD-Tessellierung exakt auf der Fläche)
   const verts = new Map();
   for (const t of cand.tris) for (let k = 0; k < 3; k++) verts.set(keyOf[t][k], T.V[t][k]);
-  const res = [];
-  for (const v of verts.values()) res.push(vertexResidual(v, pieces, mOf, rProf));
+  const res = [], phiOf = new Map(), probe = { B: Bn };
+  for (const [key, v] of verts) { res.push(vertexResidual(v, pieces, mOf, rProf, probe)); phiOf.set(key, probe.phi); }
   const absRes = res.map(Math.abs);
   const vertDev = { max: Math.max(...absRes), mean: absRes.reduce((x, y) => x + y, 0) / absRes.length, n: absRes.length, medianSigned: median(res) };
   if (!(vertDev.max <= VERT_TOL)) return fail('Netz weicht vom Modell ab', { vertDev, gammaDeg: gamma / DEG, pieces: nP, badVertices: absRes.filter((x) => !(x <= VERT_TOL)).length });
+  // (8) Facetten-Inneres quer zur Bahn: die Vertex-Prüfung sieht nur die Ecken. Eine EBENE
+  // Abflachung (D-Profil), CAD-typisch nur mit Eck-Vertices auf ihren beiden Kanten tesselliert,
+  // liegt mit allen Ecken exakt auf dem Kreis — ihre Dreiecke überspannen quer zur Bahn aber den
+  // ganzen Sehnenwinkel 2α (Abweichung in der Mitte r(1 − cos α), α = 25° → 0.23 mm), normale
+  // Facetten nur eine Umfangsteilung 2π/N (N = 48 → 0.005 mm). Je Dreieck: Spanne Δφ der
+  // Profilwinkel seiner Ecken → Sehnen-Pfeilhöhe r(1 − cos(Δφ/2)). Abgelehnt (Kanal bleibt facettiert,
+  // die Abflachung erhalten), wenn sie VERT_TOL übersteigt (dort läge das Netz weiter vom Modell
+  // weg, als ein Vertex darf), oder wenn ein Dreieck mehr als FACET_SPAN_K-mal so breit ist wie die
+  // typische Teilung des Kanals UND dabei mehr als SAG_MIN abweicht. Beide Grenzen sind fest bzw.
+  // am Kanal gemessen — sie wachsen nicht mit der Größe des geprüften Dreiecks.
+  const spans = [];
+  for (const t of cand.tris) {
+    const a = [phiOf.get(keyOf[t][0]), phiOf.get(keyOf[t][1]), phiOf.get(keyOf[t][2])];
+    if (!a.every(Number.isFinite)) continue;
+    a.sort((x, y) => x - y);
+    spans.push(2 * Math.PI - Math.max(a[1] - a[0], a[2] - a[1], 2 * Math.PI - (a[2] - a[0])));
+  }
+  const sagOf = (sp) => rProf * (1 - Math.cos(sp / 2));
+  const spanRef = median(spans.filter((x) => x > 0.1 * DEG));
+  let spanMax = 0; for (const x of spans) spanMax = Math.max(spanMax, x);
+  const facet = { spanRefDeg: spanRef / DEG, spanMaxDeg: spanMax / DEG, sagMax: sagOf(spanMax) };
+  if (facet.sagMax > VERT_TOL || (spanMax > FACET_SPAN_K * spanRef && facet.sagMax > SAG_MIN)) {
+    return fail('Facette quer zur Bahn zu breit (ebene Abflachung?)', { facet });
+  }
   return {
     radius: rProf, gamma, B: Bn, pieces, curves,
     mouths: [{ curve: 0, planeC: plA.c, planeN: plA.n, nPts: endA.loop.length }, { curve: nP, planeC: plB.c, planeN: plB.n, nPts: endB.loop.length }],
     stats: {
       gammaDeg: gamma / DEG, radius: rProf, stations: P.length, secRms, stationDev, vertDev, mouthDev, endFits,
       biarcPieces, chainKind, lines: pieces.filter((p) => p.kind === 'line').length, arcs: pieces.filter((p) => p.kind === 'arc').length,
-      mouthKinds: [curves[0].kind, curves[nP].kind],
+      mouthKinds: [curves[0].kind, curves[nP].kind], facet,
       ...(gamma === 0 ? { profileTiltDeg: maxTilt / DEG, curveGap: maxGap, sweptPieces: swept } : {}),
     },
   };
