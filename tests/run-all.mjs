@@ -8,7 +8,12 @@
 //   ebike        ebike-scorecard.mjs        — verrundetes eBike, 47 Flächen
 //   tube         tube-regression.mjs        — 6 Synthetik-Kanäle
 //   bore         bore-analytic-regression.mjs — Dünnplatten-Bohrungen
+//   mantel       mantle-regression.mjs      — Außenmäntel, Bohrungs-Funde, Fallback
 //   collinear    collinear-regression.mjs   — kollineare Kantenpunkte
+//   strict       step-strict.mjs            — STEP ohne Heilung (strikte Importer wie CST/ACIS),
+//                                             alle Samples Toggle AN und AUS
+//   orient       orientation-guard.mjs      — Orientierungs-Wächter: kein Fehlalarm, Verdrehungen
+//                                             gefangen, sauberer Rückfall
 //
 // Jede Suite läuft als eigener Prozess (Ausgabe durchgereicht); es laufen ALLE,
 // auch wenn eine scheitert — am Ende Zusammenfassung mit Laufzeiten und
@@ -28,7 +33,10 @@ const SUITES = [
   { name: 'ebike',       args: ['tests/ebike-scorecard.mjs'] },
   { name: 'tube',        args: ['tests/tube-regression.mjs'] },
   { name: 'bore',        args: ['tests/bore-analytic-regression.mjs'] },
+  { name: 'mantel',      args: ['tests/mantle-regression.mjs'] },
   { name: 'collinear',   args: ['tests/collinear-regression.mjs'] },
+  { name: 'strict',      args: ['tests/step-strict.mjs'] },
+  { name: 'orient',      args: ['tests/orientation-guard.mjs'] },
 ];
 
 const results = [];
