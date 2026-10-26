@@ -12,3 +12,12 @@ playwright-report/
 
 # Hinweis: tests/screenshots/ wird bewusst versioniert (visueller Verifikations-Nachweis).
 .claude/worktrees/
+
+# Lokale Claude-Code-Einstellungen (enthalten lokale Pfade)
+.claude/settings.json
+
+# Build-Artefakte (web-ext build)
+web-ext-artifacts/
+
+# Test-Exporte für den CAD-Import-Check (CST/Fusion)
+cst-test/

@@ -1801,7 +1801,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const k1 = ptKey(p1), k2 = ptKey(p2);
     return k1 < k2 ? `${k1}||${k2}` : `${k2}||${k1}`;
   };
-  const edgeRegistry = new Map(); // canonKey → { ecId, canonStartKey }
+  const edgeRegistry = new Map(); // canonKey → { ecId, startKey }
   // Wie wird jede kanonische Kante von ORIENTED_EDGEs benutzt — getrennt nach Richtung
   // (.T. = forward, .F. = reverse)? Eine saubere geschlossene Manifold-Kante wird GENAU
   // einmal vorwärts UND einmal rückwärts benutzt (fwd=1, rev=1). Abweichungen:
@@ -1825,8 +1825,13 @@ export function buildVolumeStepBrepV2(analysis) {
       const vecId = addVector(dirId, len);
       const lineId = addLine(startPtId, vecId);
       const ecId = addEdgeCurve(sv, ev, lineId);
-      const k1 = ptKey(p1), k2 = ptKey(p2);
-      edgeRegistry.set(key, { ecId, canonStartKey: k1 < k2 ? k1 : k2 });
+      // Bezug für die ORIENTED_EDGE-Richtung ist der TATSÄCHLICHE Start der EDGE_CURVE (p1 der
+      // ersten Nutzung) — nicht der kleinere Punkt-Schlüssel. Früher stand hier min(k1,k2): ging
+      // die erste Nutzung vom größeren zum kleineren Schlüssel, waren BEIDE Richtungs-Flags der
+      // Kante vertauscht → Ränder in der STEP unterbrochen. Der Wasserdicht-Zähler sah das nicht
+      // (weiter 1× vor/1× zurück), occt/Fusion sortieren still um, strikte Importer (CST/ACIS)
+      // verlieren Flächen. Prüfung: tests/step-strict.mjs (loop-chain).
+      edgeRegistry.set(key, { ecId, startKey: ptKey(p1) });
     }
     return edgeRegistry.get(key);
   };
@@ -1881,7 +1886,7 @@ export function buildVolumeStepBrepV2(analysis) {
       if (ptKey(p1) === ptKey(p2)) continue; // skip degenerate
       const edge = getOrCreateEdge(p1, p2);
       const ck = edgeCanonKey(p1, p2);
-      const forward = ptKey(p1) === edge.canonStartKey;
+      const forward = ptKey(p1) === edge.startKey;
       const u = edgeUse.get(ck) || { fwd: 0, rev: 0 };
       if (forward) u.fwd++; else u.rev++;
       edgeUse.set(ck, u);
@@ -2093,6 +2098,15 @@ export function buildVolumeStepBrepV2(analysis) {
     const ssBore = testFlip('bore');   // korrekt .F.: Wand-Normale zeigt zur Achse (ins Loch)
     const ssCone = testFlip('cone');   // korrekt .F.: dito für die Fase
 
+    // Kreis-Orientierung (ISO 10303-42, von strikten Importern wie CST/ACIS wörtlich genommen —
+    // occt/Fusion reparieren still): Ein Loch-Rand läuft IM Uhrzeigersinn um die Flächennormale,
+    // ein Mantel trägt seine Ränder so, dass die Fläche links liegt. Der CIRCLE läuft gegen den
+    // Uhrzeigersinn um rim.axis → Richtung je Nutzung aus der Geometrie ableiten (früher pauschal
+    // Deckfläche .T. / Mantel .F. — damit war eine der beiden Deckflächen jeder Bohrung falsch).
+    // Kanal-Mündungen (rimKey 'tube…') bringen ihre Orientierung aus tube-sweep.js mit (.T.).
+    const isTubeRim = (rim) => String(rim.rimKey).startsWith('tube');
+    const holeLoopForward = (rim, faceNormal) => isTubeRim(rim) || _dot3(rim.axis, faceNormal) < 0;
+
     // Flachflächen (Innen-Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert).
     for (const { outer, inner, normal, centroid } of faceDefsArg) {
       const outerOe = buildLoopEdges(outer);
@@ -2102,12 +2116,7 @@ export function buildVolumeStepBrepV2(analysis) {
         if (innerLoop.circleRim) {
           const rim = innerLoop.circleRim;
           const ce = getOrCreateCircleEdge(rim.rimKey, rim);
-          // Umlaufsinn nach ISO 10303-42: ein Loch-Loop läuft CW um die effektive Flächennormale.
-          // STEP-Kurven laufen CCW um die eigene Achse → vorwärts genau dann, wenn die Kurvenachse
-          // der Flächennormale ENTGEGEN zeigt. Kanal-Mündungskurven (sense-Feld) erfüllen das per
-          // Konstruktion (Achse zeigt ins Material) und behalten ihr festes .T. — ihre Kanal-
-          // Stücke komplementieren über `sense` (s. unten).
-          const fwd = rim.sense !== undefined ? true : _dot3(normal, rim.axis) < 0;
+          const fwd = holeLoopForward(rim, normal);
           useCircle(rim.rimKey, fwd);
           bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)])));
           continue;
@@ -2123,21 +2132,23 @@ export function buildVolumeStepBrepV2(analysis) {
       if (!ssPlane) guardFailures++;
     }
 
-    // Zylinder-Mantelflächen (nahtlos: 1 CYLINDRICAL_SURFACE, 2 volle Kreis-Bounds).
-    // same_sense .F.: die Flächennormale der Bohrungswand zeigt zur Achse (ins Loch) — wie die
-    // STL-Außennormalen der ersetzten Wand-Facetten. Umlaufsinn je Rand aus der Geometrie: der
-    // Kreis am +Achsen-Ende vorwärts (CCW um die Achse), der am −Achsen-Ende rückwärts — zusammen
-    // mit der Deck-Regel oben bleibt jede Kreis-Kante genau 1× vorwärts und 1× rückwärts benutzt.
+    // Zylinder-Mantelflächen (nahtlos: 1 CYLINDRICAL_SURFACE, 2 volle Kreis-Bounds). Die STEP-
+    // Zylindernormale zeigt von der Achse weg — bei einer Bohrung ins Material → same_sense .F.
+    // (effektive Normale in den Hohlraum). Fläche links vom Rand: am oberen Ende (+Achse) läuft der
+    // Rand gegen den Uhrzeigersinn um die Achse, am unteren im Uhrzeigersinn.
     for (const plan of plans) {
       const r0 = plan.rims[0];
-      const cylPlac = addAxis2Placement3D(plan.surfCenter, r0.axis, r0.refDir);
+      const ax = r0.axis;
+      const cylPlac = addAxis2Placement3D(plan.surfCenter, ax, r0.refDir);
       const cylSurf = addCylindricalSurface(cylPlac, r0.radius);
-      const tA = _dot3(plan.rims[0].center, r0.axis), tB = _dot3(plan.rims[1].center, r0.axis);
+      const tOf = (rim) => _dot3(_sub3(rim.center, plan.surfCenter), ax);
+      const tMid = plan.rims.reduce((s, rim) => s + tOf(rim), 0) / plan.rims.length;
       const bounds = [];
       for (let r = 0; r < plan.rims.length; r++) {
         const rim = plan.rims[r];
         const ce = getOrCreateCircleEdge(rim.rimKey, rim);
-        const fwd = r === 0 ? tA >= tB : tB >= tA;
+        const isTop = tOf(rim) > tMid;
+        const fwd = isTop === (_dot3(rim.axis, ax) > 0);
         useCircle(rim.rimKey, fwd);
         const loopId = addEdgeLoop([addOrientedEdge(ce.ecId, fwd)]);
         bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
@@ -2145,26 +2156,27 @@ export function buildVolumeStepBrepV2(analysis) {
       faceIds.push(addAdvancedFace(bounds, cylSurf, ssBore));
       { // Wächter: Wand-Facetten der Bohrung gegen die emittierte Mantel-Orientierung
         const tg = nowMs();
-        const mean = guardScan(plan.groups, null, cylGuardNormal(plan.surfCenter, r0.axis, ssBore ? 1 : -1));
+        const mean = guardScan(plan.groups, null, cylGuardNormal(plan.surfCenter, ax, ssBore ? 1 : -1));
         if (mean !== null && mean < 0) guardFailures++;
         guardMs += nowMs() - tg;
       }
 
       // Chamfer-Kegel (Fase): überbrückt Rand-Kreis R@z1 (mit Zylinder geteilt) und Flach-Kreis
-      // R2@z2 (mit der flachen Fläche geteilt). same_sense .F. (Normale zur Achse, ins Loch);
-      // Umlaufsinn wie beim Mantel aus der Lage entlang der Achse: der Kreis am +Achsen-Ende des
-      // Kegelstücks vorwärts — komplementiert Mantel (rimDesc) und Flachfläche (flatDesc).
+      // R2@z2 (mit der flachen Fläche geteilt). Die STEP-Kegelnormale zeigt ins Material → same_sense
+      // .F.; coneAxis zeigt vom Rand-Kreis zum Flach-Kreis. Fläche links vom Rand: Rand-Kreis im
+      // Uhrzeigersinn um coneAxis, Flach-Kreis gegen den Uhrzeigersinn → je Kreis 1×fwd/1×rev mit
+      // Zylinder bzw. Deckfläche.
       for (const cr of (plan.coneRims || [])) {
         const conePlac = addAxis2Placement3D(cr.rimDesc.center, cr.coneAxis, cr.rimDesc.refDir);
         const coneSurf = addConicalSurface(conePlac, cr.rimDesc.radius, cr.semiAngle);
         const ceRim = getOrCreateCircleEdge(cr.rimDesc.rimKey, cr.rimDesc);
         const ceFlat = getOrCreateCircleEdge(cr.flatDesc.rimKey, cr.flatDesc);
-        const dzC = _dot3(_sub3(cr.flatDesc.center, cr.rimDesc.center), cr.rimDesc.axis);
-        const fwdRim = dzC < 0, fwdFlat = dzC > 0;
-        useCircle(cr.rimDesc.rimKey, fwdRim);
-        useCircle(cr.flatDesc.rimKey, fwdFlat);
-        const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceRim.ecId, fwdRim)]));
-        const ib = addFaceBound(addEdgeLoop([addOrientedEdge(ceFlat.ecId, fwdFlat)]));
+        const fRim = _dot3(cr.rimDesc.axis, cr.coneAxis) < 0;
+        const fFlat = _dot3(cr.flatDesc.axis, cr.coneAxis) > 0;
+        useCircle(cr.rimDesc.rimKey, fRim);
+        useCircle(cr.flatDesc.rimKey, fFlat);
+        const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceRim.ecId, fRim)]));
+        const ib = addFaceBound(addEdgeLoop([addOrientedEdge(ceFlat.ecId, fFlat)]));
         faceIds.push(addAdvancedFace([ob, ib], coneSurf, ssCone));
         { // Wächter: die von der Chamfer-Zone verdrängten Original-Facetten gegen den Kegel
           const tg = nowMs();
@@ -2552,8 +2564,7 @@ export function buildVolumeStepTriangles(analysis) {
       const vecId = addVector(dirId, len);
       const lineId = addLine(startPtId, vecId);
       const ecId = addEdgeCurve(sv, ev, lineId);
-      const k1 = ptKey(p1), k2 = ptKey(p2);
-      edgeRegistry.set(key, { ecId, canonStartKey: k1 < k2 ? k1 : k2 });
+      edgeRegistry.set(key, { ecId, startKey: ptKey(p1) });   // tatsächlicher EDGE_CURVE-Start (s. V2)
     }
     return edgeRegistry.get(key);
   };
@@ -2578,7 +2589,7 @@ export function buildVolumeStepTriangles(analysis) {
       for (let k = 0; k < 3; k++) {
         const p1 = pts[k], p2 = pts[(k+1)%3];
         const edge = getOrCreateEdge(p1, p2);
-        const forward = ptKey(p1) === edge.canonStartKey;
+        const forward = ptKey(p1) === edge.startKey;
         oeIds.push(addOrientedEdge(edge.ecId, forward));
       }
       const loopId = addEdgeLoop(oeIds);
