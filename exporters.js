@@ -212,7 +212,8 @@ export function buildVolumeStepBrepV2(analysis) {
 
   // ---- Test-Hooks (nur Tests/Node, tests/orientation-guard.mjs): STLREV_TEST_FLIP='bore'|'mantle'|
   // 'mantlecone'|'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen
-  // ABSICHTLICH um ('mantlecone' = konvexe Kegel-Mäntel, 'cone' = Fasen-Kegel der Bohrungen),
+  // ABSICHTLICH um ('mantlecone' = konvexe Kegel-Mäntel und Mantel-Fasen, 'cone' = Fasen-Kegel der
+  // Bohrungen),
   // 'tubecurve' die mittlere Übergangskurve jedes Kanals (beide Nutzungen). Die Kanten-Bilanz
   // (fwd/rev) bleibt dabei ausgeglichen, das Wasserdicht-Verdikt sieht nichts — genau diese Fälle
   // muss der Orientierungs-Wächter (assemble) fangen. STLREV_TEST_GUARD_REPORT_ONLY=1: Wächter
@@ -2355,13 +2356,23 @@ export function buildVolumeStepBrepV2(analysis) {
   // Kreis in der Deck-Ebene, Wand konvex. Ein Innen-Loop als Deck bekommt die Kreis-Kante mit
   // derselben Lochrand-Regel wie eine Bohrung (assemble: holeLoopForward — im Uhrzeigersinn um die
   // Flächennormale), der Mantel nutzt sie gegenläufig.
-  // Liegt ein Rand nicht direkt auf einer ebenen Deckfläche (Fase/Verrundung an der Außenkante),
-  // bleibt der Mantel konservativ facettiert — einen Fasen-Kegel-Pfad gibt es hier bewusst (noch)
-  // nicht. Emission in assemble() als EIGENER Block (same_sense .T., Ränder so, dass die Fläche
-  // links liegt); geprüft mit tests/step-strict.mjs (ohne Heilung) und occt-Volumen gegen den
-  // exakten Zylinder (tests/mantle-regression.mjs).
+  // FASE (C): grenzt ein Rand nicht direkt an eine Deckfläche, sondern an ein Band gleich geneigter
+  // konvexer Facetten (coneBand, s. Kegel-Abschnitt), das seinerseits genau an einem kompletten Loop
+  // einer parallelen ebenen Deckfläche endet, wird das Band ein Fasen-KEGEL zwischen dem Mantel-Rand
+  // (Radius R) und dem Deck-Kreis (R_d, axial jenseits des Mantels) — Außenkanten-Fase (R_d < R)
+  // wie Fuß-Fase eines Zapfens (R_d > R, Deck = Innen-Loop der Platte). Gates wie beim Kegel-Mantel:
+  // Deck-Kreis fein/gleichmäßig/voll, koaxial, JEDER Band-Punkt auf dem Kegel, Normalen passen,
+  // Deck-Kreis in der Deckebene. Der Mantel-Rand ist dann eine Kreis-Kante zwischen Zylinder und
+  // Kegel (keine Deckfläche), der Deck-Kreis die Kante Kegel ↔ Deckfläche. Endet das Band ohne
+  // Deckfläche in EINEM Punkt auf der Achse, ist es eine Kegelspitze (Welle mit Spitze, „Bleistift“;
+  // Spitze als VERTEX_LOOP wie beim Kegel-Mantel). Eine Verrundung (mehrere Facetten-Reihen
+  // verschiedener Neigung) endet weder an einer Deckfläche noch in einer Spitze → bleibt facettiert
+  // (mit Toggle schärft v2 sie vorher, dann greift der direkte Weg).
+  // Emission in assemble() als EIGENER Block (same_sense .T., Ränder so, dass die Fläche links
+  // liegt), die Fasen im Kegel-Block; geprüft mit tests/step-strict.mjs (ohne Heilung) und
+  // occt-Volumen gegen die exakte Geometrie (tests/mantle-regression.mjs).
   let mantlePlans = [];
-  const sharpMantlePlan = (entry, owners, fdsOfGroup, taken) => {
+  const sharpMantlePlan = (entry, owners, fdsOfGroup, taken, allOwners) => {
     const W = new Set();
     for (const g of entry.groups) for (const fi of (fdsOfGroup.get(g) || [])) if (!taken.has(fi)) W.add(fi);
     if (W.size < 3) return null;
@@ -2392,24 +2403,35 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     const rings = chainEdges(rimEdges);
     if (rings.length !== 2) return null;                       // voller Mantel: genau 2 Ränder
-    // Jeder Rand = KOMPLETTER Loop (außen oder innen) genau einer Deckfläche
-    const decks = [];
+    // Jeder Rand = KOMPLETTER Loop (außen oder innen) genau einer Deckfläche — oder eine Fase (C):
+    // Kegel-Band zwischen Rand und dem kompletten Loop einer Deckfläche (band ≠ null)
+    const ends = [];
     for (const ring of rings) {
-      let own = null;
-      for (let i = 0; i < ring.length; i++) {
+      let own = null, direct = true;
+      for (let i = 0; i < ring.length && direct; i++) {
         const o = otherOf.get(edgeKeyFn(ring[i], ring[(i + 1) % ring.length]));
-        if (!o || (own && (o.fi !== own.fi || o.loop !== own.loop))) return null;
+        if (!o) return null;
+        if (own && (o.fi !== own.fi || o.loop !== own.loop)) direct = false;
         own = o;
       }
-      const fd = faceDefs[own.fi];
-      if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
-      decks.push({ fi: own.fi, fd, loop: own.loop, ring });
+      if (direct) {
+        const fd = faceDefs[own.fi];
+        if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
+        ends.push({ deck: { fi: own.fi, fd, loop: own.loop, ring }, band: null });
+        continue;
+      }
+      if (!allOwners) return null;
+      const band = coneBand(ring, W, _norm3(entry.prim.axis), entry.prim.axisPoint, allOwners(), taken);
+      if (!band || (!band.deck && !CONE_APEX)) return null;
+      ends.push({ deck: band.deck, band });                  // deck = null: Kegelspitze (Welle mit Spitze)
     }
-    if (decks[0].fi === decks[1].fi) return null;
+    const dk = ends.filter((e) => e.deck);
+    if (!dk.length || (dk.length === 2 && dk[0].deck.fi === dk[1].deck.fi)) return null;
+    if (ends[0].band && ends[1].band && [...ends[1].band.W].some((fi) => ends[0].band.W.has(fi))) return null;
     // Achse = Deck-Normale (beide Deckflächen parallel), orientiert von Rand 0 nach Rand 1
-    const n0 = _norm3(decks[0].fd.normal), n1 = _norm3(decks[1].fd.normal);
+    const n0 = _norm3(dk[0].deck.fd.normal), n1 = _norm3(dk[dk.length - 1].deck.fd.normal);
     if (Math.abs(_dot3(n0, n1)) < 0.9999) return null;
-    const f0 = fitCircleInPlane(decks[0].ring, n0), f1 = fitCircleInPlane(decks[1].ring, n0);
+    const f0 = fitCircleInPlane(rings[0], n0), f1 = fitCircleInPlane(rings[1], n0);
     if (!f0 || !f1) return null;
     const along = _dot3(_sub3(f1.center, f0.center), n0);
     const axis = along >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
@@ -2424,7 +2446,7 @@ export function buildVolumeStepBrepV2(analysis) {
     // Ränder: eben (in ihrer Deckebene), auf dem Kreis, fein genug und einmal ganz um die Achse
     const ringAt = [0, H];
     for (let r = 0; r < 2; r++) {
-      const ring = decks[r].ring;
+      const ring = rings[r];
       let turn = 0;
       for (let i = 0; i < ring.length; i++) {
         const a = cyl(ring[i]), b = cyl(ring[(i + 1) % ring.length]);
@@ -2454,12 +2476,58 @@ export function buildVolumeStepBrepV2(analysis) {
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) <= 0) return null; // konkav → Bohrung, kein Mantel
     }
-    if (!circleOnDeck(c0, R, axis, decks[0].fd) || !circleOnDeck(c1, R, axis, decks[1].fd)) return null;
-    const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
-    if (rim0.rimKey === rim1.rimKey) return null;
+    const rims = [mkCircleDesc(c0, R, axis), mkCircleDesc(c1, R, axis)];
+    if (rims[0].rimKey === rims[1].rimKey) return null;
+    // Je Ende: Deck-Kreis = Mantel-Rand (direkt) bzw. Fasen-Kegel vom Mantel-Rand zum Deck-Kreis bzw.
+    // Kegelspitze (Band ohne Deckfläche: alle Facetten laufen in EINEM Punkt auf der Achse zusammen)
+    const wall = new Set(W), decks = [], deckRims = [], cones = [];
+    for (let r = 0; r < 2; r++) {
+      const e = ends[r], cr = r === 0 ? c0 : c1;
+      if (!e.band) {
+        if (!circleOnDeck(cr, R, axis, e.deck.fd)) return null;
+        decks.push(e.deck.loop); deckRims.push(rims[r]);
+        continue;
+      }
+      const out = r === 0 ? [-axis[0], -axis[1], -axis[2]] : axis;   // vom Mantel weg
+      if (!e.deck) {
+        let Ha = 0, top = null;
+        for (const fi of e.band.W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) { const t = _dot3(_sub3(p, cr), out); if (t > Ha) { Ha = t; top = p; } } }
+        if (!top || !(Ha > tol)) return null;
+        const apex = [cr[0] + out[0] * Ha, cr[1] + out[1] * Ha, cr[2] + out[2] * Ha];
+        if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
+        if (!bandOnCone(e.band.W, cr, R, out, Ha, -R / Ha, tol)) return null;
+        cones.push({
+          large: rims[r], small: null, apex, coneAxis: [-out[0], -out[1], -out[2]],
+          semiAngle: Math.atan2(R, Ha), groups: e.band.groups, zone: { c0: cr, zAx: out, H: Ha, R0: R, k: -R / Ha }, chamfer: true,
+        });
+        for (const fi of e.band.W) wall.add(fi);
+        continue;
+      }
+      const fdk = ringAsCircle(e.deck.ring, n0);
+      if (!fdk) return null;
+      const Hc = _dot3(_sub3(fdk.center, cr), out), Rd = fdk.radius;
+      const tolC = Math.max(tol, 0.002 * Rd);
+      if (!(Hc > tolC) || !(Math.abs(Rd - R) > tolC)) return null;     // Fase jenseits des Mantels, anderer Radius
+      const cd = [cr[0] + out[0] * Hc, cr[1] + out[1] * Hc, cr[2] + out[2] * Hc];
+      if (Math.hypot(fdk.center[0] - cd[0], fdk.center[1] - cd[1], fdk.center[2] - cd[2]) > tolC) return null; // koaxial
+      const k = (Rd - R) / Hc;
+      if (!bandOnCone(e.band.W, cr, R, out, Hc, k, tolC)) return null;
+      if (!circleOnDeck(cd, Rd, axis, e.deck.fd)) return null;
+      const deckRim = mkCircleDesc(cd, Rd, axis);
+      if (deckRim.rimKey === rims[r].rimKey || deckRim.rimKey === rims[1 - r].rimKey) return null;
+      const grow = Rd > R;                                     // Fuß-Fase: Radius wächst zum Deck hin
+      cones.push({
+        large: grow ? deckRim : rims[r], small: grow ? rims[r] : deckRim, apex: null,
+        coneAxis: grow ? out : [-out[0], -out[1], -out[2]],      // Richtung wachsenden Radius
+        semiAngle: Math.atan2(Math.abs(Rd - R), Hc), groups: e.band.groups,
+        zone: { c0: cr, zAx: out, H: Hc, R0: R, k }, chamfer: true,
+      });
+      for (const fi of e.band.W) wall.add(fi);
+      decks.push(e.deck.loop); deckRims.push(deckRim);
+    }
     return {
-      plan: { prim: entry.prim, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center },
-      wall: W, decks: [decks[0].loop, decks[1].loop],
+      plan: { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center },
+      wall, decks, deckRims, cones,
     };
   };
   // Alle passenden konvexen Mäntel umwandeln: Wandflächen entfallen, die Deck-Loops werden zur
@@ -2507,15 +2575,35 @@ export function buildVolumeStepBrepV2(analysis) {
         }
       }
     });
+    // Vollständiger Kanten-Index erst, wenn ein Rand eine Fase sein könnte (coneBand läuft über das
+    // ganze Band bis zur Deckfläche)
+    let full = null;
+    const allOwners = () => {
+      if (full) return full;
+      full = new Map();
+      faceDefs.forEach((fd, fi) => {
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (L.circleRim) continue;
+          for (let i = 0; i < L.length; i++) {
+            const a = L[i], b = L[(i + 1) % L.length];
+            if (vtxKey(a) === vtxKey(b)) continue;
+            const k = edgeKeyFn(a, b);
+            let o = full.get(k); if (!o) { o = []; full.set(k, o); }
+            o.push({ fi, loop: L });
+          }
+        }
+      });
+      return full;
+    };
     const drop = new Set();
     for (const entry of mantleById.values()) {
       let res = null;
-      try { res = sharpMantlePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
+      try { res = sharpMantlePlan(entry, owners, fdsOfGroup, drop, allOwners); } catch (_) { res = null; }
       if (!res) continue;
       for (const fi of res.wall) drop.add(fi);
-      res.decks[0].circleRim = res.plan.rims[0];
-      res.decks[1].circleRim = res.plan.rims[1];
+      res.decks.forEach((L, i) => { L.circleRim = res.deckRims[i]; });
       mantlePlans.push(res.plan);
+      for (const cp of res.cones) mantleConePlans.push(cp);
     }
     if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
   };
@@ -2569,24 +2657,27 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const L of [fd.outer, ...fd.inner]) for (const p of L) { cx += p[0]; cy += p[1]; cz += p[2]; k++; }
     return [cx / k, cy / k, cz / k];
   };
-  // Plan für EINEN Saat-Loop → { plan, wall:Set<fi>, decks:[Loop…], rims:[Kreis…] } | null
-  const sharpConePlan = (seed, owners, taken) => {
-    const fi0 = seed.fi, L0 = seed.loop;
-    const n0 = _norm3(faceDefs[fi0].normal);
-    const cs = seed.center;
-    // Wand-Saat: je Kante des Saat-Loops genau EINE Fläche auf der anderen Seite
-    const W = new Set();
-    for (let i = 0; i < L0.length; i++) {
-      const a = L0[i], b = L0[(i + 1) % L0.length];
+  // Kegel-Band jenseits eines Rings (gemeinsamer Kern von Kegel-Mantel und Mantel-Fase): S0 = je
+  // Ringkante genau EINE Fläche außerhalb von `stop` (Flächen auf der Ring-Seite: Saat-Deckfläche
+  // bzw. Zylinder-Wand); Flood über gemeinsame Kanten zu Facetten GLEICHER Neigung zur Achse n0
+  // (Normale von der Achse durch cs weg = konvex). Der Ring muss vollständig Rand des Bandes sein;
+  // die übrigen Randkanten bilden keinen (Spitze) oder genau EINEN weiteren Ring, und der muss ein
+  // KOMPLETTER Loop (außen oder innen) genau einer Fläche sein (Deckfläche).
+  // → { W:Set<fi>, deck: { fi, fd, loop, ring } | null, groups } | null
+  const coneBand = (ring, stop, n0, cs, owners, taken) => {
+    const W = new Set(), startKeys = new Set();
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
       if (vtxKey(a) === vtxKey(b)) continue;
-      const others = (owners.get(edgeKeyFn(a, b)) || []).filter((o) => o.fi !== fi0);
+      const k = edgeKeyFn(a, b);
+      const others = (owners.get(k) || []).filter((o) => !stop.has(o.fi));
       if (others.length !== 1 || taken.has(others[0].fi)) return null;
-      W.add(others[0].fi);
+      startKeys.add(k); W.add(others[0].fi);
     }
-    // Neigung der Saat-Facetten zur Achse (Deck-Normale): weder Zylinder-Wand (⟂, < 0.2°) noch
-    // Deckfläche (∥). Toleranz der Neigung relativ (grobe/ungleichmäßige Teilung: die Facetten-
-    // Neigung schwankt um wenige % von α), damit bei kleiner Formschräge keine Zylinder-Facette
-    // (Neigung 0) mitläuft.
+    if (!W.size) return null;
+    // Neigung der Saat-Facetten zur Achse: weder Zylinder-Wand (⟂, < 0.2°) noch Deckfläche (∥).
+    // Toleranz der Neigung relativ (grobe/ungleichmäßige Teilung: die Facetten-Neigung schwankt
+    // um wenige % von α), damit bei kleiner Formschräge keine Zylinder-Facette (Neigung 0) mitläuft.
     let a0 = 0;
     for (const fi of W) a0 += _dot3(_norm3(faceDefs[fi].normal), n0);
     a0 /= W.size;
@@ -2606,7 +2697,7 @@ export function buildVolumeStepBrepV2(analysis) {
       return ok;
     };
     for (const fi of W) if (!fits(fi)) return null;
-    // Wand: über gemeinsame Kanten alle passenden Facetten einsammeln
+    // Band: über gemeinsame Kanten alle passenden Facetten einsammeln
     const queue = [...W];
     while (queue.length) {
       const fd = faceDefs[queue.pop()];
@@ -2615,7 +2706,7 @@ export function buildVolumeStepBrepV2(analysis) {
           const a = L[i], b = L[(i + 1) % L.length];
           if (vtxKey(a) === vtxKey(b)) continue;
           for (const o of (owners.get(edgeKeyFn(a, b)) || [])) {
-            if (o.fi === fi0 || W.has(o.fi) || taken.has(o.fi) || !fits(o.fi)) continue;
+            if (stop.has(o.fi) || W.has(o.fi) || taken.has(o.fi) || !fits(o.fi)) continue;
             W.add(o.fi); queue.push(o.fi);
             if (W.size > CONE_MAX_WALL) return null;
           }
@@ -2623,7 +2714,7 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
     if (W.size < 3) return null;
-    // Rand der Wand: Kanten genau 1× in der Wand — Gegenüber genau EINE Fläche außerhalb
+    // Rand des Bandes: Kanten genau 1× im Band — außer dem Start-Ring Gegenüber genau EINE Fläche
     const cnt = new Map();
     for (const fi of W) {
       const fd = faceDefs[fi];
@@ -2637,57 +2728,66 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
     const rimEdges = [], otherOf = new Map();
+    let nStart = 0;
     for (const [k, e] of cnt) {
       if (e.n > 2) return null;
       if (e.n === 2) continue;
+      if (startKeys.has(k)) { nStart++; continue; }
       const others = (owners.get(k) || []).filter((o) => !W.has(o.fi));
       if (others.length !== 1 || taken.has(others[0].fi)) return null;
       rimEdges.push({ v0: e.v0, v1: e.v1 });
       otherOf.set(k, others[0]);
     }
+    if (nStart !== startKeys.size) return null;                 // Start-Ring ganz am Rand des Bandes
     const rings = chainEdges(rimEdges);
-    if (rings.length < 1 || rings.length > 2) return null;
-    // Jeder Ring = KOMPLETTER Loop (außen oder innen) genau einer Fläche; decks[0] = Saat
-    const decks = [];
-    for (const ring of rings) {
+    if (rings.length > 1) return null;
+    let deck = null;
+    if (rings.length === 1) {
+      const dr = rings[0];
       let own = null;
-      for (let i = 0; i < ring.length; i++) {
-        const o = otherOf.get(edgeKeyFn(ring[i], ring[(i + 1) % ring.length]));
+      for (let i = 0; i < dr.length; i++) {
+        const o = otherOf.get(edgeKeyFn(dr[i], dr[(i + 1) % dr.length]));
         if (!o || (own && (o.fi !== own.fi || o.loop !== own.loop))) return null;
         own = o;
       }
       const fd = faceDefs[own.fi];
-      if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
-      decks.push({ fi: own.fi, fd, loop: own.loop, ring });
-    }
-    if (decks[0].fi !== fi0 || decks[0].loop !== L0) decks.reverse();
-    if (decks[0].fi !== fi0 || decks[0].loop !== L0) return null;
-    const groups = [...new Set([...W].map((fi) => faceDefs[fi].group).filter(Boolean))];
-    // Kegel: Radius ρ(t) = R0 + k·t entlang zAx (t = 0 in der Saat-Ebene); Wand-Punkte und
-    // Facetten-Normalen gegen den Kegel prüfen
-    const R0 = seed.radius, c0 = cs;
-    const wallOnCone = (zAx, H, k, tol) => {
-      const cn = 1 / Math.sqrt(1 + k * k);
-      for (const fi of W) {
-        const fd = faceDefs[fi];
-        for (const L of [fd.outer, ...fd.inner]) {
-          for (const p of L) {
-            const w = _sub3(p, c0), t = _dot3(w, zAx);
-            if (t < -tol || t > H + tol) return false;
-            if (Math.abs(Math.hypot(w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t) - (R0 + k * t)) > tol) return false;
-          }
+      if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== dr.length) return null;
+      deck = { fi: own.fi, fd, loop: own.loop, ring: dr };
+    } else if (rimEdges.length) return null;
+    return { W, deck, groups: [...new Set([...W].map((fi) => faceDefs[fi].group).filter(Boolean))] };
+  };
+  // Liegt das Band auf dem Kegel ρ(t) = R0 + k·t (t entlang zAx ab c0, 0 ≤ t ≤ H)? Jeder Punkt
+  // innerhalb tol, jede Facetten-Normale nahe der Kegel-Normale (e_r − k·zAx)/√(1+k²) — radial nach
+  // außen, zur schmalen Seite gekippt — an ihrem Schwerpunkt.
+  const bandOnCone = (W, c0, R0, zAx, H, k, tol) => {
+    const cn = 1 / Math.sqrt(1 + k * k);
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (const p of L) {
+          const w = _sub3(p, c0), t = _dot3(w, zAx);
+          if (t < -tol || t > H + tol) return false;
+          if (Math.abs(Math.hypot(w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t) - (R0 + k * t)) > tol) return false;
         }
-        // Kegel-Normale am Schwerpunkt: (e_r − k·zAx)/√(1+k²) — radial nach außen, zur schmalen Seite gekippt
-        const w = _sub3(faceCentroid(fd), c0), t = _dot3(w, zAx);
-        const er = _norm3([w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t]);
-        const nc = [(er[0] - k * zAx[0]) * cn, (er[1] - k * zAx[1]) * cn, (er[2] - k * zAx[2]) * cn];
-        if (!(_dot3(_norm3(fd.normal), nc) >= CONE_NORMAL_COS)) return false;
       }
-      return true;
-    };
-    if (decks.length === 2) {
+      const w = _sub3(faceCentroid(fd), c0), t = _dot3(w, zAx);
+      const er = _norm3([w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t]);
+      const nc = [(er[0] - k * zAx[0]) * cn, (er[1] - k * zAx[1]) * cn, (er[2] - k * zAx[2]) * cn];
+      if (!(_dot3(_norm3(fd.normal), nc) >= CONE_NORMAL_COS)) return false;
+    }
+    return true;
+  };
+  // Plan für EINEN Saat-Loop → { plan, wall:Set<fi>, decks:[Loop…], rims:[Kreis…] } | null
+  const sharpConePlan = (seed, owners, taken) => {
+    const fi0 = seed.fi, L0 = seed.loop;
+    const n0 = _norm3(faceDefs[fi0].normal);
+    const R0 = seed.radius, c0 = seed.center;
+    const band = coneBand(L0, new Set([fi0]), n0, c0, owners, taken);
+    if (!band) return null;
+    const { W, deck: d1, groups } = band;
+    // Kegel: Radius ρ(t) = R0 + k·t entlang zAx (t = 0 in der Saat-Ebene)
+    if (d1) {
       // ── Kegelstumpf zwischen zwei parallelen Deckflächen
-      const d1 = decks[1];
       if (d1.fi === fi0 || Math.abs(_dot3(n0, _norm3(d1.fd.normal))) < 0.9999) return null;
       const f1 = ringAsCircle(d1.ring, n0);
       if (!f1) return null;
@@ -2698,8 +2798,8 @@ export function buildVolumeStepBrepV2(analysis) {
       if (!(H > tol) || !(Math.abs(R1 - R0) > tol)) return null;          // flach bzw. Zylinder
       const c1 = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
       if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return null; // koaxial
-      if (!wallOnCone(zAx, H, (R1 - R0) / H, tol)) return null;
-      if (!circleOnDeck(c0, R0, zAx, decks[0].fd) || !circleOnDeck(c1, R1, zAx, d1.fd)) return null;
+      if (!bandOnCone(W, c0, R0, zAx, H, (R1 - R0) / H, tol)) return null;
+      if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0]) || !circleOnDeck(c1, R1, zAx, d1.fd)) return null;
       const rim0 = mkCircleDesc(c0, R0, zAx), rim1 = mkCircleDesc(c1, R1, zAx);
       if (rim0.rimKey === rim1.rimKey) return null;
       const grow = R1 > R0;                                   // wächst der Radius entlang zAx?
@@ -2710,7 +2810,7 @@ export function buildVolumeStepBrepV2(analysis) {
           semiAngle: Math.atan2(Math.abs(R1 - R0), H), groups,
           zone: { c0, zAx, H, R0, k: (R1 - R0) / H },
         },
-        wall: W, decks: [decks[0].loop, d1.loop], rims: [rim0, rim1],
+        wall: W, decks: [L0, d1.loop], rims: [rim0, rim1],
       };
     }
     // ── Kegel mit Spitze: die Wand liegt auf EINER Seite der Saat-Ebene, ihr Punkt mit dem größten
@@ -2725,15 +2825,15 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!top || !(H > tol)) return null;
     const apex = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
     if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
-    if (!wallOnCone(zAx, H, -R0 / H, tol)) return null;
-    if (!circleOnDeck(c0, R0, zAx, decks[0].fd)) return null;
+    if (!bandOnCone(W, c0, R0, zAx, H, -R0 / H, tol)) return null;
+    if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0])) return null;
     const rim0 = mkCircleDesc(c0, R0, zAx);
     return {
       plan: {
         large: rim0, small: null, apex, coneAxis: [-zAx[0], -zAx[1], -zAx[2]],
         semiAngle: Math.atan2(R0, H), groups, zone: { c0, zAx, H, R0, k: -R0 / H },
       },
-      wall: W, decks: [decks[0].loop], rims: [rim0],
+      wall: W, decks: [L0], rims: [rim0],
     };
   };
   // Alle passenden konvexen Kegel umwandeln: Wandflächen entfallen, die Deck-Loops werden zur
@@ -3246,7 +3346,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const ssBore = testFlip('bore');   // korrekt .F.: Wand-Normale zeigt zur Achse (ins Loch)
     const ssCone = testFlip('cone');   // korrekt .F.: dito für die Fase
     const ssMantle = !testFlip('mantle'); // korrekt .T.: konvexer Mantel, Normale zeigt aus dem Material
-    const ssMantleCone = !testFlip('mantlecone'); // korrekt .T.: konvexer Kegel, dito
+    const ssMantleCone = !testFlip('mantlecone'); // korrekt .T.: konvexer Kegel / Mantel-Fase, dito
 
     // Kreis-Orientierung (ISO 10303-42, von strikten Importern wie CST/ACIS wörtlich genommen —
     // occt/Fusion reparieren still): Ein Loch-Rand läuft IM Uhrzeigersinn um die Flächennormale,
@@ -3399,7 +3499,9 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
 
-    // Konvexe Kegel-Mäntel (Kegelstumpf, Kegel mit Spitze; convertMantleCones): CONICAL_SURFACE mit
+    // Konvexe Kegel-Mäntel (Kegelstumpf, Kegel mit Spitze; convertMantleCones) und Fasen an Zylinder-
+    // Mänteln (sharpMantlePlan, chamfer: der große bzw. kleine Rand ist der Mantel-Rand, den der
+    // Zylinder gegenläufig nutzt): CONICAL_SURFACE mit
     // Lage im Mittelpunkt des GROSSEN Randkreises, Achse coneAxis zur Seite wachsenden Radius (STEP:
     // Radius R + v·tan α wächst entlang der Achse — zwischen den Rändern ist v ≤ 0), Halbwinkel α.
     // Die natürliche Kegelnormale (radial nach außen, zur schmalen Seite gekippt) zeigt beim
@@ -3537,7 +3639,8 @@ export function buildVolumeStepBrepV2(analysis) {
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
         mantlesConverted: mantlesArg.length,
-        mantleConesConverted: mantleConesArg.length,
+        mantleConesConverted: mantleConesArg.filter((c) => !c.chamfer).length,   // Kegel-Mäntel
+        mantleChamfersConverted: mantleConesArg.filter((c) => c.chamfer).length,  // Fasen/Kegelspitzen an Zylinder-Mänteln
         tubesConverted: tubesArg.length,
         tubePieces: tubesArg.reduce((n, tp) => n + tp.spec.pieces.length, 0),
         // Orientierungs-Wächter: analytische Flächen, deren Orientierung den Original-Dreiecken
@@ -3909,7 +4012,8 @@ export function buildVolumeStepBrepV2(analysis) {
   // kostete am gelochten eBike 39–57 % der Exportzeit. Ergebnis: Stufe 1, wenn sie gelingt, sonst
   // die Basislinie (deren Entitäten dafür gesichert und zurückgeschrieben werden).
   const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.mantleConesConverted > 0 ||
-    asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0;
+    asm.report.mantleChamfersConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 ||
+    cornersDefeatured > 0;
   let stage1Tried = false;
   if (converted && failed(asm)) {
     const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0 || mantleConePlans.length > 0);
