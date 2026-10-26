@@ -155,7 +155,26 @@ Kreis-Kanten teilen.
   - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
   - eBike rechts: Modell-Restfehler im Bogen bis 0.037 mm (Profil-Neigung dort ~1° anders) — prüfen.
   - Restlaufzeit detectTubes auf großen Freiform-Kanälen ~2–3 s (score/marchNormal, linear).
-- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten.
+- [ ] **Review 2026-10-27 — drei bestätigte Funde (in Arbeit, Branch `wt/schalen-freigang`)**:
+  - HOCH, Regression aus 1c9905c: jede Zusammenhangskomponente wird ein eigener Volumenkörper — auch Hohlräume
+    (Würfel mit innerem Hohlraum: occt 9000 statt 7000 mm³), innen-außen vertauschte Netze und Null-Volumen-Finnen.
+    dino: die 5 Zusatz-Schalen sind 4 winzige Hohlräume im Hauptkörper + 1 flache Finne. Abhilfe: Volumen je Schale,
+    Hohlräume als BREP_WITH_VOIDS, invertierte Eingabe umdrehen, Finnen nicht als Körper.
+  - HOCH: Kreis-Umwandlung ohne Freigangsprüfung — der Kreis durch die Polygon-Ecken ragt um die Pfeilhöhe über das
+    Netz; bei dünnem Steg schneiden sich Bohrungen/Mantel → selbstdurchdringender Körper (occt −33 %), step-strict ok.
+  - MITTEL: Wasserdicht-Urteil global statt je Schale — ein loses Dreieck macht alle Körper zu offenen Hüllen und
+    wirft ihre Bohrungen/Mäntel weg; an einer Kante/Ecke berührende Körper teilen Topologie.
+  - Dazu: OpenCascade (OCP, in `~/Library/Python/3.9`) als zweiter, unabhängiger Prüfer (BRepCheck +
+    Selbstdurchdringung) — findet, was `step-strict` nicht sieht.
+- [ ] **Kanal-Übergangskreise: Startpunkt knapp neben der Naht** (OCP-Befund 2026-10-27) — eBike (beide Varianten):
+  BRepCheck gültig, aber BRepAlgoAPI_Check 34× TooSmallEdge + 17× Vertex/Vertex. Die VERTEX der Übergangskreise auf
+  den SURFACE_OF_REVOLUTION liegen 2e-8…4e-7 mm neben der Flächennaht; OCCT fügt beim Lesen die Naht ein und teilt
+  die Kreise → 18 Mikro-Bögen (81 → 129 Kanten). Abhilfe nach dem Merge von T: Kreis-Startpunkt entweder EXAKT auf
+  die Naht (gleicher Richtungsvektor wie die Fläche, so ist es bei Zylindern — dort sauber) oder deutlich daneben
+  (z.B. 90° versetzt), auch für Tori; OCP-Check als Abnahme.
+- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten. Bekannt (OCP):
+  `dino-freiform-facettiert.step` — 5 Zusatz-Schalen fehlerhaft (Review-Fund oben); beide eBike-Dateien — Mikro-
+  Bögen an den Kanal-Übergängen (s. oben). Würfel, Bohrung, Zylinder, Scheibe, Platte, Kugel: OCP-sauber.
 - [ ] **Add-on signieren (AMO, unlisted)** — wartet auf Bestätigung der Add-on-ID (Vorschlag
   `stl-reverse@ava-innovation.com`, heute Platzhalter `stlreverse@example.com`) und JWT-Schlüssel in
   `~/.config/amo.env`. Release v0.2.0 enthält noch den alten STEP-Kantenfehler → v0.2.1 (nur mit Zustimmung).
