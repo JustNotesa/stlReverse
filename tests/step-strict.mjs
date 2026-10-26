@@ -16,6 +16,8 @@
 //                    (Normale × same_sense), Löcher im Uhrzeigersinn; FACE_OUTER_BOUND = Außenrand
 //   orient-curved    gekrümmte Fläche mit ≥ 2 Rändern: die Fläche liegt LINKS vom Rand
 //                    (effektive Normale × Laufrichtung zeigt zu den anderen Rändern)
+//   shell-connected  jede CLOSED_SHELL/OPEN_SHELL hängt über gemeinsame Kanten zusammen
+//                    (mehrere Körper im Netz → mehrere Schalen)
 //
 // Nutzung als Modul:  checkStepStrict(stepText) → { violations: [...], stats }
 // CLI:                node tests/step-strict.mjs [datei.step …]    (ohne Argument: alle Samples
@@ -287,6 +289,21 @@ export function checkStepStrict(text, opts = {}) {
     if (uses.length === 1 && stats.openShell) { stats.openEdges++; continue; }
     if (uses.length !== 2) flag('edge-use', `Kante #${id}: ${uses.length}× genutzt statt 2×`);
     else if (uses[0].fwd === uses[1].fwd) flag('edge-use', `Kante #${id}: beide Nutzungen gleichsinnig (Flächen #${uses[0].face}, #${uses[1].face})`);
+  }
+  // shell-connected: jede Schale hängt über gemeinsame Kanten zusammen (ISO 10303-42: connected
+  // face set) — ein Netz aus mehreren Körpern gehört in mehrere Schalen/Körper.
+  {
+    const par = new Map();
+    const find = (x) => { while (par.get(x) !== x) { const g = par.get(par.get(x)); par.set(x, g); x = g; } return x; };
+    for (const [fid, fe] of ents) if (fe.type === 'ADVANCED_FACE') par.set(fid, fid);
+    for (const uses of edgeUse.values()) for (let i = 1; i < uses.length; i++) { const a = find(uses[0].face), b = find(uses[i].face); if (a !== b) par.set(a, b); }
+    stats.shells = 0;
+    for (const [sid, se] of ents) {
+      if (se.type !== 'CLOSED_SHELL' && se.type !== 'OPEN_SHELL') continue;
+      stats.shells++;
+      const roots = new Set(se.args[1].map((r) => (par.has(r.ref) ? find(r.ref) : r.ref)));
+      if (roots.size > 1) flag('shell-connected', `#${sid} (${se.type}): Schale zerfällt in ${roots.size} unverbundene Teile`);
+    }
   }
   return { violations, stats };
 }

@@ -2049,10 +2049,13 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     return circleRegistry.get(rimKey);
   };
+  // Kanten-Schlüssel der gerade entstehenden Fläche (assemble: Zusammenhangskomponenten der Schale)
+  let faceKeySink = [];
   const useCircle = (rimKey, forward) => {
     const u = circleUse.get(rimKey) || { fwd: 0, rev: 0 };
     if (forward) u.fwd++; else u.rev++;
     circleUse.set(rimKey, u);
+    faceKeySink.push(`c:${rimKey}`);
   };
 
   // ---- Step 3: Build ADVANCED_FACEs ----
@@ -2071,6 +2074,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const u = edgeUse.get(ck) || { fwd: 0, rev: 0 };
       if (forward) u.fwd++; else u.rev++;
       edgeUse.set(ck, u);
+      faceKeySink.push(ck);
       oeIds.push(addOrientedEdge(edge.ecId, forward));
     }
     return oeIds;
@@ -2322,7 +2326,10 @@ export function buildVolumeStepBrepV2(analysis) {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
-    const faceIds = [];
+    const faceIds = [], faceKeys = [];
+    // Fläche aufnehmen + ihre Kanten-Schlüssel (buildLoopEdges/useCircle sammeln in faceKeySink)
+    const emitFace = (fid) => { faceIds.push(fid); faceKeys.push(faceKeySink); faceKeySink = []; };
+    faceKeySink = [];
     let guardFailures = 0, guardMs = 0;
     // Emittierte same_sense-Werte (korrekt bzw. vom Test-Hook gedreht) — der Wächter prüft
     // IMMER den tatsächlich emittierten Wert.
@@ -2341,7 +2348,7 @@ export function buildVolumeStepBrepV2(analysis) {
     // Flachflächen (Innen-Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert).
     for (const { outer, inner, normal, centroid, fold } of faceDefsArg) {
       const outerOe = buildLoopEdges(outer, fold);
-      if (outerOe.length < 3) continue;
+      if (outerOe.length < 3) { faceKeySink = []; continue; }
       const bounds = [addFaceOuterBound(addEdgeLoop(outerOe))];
       for (const innerLoop of inner) {
         if (innerLoop.circleRim) {
@@ -2357,7 +2364,7 @@ export function buildVolumeStepBrepV2(analysis) {
         bounds.push(addFaceBound(addEdgeLoop(innerOe)));
       }
       const placId = addAxis2Placement3D(centroid, normal, computeRefDir(normal));
-      faceIds.push(addAdvancedFace(bounds, addPlane(placId), true));
+      emitFace(addAdvancedFace(bounds, addPlane(placId), true));
     }
 
     // Zylinder-Mantelflächen (nahtlos: 1 CYLINDRICAL_SURFACE, 2 volle Kreis-Bounds). Die STEP-
@@ -2382,7 +2389,7 @@ export function buildVolumeStepBrepV2(analysis) {
         bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
         rimLoops.push({ geom: rim, fwd });
       }
-      faceIds.push(addAdvancedFace(bounds, cylSurf, ssBore));
+      emitFace(addAdvancedFace(bounds, cylSurf, ssBore));
       { // Wächter: (a) Wand-Facetten der Bohrung gegen die emittierte Mantel-Orientierung,
         // (b) Umlaufsinn beider Ränder (Fläche zwischen den Rändern = Richtung zum anderen Rand)
         const tg = nowMs();
@@ -2412,7 +2419,7 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(cr.flatDesc.rimKey, fFlat);
         const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceRim.ecId, fRim)]));
         const ib = addFaceBound(addEdgeLoop([addOrientedEdge(ceFlat.ecId, fFlat)]));
-        faceIds.push(addAdvancedFace([ob, ib], coneSurf, ssCone));
+        emitFace(addAdvancedFace([ob, ib], coneSurf, ssCone));
         { // Wächter: (a) die von der Chamfer-Zone verdrängten Original-Facetten gegen den Kegel,
           // (b) Umlaufsinn von Rand- und Flach-Kreis
           const tg = nowMs();
@@ -2471,7 +2478,7 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(keyOf(k), f0); useCircle(keyOf(k + 1), f1);
         const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(e0.ecId, f0)]));
         const ib = addFaceBound(addEdgeLoop([addOrientedEdge(e1.ecId, f1)]));
-        faceIds.push(addAdvancedFace([ob, ib], surf, sameSense));
+        emitFace(addAdvancedFace([ob, ib], surf, sameSense));
       });
       { // Wächter je Stück: (a) Kanal-Facetten gegen die emittierte Flächen-Orientierung,
         // (b) Umlaufsinn beider Ränder (Fläche liegt vom Anfangsrand aus in Bahnrichtung, vom
@@ -2501,10 +2508,23 @@ export function buildVolumeStepBrepV2(analysis) {
     };
     for (const u of edgeUse.values()) tally(u.fwd, u.rev);
     for (const u of circleUse.values()) tally(u.fwd, u.rev);
+    // Zusammenhangskomponenten über gemeinsame Kanten: ein Netz aus mehreren Körpern (dino: 4)
+    // wird zu mehreren Schalen — ein CLOSED_SHELL muss zusammenhängend sein (ISO 10303-42), eine
+    // zerfallene Schale lehnen strikte Importer ab bzw. zerlegen sie still.
+    const comp = faceIds.map((_, i) => i);
+    const find = (i) => { while (comp[i] !== i) { comp[i] = comp[comp[i]]; i = comp[i]; } return i; };
+    const owner = new Map();
+    faceKeys.forEach((ks, i) => {
+      for (const k of ks) { const o = owner.get(k); if (o === undefined) owner.set(k, i); else { const a = find(i), b = find(o); if (a !== b) comp[a] = b; } }
+    });
+    const shellMap = new Map();
+    faceIds.forEach((f, i) => { const r = find(i), s = shellMap.get(r); if (s) s.push(f); else shellMap.set(r, [f]); });
     return {
       faceIds,
+      shells: [...shellMap.values()],
       report: {
         faceCount: faceIds.length,
+        shells: shellMap.size,
         edgeCount: edgeUse.size + circleUse.size,
         boundaryEdges: bE, nonManifoldEdges: nmE, orientationDefects: oD,
         watertight: bE === 0 && nmE === 0 && oD === 0,
@@ -2913,20 +2933,28 @@ export function buildVolumeStepBrepV2(analysis) {
 
   // ---- Step 5: Wasserdicht → echter Volumenkörper (CLOSED_SHELL + MANIFOLD_SOLID_BREP),
   // sonst offenes Flächenmodell (OPEN_SHELL) als Fallback, das das CAD selbst zu nähen versuchen kann.
-  const faceRefs = allFaceIds.map(f => `#${f}`).join(',');
+  // Je zusammenhängender Schale ein Körper (bzw. eine offene Schale); ein Körper = Ausgabe wie bisher.
+  const shells = asm.shells && asm.shells.length ? asm.shells : [allFaceIds];
+  const refs = (ids) => ids.map((x) => `#${x}`).join(',');
   let shapeRepId;
   if (report.watertight) {
-    const shellId = id++;
-    entities.push(`#${shellId}=CLOSED_SHELL('',(${faceRefs}));`);
-    const solidId = id++;
-    entities.push(`#${solidId}=MANIFOLD_SOLID_BREP('V2 Solid',#${shellId});`);
+    const solidIds = shells.map((fs) => {
+      const shellId = id++;
+      entities.push(`#${shellId}=CLOSED_SHELL('',(${refs(fs)}));`);
+      const solidId = id++;
+      entities.push(`#${solidId}=MANIFOLD_SOLID_BREP('V2 Solid',#${shellId});`);
+      return solidId;
+    });
     shapeRepId = id++;
-    entities.push(`#${shapeRepId}=ADVANCED_BREP_SHAPE_REPRESENTATION('V2 Volume',(#${solidId}),#${ctxId});`);
+    entities.push(`#${shapeRepId}=ADVANCED_BREP_SHAPE_REPRESENTATION('V2 Volume',(${refs(solidIds)}),#${ctxId});`);
   } else {
-    const shellId = id++;
-    entities.push(`#${shellId}=OPEN_SHELL('',(${faceRefs}));`);
+    const shellIds = shells.map((fs) => {
+      const shellId = id++;
+      entities.push(`#${shellId}=OPEN_SHELL('',(${refs(fs)}));`);
+      return shellId;
+    });
     const surfaceModelId = id++;
-    entities.push(`#${surfaceModelId}=SHELL_BASED_SURFACE_MODEL('V2 Reconstruction',(#${shellId}));`);
+    entities.push(`#${surfaceModelId}=SHELL_BASED_SURFACE_MODEL('V2 Reconstruction',(${refs(shellIds)}));`);
     shapeRepId = id++;
     entities.push(`#${shapeRepId}=MANIFOLD_SURFACE_SHAPE_REPRESENTATION('V2 Volume',(#${surfaceModelId}),#${ctxId});`);
   }
