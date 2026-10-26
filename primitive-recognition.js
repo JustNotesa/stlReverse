@@ -183,19 +183,38 @@ function fitCircleFlat(P, n, axis, pdOut, alOut) {
 // nicht vor) und Big-Endian-Plattformen nehmen sicherheitshalber den Comparator-Weg.
 const LITTLE_ENDIAN = new Uint8Array(new Float64Array([1]).buffer)[7] === 0x3f;
 function sortIdxStable(keys, n) {
-  let radixOk = LITTLE_ENDIAN && n >= 48;
+  let ok = true;
   for (let i = 0; i < n; i++) {
     const k = keys[i];
-    if (!(k >= 0) || k === Infinity) { radixOk = false; break; }
+    if (!(k >= 0) || k === Infinity) { ok = false; break; }
     if (k === 0) keys[i] = 0; // −0 → +0
   }
-  if (!radixOk) {
-    const idx = new Array(n);
-    for (let i = 0; i < n; i++) idx[i] = i;
-    idx.sort((a, b) => keys[a] - keys[b]);
-    return idx;
+  // Kleine oder schon fast sortierte Eingaben (Trimm-Iterationen ≥ 2: Reihenfolge der Vor-
+  // Iteration) per Einfüge-Sortierung — mit Verschiebe-Deckel, sonst Radix.
+  if (ok) {
+    const ins = insertionIdx(keys, n, n <= 64 ? Infinity : 4 * n);
+    if (ins) return ins;
+    if (LITTLE_ENDIAN) return n >= 2000 ? radixIdx11(keys, n) : radixIdx8(keys, n);
   }
-  return n >= 2000 ? radixIdx11(keys, n) : radixIdx8(keys, n);
+  const idx = new Array(n);
+  for (let i = 0; i < n; i++) idx[i] = i;
+  idx.sort((a, b) => keys[a] - keys[b]);
+  return idx;
+}
+// Stabile Einfüge-Sortierung der Indizes (Gleichstand: Eingabe-Reihenfolge); null, sobald mehr als
+// maxMoves Verschiebungen nötig wären (ungeordnete Eingabe → Radix ist dann billiger).
+function insertionIdx(keys, n, maxMoves) {
+  const a = new Uint32Array(n);
+  let moves = 0;
+  for (let i = 0; i < n; i++) {
+    const k = keys[i];
+    let j = i - 1;
+    while (j >= 0 && keys[a[j]] > k) { a[j + 1] = a[j]; j--; }
+    moves += i - 1 - j;
+    if (moves > maxMoves) return null;
+    a[j + 1] = i;
+  }
+  return a;
 }
 // 8 Byte-Stellen, alle Histogramme in EINEM Durchlauf; Stellen, in denen alle Schlüssel
 // übereinstimmen, werden übersprungen (No-op-Pass). Stabil (Scatter in Eingabe-Reihenfolge).
