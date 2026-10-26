@@ -76,7 +76,8 @@ export function offsetRing(pts, off) {
 
 // ── Deck-Übergänge als Schichtfolgen [{z, s}] (z aufsteigend) ───────────────
 // kind: 'sharp' | 'round' (konvex) | 'concave' (Hohlkehle) | 'chamfer' (45°-Fase, Breite r) |
-//       'countersink' (Senkung: Kegel mit Tiefe depth, Spitzenwinkel angleDeg; Kanten-Rundungen r/rw)
+//       'countersink' (Senkung: Kegel mit Tiefe depth, Spitzenwinkel angleDeg; Kanten-Rundungen r/rw) |
+//       'ellipse' (konvexe Ellipsen-Rundung, Halbachsen a entlang der Deckfläche, b entlang der Wand)
 // draftDeg: Wand-Neigung (Formschräge; Wand bei Höhe z um z·tan α ins Material versetzt) —
 // die Rundung bleibt dann tangential an Wand UND Deckfläche (Mittelpunkt im Abstand r zu beiden).
 function capSeq(spec, end, z0, z1, draftDeg = 0) {
@@ -108,6 +109,21 @@ function capSeq(spec, end, z0, z1, draftDeg = 0) {
       }
       us[us.length - 1].u = 0;                            // exakt in der Deckebene
     } else us.push({ u: 0, s: sEdge });
+    const seq = us.map(({ u, s }) => ({ z: end === 'bottom' ? z0 + u : z1 - u, s }));
+    return end === 'bottom' ? seq.reverse() : seq;
+  }
+  if (kind === 'ellipse') {
+    // Nicht kreisförmige Kanten-Rundung (Viertel-Ellipse, tangential an Wand UND Deckfläche) mit
+    // gleichmäßigen Normalenwinkel-Schritten — v2 kennt nur Kreisbogen-Rundungen (Rundungsprofil) und
+    // darf hier NIE eine Schicht als „Fase zwischen zwei Rundungen“ deuten. Normalenwinkel α (0 = Wand,
+    // 90° = Deckfläche) ↔ Ellipsen-Parameter θ mit tan θ = (b/a)·tan α; u = Abstand zur Deckfläche.
+    if (draftDeg) throw new Error('Ellipsen-Rundung + Formschräge nicht vorgesehen');
+    const a = spec.a, b = spec.b, us = [];
+    for (let k = 0; k <= N; k++) {
+      const alpha = (PI / 2) * k / N, th = Math.atan2(b * Math.sin(alpha), a * Math.cos(alpha));
+      us.push({ u: b - b * Math.sin(th), s: a - a * Math.cos(th) });
+    }
+    us[0].s = 0; us[N].u = 0;                             // exakt auf der Wand / in der Deckebene
     const seq = us.map(({ u, s }) => ({ z: end === 'bottom' ? z0 + u : z1 - u, s }));
     return end === 'bottom' ? seq.reverse() : seq;
   }
@@ -684,6 +700,53 @@ export const BODIES = [
     desc: 'Rechteck 40×30×10, oben 45°-Fase (Tiefe 1.5), nur die Kante Fase → Deckfläche r=0.5 verrundet (Ziel: scharfe Fase)',
     columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, N: 8 } })],
     expect: { mode: 'sharp', bands: 1 },
+  },
+  // ── Kegel/Fase ZWISCHEN zwei Rundungen bzw. Rundung nur zur Wand (exporters.js splitMiddleLayer): die
+  // Rundungen werden scharf, Kegel/Fase bleibt exakt (bis Deckfläche und Wand verlängert) ──
+  {
+    id: 'x8', extra: true, file: 'v2_x_senkung60_beidseitig',
+    desc: 'wie (x5), 60°-Senkung (Kegel 60° gegen die Deckfläche): Rundung zur Bohrung nur 30° — ihre tangentialen Schichten liegen < 2° neben Kegel und Wand (Region-Growing schlägt sie diesen zu)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, rw: 0.5, N: 8, angleDeg: 60 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 60, r: 0.5, rw: 0.5 }],
+  },
+  {
+    id: 'x9', extra: true, file: 'v2_x_senkung_beidseitig_N16',
+    desc: 'wie (x5), feine Rundungen N=16 (2.8°-Schichten: die tangentialen Streifen liegen in Deckfläche, Kegel-Facetten und Bohrungswand)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, rw: 0.5, N: 16 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 90, r: 0.5, rw: 0.5 }],
+  },
+  {
+    id: 'x10', extra: true, file: 'v2_x_fase_verrundet_rundrechteck',
+    desc: 'wie (x6) am Rundrechteck 40×30 (senkrechte Eckradien R5, 8 Seg.): Fase und beide Rundungen laufen um die Eckbögen',
+    columns: [plate(roundedRectProfile(40, 30, 5, 8), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, rw: 0.5, N: 8 } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'x11', extra: true, file: 'v2_x_fase_wandrundung',
+    desc: 'Rechteck 40×30×10, oben 45°-Fase (Tiefe 1.5), nur die Kante Wand → Fase verrundet (rw=0.5), Fasenkante zur Deckfläche scharf',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0, rw: 0.5, N: 8 } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'x12', extra: true, file: 'v2_x_fase_verrundet_gedreht',
+    desc: 'wie (x6), gedreht (17°/31°/47°) und weit vom Ursprung (x=1000, y=2000, z=500)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, rw: 0.5, N: 8 } })],
+    transform: { rot: [17, 31, 47], t: [1000, 2000, 500] },
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'x13', extra: true, file: 'v2_x_ellipsen_rundung',
+    desc: 'Rechteck 40×30×10, oben Ellipsen-Rundung (Halbachsen 2 entlang der Deckfläche, 1 entlang der Wand, N=8) — kein Kreisbogen, keine Fase: bleibt; v2 darf NIE eine ihrer Schichten als Fase zwischen zwei Rundungen deuten (r = b nur für die Schnitthöhen in check.mjs)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'ellipse', a: 2, b: 1, r: 1, N: 8 } })],
+    expect: { mode: 'skip' },
   },
   // ── Offene Bänder: nur ein zusammenhängender Teil der Deck-Kontur verrundet (wie d) ──
   {
