@@ -2470,24 +2470,38 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   runPipeline(true);
   let asm = assembleCurrent();
-  // Fallback-Stufe 1 (nur mit Toggle): öffnet eine Bohrungs-, Mantel- oder Kanal-Umwandlung die
-  // Hülle, ohne sie neu bauen (Defeaturing bleibt) — sonst verwarf der globale Fallback auch korrekte
-  // Bänder/Ecken.
-  if (DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0) && !asm.report.watertight) {
-    runPipeline(false);
-    asm = assembleCurrent();
-  }
-  // Fallback-Stufe 2 (global): öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
-  // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
-  // die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung läuft auch
-  // hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
-  if ((asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
+  // Fallbacks, wenn die Umwandlung (analytische Flächen ODER Defeaturing) die Hülle öffnet:
+  //   Stufe 2 (global): ALLES facettiert neu bauen (buildFaceDefs(null) erzeugt FRISCHE, unmutierte
+  //     Loops) — die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung
+  //     läuft auch hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
+  //   Stufe 1 (nur mit Toggle, nur bei Bohrungen/Mänteln/Kanälen): ohne diese neu bauen, Defeaturing
+  //     bleibt — sonst verwarf der globale Fallback auch korrekte Bänder/Ecken.
+  // Die Basislinie wird ZUERST gebaut: ist schon sie nicht wasserdicht (Netz von Haus aus offen, z.B.
+  // gelochtes Netz), kann Stufe 1 die Hülle praktisch nie schließen — sie lief früher trotzdem und
+  // kostete am gelochten eBike 39–57 % der Exportzeit. Ergebnis wie bisher: Stufe 1, wenn sie
+  // wasserdicht ist, sonst die Basislinie (deren Entitäten dafür gesichert und zurückgeschrieben werden).
+  const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.tubesConverted > 0 ||
+    filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0;
+  if (converted && !asm.report.watertight) {
+    const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0);
     const fallbackDefs = buildFaceDefs(null);
     removeCollinearPoints(fallbackDefs);
-    asm = assemble(fallbackDefs, []);
-    asm.report.filletsDefeatured = 0;
-    asm.report.bandsDefeatured = 0;
-    asm.report.cornersDefeatured = 0;
+    const base = assemble(fallbackDefs, []);
+    base.report.filletsDefeatured = 0;
+    base.report.bandsDefeatured = 0;
+    base.report.cornersDefeatured = 0;
+    asm = base;
+    if (stage1 && base.report.watertight) {
+      const baseEntities = entities.slice(entMark), baseId = id;
+      runPipeline(false);
+      const s1 = assembleCurrent();
+      if (s1.report.watertight) asm = s1;
+      else {
+        entities.length = entMark;
+        for (const e of baseEntities) entities.push(e);
+        id = baseId;
+      }
+    }
   }
   const allFaceIds = asm.faceIds;
   const report = asm.report;
