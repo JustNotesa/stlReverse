@@ -18,7 +18,9 @@
 // bandsDefeatured, v1 in filletsDefeatured) — exakt nachgerechnet; dazu bei Bohrungen die scharfe
 // Bohrung (Ziel: v2 schärft die Mündung, Lochwand → Zylinder zwischen den Deckflächen) und der
 // Chamfer-Pfad (Mündung → Kegel, zulässig) — Volumen aus den emittierten Zylinder-/Kegel-Parametern.
-// Fasen dürfen nie verschwinden, bei Soll „skip“ muss bandsDefeatured = 0 sein.
+// Fasen dürfen nie verschwinden, bei Soll „skip“ muss bandsDefeatured = 0 sein. Senkungen (x1–x4)
+// dürfen nie verschwinden: zulässig ist nur Senkung mit Rundung (Netz), Senkung scharf (Ziel: nur die
+// Kanten-Rundung weg, Kegel bleibt) oder ein Kegel durch die Rundung (Chamfer-Pfad), s. cskVariant.
 //   exakt     → OK
 //   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der STEP-Unsicherheit 0.01 mm)
 //   sonst     → Soll-Verletzung (Exit 1); ebenso: offen, occt-Fehler, Fallback verwirft v2, zu langsam
@@ -158,10 +160,20 @@ const fmtPt = (p) => p.map((x) => x.toFixed(3)).join(',');
 // Punkte auf float32 runden (so wie die binäre STL sie speichert) — geteilte Punkte bleiben geteilt
 const f32 = (tris) => { const m = new Map(); return tris.map((t) => t.map((p) => { let q = m.get(p); if (!q) { q = p.map(Math.fround); m.set(p, q); } return q; })); };
 
-// Rundungen eines Körpers: je Säule und Ende mit konvexer/konkaver Rundung ein Eintrag
+// Rundungen eines Körpers: je Säule und Ende mit konvexer/konkaver Rundung ein Eintrag (Senkung mit
+// verrundeten Kanten: EIN Eintrag — scharf heißt dort: Kegel bleibt, nur die Rundungen fallen weg)
+const isRounded = (spec) => ['round', 'concave'].includes(spec?.kind) || (spec?.kind === 'countersink' && (spec.r > 0 || spec.rw > 0));
+// runs: zusammenhängende verrundete Kanten-Abschnitte (spec.edges, zyklisch) — v2 entfernt je Abschnitt
+// höchstens ein (offenes) Band, d.h. eine Rundung kann bis zu `runs` Bänder zählen
+const edgeRuns = (spec, n) => {
+  if (!spec?.edges) return 1;
+  const set = new Set(spec.edges);
+  let runs = 0; for (let e = 0; e < n; e++) if (set.has(e) && !set.has((e - 1 + n) % n)) runs++;
+  return Math.max(1, runs);
+};
 const roundedPairs = (body) => {
   const out = [];
-  body.columns.forEach((col, c) => { for (const end of ['bottom', 'top']) if (['round', 'concave'].includes(col[end]?.kind)) out.push({ c, end, key: `${col.name || 'S' + c}.${end === 'top' ? 'oben' : 'unten'}` }); });
+  body.columns.forEach((col, c) => { for (const end of ['bottom', 'top']) if (isRounded(col[end])) out.push({ c, end, runs: edgeRuns(col[end], col.profile.length), key: `${col.name || 'S' + c}.${end === 'top' ? 'oben' : 'unten'}` }); });
   return out;
 };
 
@@ -216,7 +228,7 @@ function variantsFor(body, vMeshParsed, heavy) {
     const tris = f32(buildMesh(sharpen(body, (c, end) => S.some((p) => p.c === c && p.end === end))));
     vs.push({
       label: m === 0 ? 'Rundung bleibt (übersprungen)' : m === all ? 'alle Rundungen scharf' : `scharf: ${S.map((p) => p.key).join('+')}`,
-      sharpCount: S.length, planar: true, tris,
+      sharpCount: S.length, sharpMax: S.reduce((s, p) => s + p.runs, 0), planar: true, tris,
       volume: m === 0 ? vMeshParsed : meshVolume(tris), tol: tolPlanar,
       target: body.expect.mode === 'sharp' ? m === all : m === 0,
     });
@@ -227,7 +239,7 @@ function variantsFor(body, vMeshParsed, heavy) {
     const bodyP = { ...body, columns: body.columns.map((col) => ({ ...col, profile: sharpenProfile2D(col.profile) })) };
     if (bodyP.columns.some((col, i) => col.profile.length !== body.columns[i].profile.length)) {
       const tris = f32(buildMesh(sharpen(bodyP)));
-      vs.push({ label: 'alle Rundungen + Profilecken scharf (v2b)', sharpCount: pairs.length, planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: body.expect.mode === 'sharp' });
+      vs.push({ label: 'alle Rundungen + Profilecken scharf (v2b)', sharpCount: pairs.length, sharpMax: pairs.reduce((s, p) => s + p.runs, 0), planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: body.expect.mode === 'sharp' });
     }
   }
   return vs;
@@ -309,6 +321,49 @@ function boreSharpVariant(body, bores, step, sharpCount) {
   };
 }
 
+// Senkung (body.countersink): die Bohrung wird Zylinder Rc (z0 … Rand) + EIN Kegel vom Rand auf den
+// Mündungskreis R2 in der Deckebene. Ziel: Senkung scharf (Rand am Kegelfuß, R2 = scharfe Senkungs-
+// kante — v2 schärft nur die Rundung, der Kegel bleibt); zulässig: Bohrungs-Chamfer-Pfad durch die
+// Rundung (R2 = äußerer Tangentenpunkt der Deck-Rundung bzw. Rand am Beginn der Wand-Rundung).
+// NICHT zulässig (keine Variante): Senkung weg (glatte Bohrung). Parameter aus der STEP, Volumen
+// exakt nachgerechnet; Platte = Körper ohne Senkungs-Säule (äußere Rundungen scharf, `others`).
+function cskVariant(body, c, step, others) {
+  const ent = new Map();
+  for (const line of step.split('\n')) { const m = line.match(/^#(\d+)=(.*);$/); if (m) ent.set(+m[1], m[2]); }
+  const pt = (i) => ent.get(i).match(/,\(([^()]*)\)\)$/)[1].split(',').map(Number);
+  const plac = (ref) => { const m = ent.get(+ref.slice(1)).match(/AXIS2_PLACEMENT_3D\('',(#\d+),(#\d+),(#\d+)\)/); return { loc: pt(+m[1].slice(1)), axis: pt(+m[2].slice(1)) }; };
+  const col = body.columns[c.col];
+  const cx = col.profile.reduce((s, p) => s + p[0], 0) / col.profile.length, cy = col.profile.reduce((s, p) => s + p[1], 0) / col.profile.length;
+  let Rc = null; const circles = [];
+  for (const e of ent.values()) {
+    let m;
+    if ((m = e.match(/^CYLINDRICAL_SURFACE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05 && Math.abs(+m[2] - c.R) < 0.05) Rc = +m[2]; }
+    if ((m = e.match(/^CIRCLE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05) circles.push({ r: +m[2], z: p.loc[2] }); }
+  }
+  if (Rc === null) return null;                                   // Bohrung nicht umgewandelt → planare Varianten
+  const fail = (why) => ({ label: `Senkung→Zylinder+Kegel: ${why}`, sharpCount: others, bores: 1, cones: 1, planar: false, volume: NaN, tol: tolAnalytic, target: false });
+  const rim = circles.filter((k) => Math.abs(k.r - Rc) < 1e-6).map((k) => k.z).sort((x, y) => x - y);
+  const mouth = circles.filter((k) => k.r > Rc + 0.02);
+  if (rim.length !== 2 || mouth.length !== 1) return fail(`Kreise ${rim.length}/${mouth.length}`);
+  const [zBot, zRim] = rim, R2 = mouth[0].r, zTop = mouth[0].z;
+  const beta = (c.ang / 2) * Math.PI / 180, cosn = Math.cos(Math.PI / c.seg);
+  const tlen = c.r * Math.tan((Math.PI / 2 - beta) / 2), tw = c.rw * Math.tan(beta / 2);
+  const R2sharp = c.R + c.depth * Math.tan(beta) / cosn, R2round = c.R + (c.depth * Math.tan(beta) + tlen) / cosn;
+  const plaus = Math.abs(Rc - c.R) < 0.02 && Math.abs(zBot - col.z0) < 1e-3 && Math.abs(zTop - col.z1) < 1e-3
+    && zRim >= col.z1 - c.depth - tw - 0.02 && zRim <= col.z1 - c.depth + 0.02 && R2 >= R2sharp - 0.02 && R2 <= R2round + 0.02;
+  const exact = Math.abs(R2 - R2sharp) < 0.01 && Math.abs(zRim - (col.z1 - c.depth)) < 0.01;
+  const frustum = (r1, r2, h) => (Math.PI * h / 3) * (r1 * r1 + r1 * r2 + r2 * r2);
+  const plateBody = { ...body, columns: body.columns.filter((_, i) => i !== c.col) };
+  const v = meshVolume(buildMesh(sharpen(plateBody))) - Math.PI * Rc * Rc * (zRim - zBot) - frustum(Rc, R2, zTop - zRim);
+  const aLat = 2 * Math.PI * Rc * (zRim - zBot) + Math.PI * (Rc + R2) * Math.hypot(R2 - Rc, zTop - zRim);
+  const semi = Math.atan2(R2 - Rc, zTop - zRim) * 180 / Math.PI;
+  return {
+    label: `${others ? 'außen scharf + ' : ''}Senkung ${exact ? 'scharf' : 'durch die Rundung (Chamfer-Pfad)'} → Zylinder R${Rc.toFixed(3)} (z ${zBot.toFixed(3)}..${zRim.toFixed(3)}) + Kegel ${semi.toFixed(2)}° auf R${R2.toFixed(3)}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    sharpCount: others + (exact ? 1 : 0), bores: 1, cones: 1, planar: false, volume: plaus ? v : NaN,
+    tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: exact && body.expect.mode === 'sharp',
+  };
+}
+
 // Ergebnis einer Variante zuordnen: exakt, sonst ≤ STEP_UNC (Toleranz-Stufe), sonst null
 function matchVariants(r, vs, ctx) {
   const { heights, inv, heavy } = ctx;
@@ -317,7 +372,7 @@ function matchVariants(r, vs, ctx) {
   const tried = [];
   const countsOk = (v) => {
     const why = [];
-    if (r.bands > v.sharpCount || (r.bands < v.sharpCount && !r.fillets && !(v.bores && r.bores))) why.push(`bands ${r.bands}≠${v.sharpCount}`);
+    if (r.bands > (v.sharpMax ?? v.sharpCount) || (r.bands < v.sharpCount && !r.fillets && !(v.bores && r.bores))) why.push(`bands ${r.bands}≠${v.sharpCount}`);
     if (v.planar && (r.cyl || r.cones)) why.push('analytische Flächen');
     if (!v.planar && (r.bores !== v.bores || r.cones !== v.cones)) why.push(`bores/cones ${r.bores}/${r.cones}`);
     return why;
@@ -428,6 +483,9 @@ async function checkBody(body, occt) {
       vs.push(boreSharpVariant(body, body.boreChamfer, r.step, roundedPairs(body).length));
       for (const b of body.boreChamfer) vs.push(boreVariant(body, b, r.step, roundedPairs(body).filter((p) => p.c !== b.col).length));
     }
+    if (tag === 'AN' && body.countersink) {
+      for (const c of body.countersink) { const cv = cskVariant(body, c, r.step, roundedPairs(body).filter((p) => p.c !== c.col).length); if (cv) vs.push(cv); }
+    }
     const m = matchVariants(r, vs, ctx);
     const res = { match: m.hit ? m.hit.label : null, tier: m.tier, target: m.hit ? m.hit.target : false, dV: m.dV, maxDist: m.maxDist };
     out[tag === 'AN' ? 'onMatch' : 'isoMatch'] = res;
@@ -448,7 +506,8 @@ async function checkBody(body, occt) {
   return out;
 }
 
-// Standard-Schnitthöhen: in jeder Rundungs-/Fasenzone (0.37·r von der Deckfläche) + Säulenmitte
+// Standard-Schnitthöhen: in jeder Rundungs-/Fasenzone (0.37·r von der Deckfläche) + Säulenmitte;
+// Senkung: mitten im Kegel und in der Kanten-Rundung
 function defaultSections(body) {
   const zs = new Set();
   for (const col of body.columns) {
@@ -456,7 +515,9 @@ function defaultSections(body) {
     for (const end of ['bottom', 'top']) {
       const s = col[end];
       if (!s || s.kind === 'sharp') continue;
-      zs.add(+(end === 'bottom' ? col.z0 + 0.37 * s.r : col.z1 - 0.37 * s.r).toFixed(4));
+      const at = (u) => zs.add(+(end === 'bottom' ? col.z0 + u : col.z1 - u).toFixed(4));
+      if (s.kind === 'countersink') { at(0.5 * s.depth + 0.0137); if (s.r > 0) at(0.37 * s.r); continue; }
+      at(0.37 * s.r);
     }
   }
   return [...zs].sort((a, b) => a - b);
