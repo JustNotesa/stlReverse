@@ -2837,6 +2837,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const rLo = r * cosG - radTol, rHi = r + radTol;  // geneigtes Profil: Wandabstand ∈ [r·cosγ, r]
     return sp.pieces.map((pc, k) => {
       const sgn = ssOf(k) ? 1 : -1;
+      const swept = tilted || pc.swept === true; // wie emittiert (s. assemble)
       if (pc.kind === 'line') {
         const lo = -r * sinG - 0.4, hi = pc.len + r * sinG + 0.4;
         const accept = (p) => {
@@ -2846,7 +2847,7 @@ export function buildVolumeStepBrepV2(analysis) {
           return rho >= rLo && rho <= rHi;
         };
         let normalAt;
-        if (!tilted) normalAt = cylGuardNormal(pc.profC, pc.dir, sgn);
+        if (!swept) normalAt = cylGuardNormal(pc.profC, pc.dir, sgn);
         else {
           // SURFACE_OF_LINEAR_EXTRUSION: N = C'(u) × dir mit C'(u) = profM × (p0 − profC),
           // p0 = p auf die Profilebene zurückgeschoben (entlang dir).
@@ -2877,7 +2878,7 @@ export function buildVolumeStepBrepV2(analysis) {
         return u <= pc.sweep + mrg || u >= 2 * Math.PI - mrg;
       };
       let normalAt;
-      if (!tilted) {
+      if (!swept) {
         // TOROIDAL_SURFACE: Normale zeigt vom Seelenkreis weg, × same_sense.
         normalAt = (p) => {
           const w0 = _sub3(p, pc.O), al = _dot3(w0, pc.axis);
@@ -3122,7 +3123,8 @@ export function buildVolumeStepBrepV2(analysis) {
     // Kanal-Flächenketten (tube-sweep.js): Stück k zwischen Kurve k und k+1. Profil ⟂ Bahn (γ=0):
     // Gerade → CYLINDRICAL_SURFACE, Bogen → TOROIDAL_SURFACE. Profil geneigt (γ≠0, Profilkreis auf
     // der Mündungsfläche skizziert): Gerade → SURFACE_OF_LINEAR_EXTRUSION, Bogen →
-    // SURFACE_OF_REVOLUTION des Profilkreises — beides exakt die gezogene Fläche.
+    // SURFACE_OF_REVOLUTION des Profilkreises — beides exakt die gezogene Fläche. γ=0-Stücke mit
+    // pc.swept (Rand-Kurven > 1e-6 mm neben Zylinder/Torus, s. tube-sweep.js) ebenso als Sweep.
     // Orientierung: Flächennormale zeigt in den Hohlraum. Kurven mit sense +1 laufen positiv um die
     // Bahnrichtung: Anfangskurve wird .F., Endkurve .T. benutzt (sense −1 umgekehrt); die ebene
     // Mündungsfläche benutzt ihre Kurve .T. → jede Kurve genau 1× vor, 1× zurück.
@@ -3135,15 +3137,18 @@ export function buildVolumeStepBrepV2(analysis) {
       const flipCurve = testFlip('tubecurve') && sp.pieces.length >= 2 ? Math.floor(sp.pieces.length / 2) : -1;
       sp.pieces.forEach((pc, k) => {
         let surf, sameSense;
+        // pc.swept (γ = 0, tube-sweep.js): Rand-Kurven liegen nicht exakt auf Zylinder/Torus der Bahn
+        // → wie bei γ ≠ 0 die Extrusions-/Rotationsfläche des mitgeführten Profils (enthält sie exakt)
+        const swept = tilted || pc.swept === true;
         const profCircle = () => addCircle(addAxis2Placement3D(pc.profC, pc.profM, computeRefDir(pc.profM)), r);
         if (pc.kind === 'line') {
           sameSense = false; // Normale zeigt von der Achse weg
-          if (!tilted) surf = addCylindricalSurface(addAxis2Placement3D(pc.profC, pc.dir, computeRefDir(pc.dir)), r);
+          if (!swept) surf = addCylindricalSurface(addAxis2Placement3D(pc.profC, pc.dir, computeRefDir(pc.dir)), r);
           else {
             const sc = profCircle(), vec = addVector(addDirection(pc.dir), 1);
             surf = id++; entities.push(`#${surf}=SURFACE_OF_LINEAR_EXTRUSION('',#${sc},#${vec});`);
           }
-        } else if (!tilted) {
+        } else if (!swept) {
           sameSense = false; // Torus-Normale zeigt vom Seelenkreis weg
           surf = id++; entities.push(`#${surf}=TOROIDAL_SURFACE('',#${addAxis2Placement3D(pc.O, pc.axis, pc.ea)},${toStep(pc.R)},${toStep(r)});`);
         } else {
