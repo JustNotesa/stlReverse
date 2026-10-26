@@ -8,16 +8,26 @@
 //
 //   loop-chain       Ränder geschlossen: Ende einer Kante = Anfang der nächsten
 //   edge-use         jede Kante genau 2× genutzt, einmal in jede Richtung (Bound-Flag beachtet);
-//                    bei OPEN_SHELL (offenes/non-manifold Eingabe-Netz, z.B. dino) ist eine
-//                    Kante mit 1 Nutzung ein erlaubter Rand (stats.openEdges)
+//                    in einer OPEN_SHELL (offenes Eingabe-Netz, loses Dreieck neben einem Körper) ist
+//                    eine Kante mit 1 Nutzung ein erlaubter Rand (stats.openEdges) — je Schale geprüft
+//   open-shell       eine OPEN_SHELL hat mindestens eine Randkante (ISO 10303-42 open_shell; eine
+//                    dichte Hülle gehört in eine CLOSED_SHELL)
 //   vertex-curve     Kanten-Endpunkte liegen auf ihrer Kurve
 //   vertex-surface   alle Rand-Punkte einer Fläche liegen auf ihrer Fläche
 //   orient-plane     Ebene: Außenrand gegen den Uhrzeigersinn um die effektive Normale
 //                    (Normale × same_sense), Löcher im Uhrzeigersinn; FACE_OUTER_BOUND = Außenrand
 //   orient-curved    gekrümmte Fläche mit ≥ 2 Rändern: die Fläche liegt LINKS vom Rand
 //                    (effektive Normale × Laufrichtung zeigt zu den anderen Rändern)
+//   loop-overlap     Ebene: Ränder schneiden/berühren sich nicht, jedes Loch liegt im Außenrand, Löcher
+//                    nicht ineinander (Kreise exakt, sonst Polygone; Kurven dicht abgetastet)
 //   shell-connected  jede CLOSED_SHELL/OPEN_SHELL hängt über gemeinsame Kanten zusammen
 //                    (mehrere Körper im Netz → mehrere Schalen)
+//   shell-volume     jede Außenschale eines Körpers umschließt V > 0 (Divergenzsatz über die Flächen,
+//                    ohne Heilung) und ist kein Blech ohne Volumen; Hohlräume stehen als
+//                    ORIENTED_CLOSED_SHELL(.F.) einer positiven CLOSED_SHELL im BREP_WITH_VOIDS
+//                    (Ebene, Zylinder, Kegel, Torus; andere Flächenarten → Schale übersprungen)
+//   shared-topology  kein VERTEX_POINT und keine EDGE_CURVE in zwei Schalen (getrennte Körper, Hohlraum
+//                    und Außenschale teilen nichts)
 //
 // Nutzung als Modul:  checkStepStrict(stepText) → { violations: [...], stats }
 // CLI:                node tests/step-strict.mjs [datei.step …]    (ohne Argument: alle Samples
@@ -73,10 +83,16 @@ export function checkStepStrict(text, opts = {}) {
   const ents = parseStep(text);
   const E = (r) => { const e = ents.get(r && r.ref !== undefined ? r.ref : r); if (!e) throw new Error('fehlende Entität #' + (r?.ref ?? r)); return e; };
   const violations = [];
-  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0 };
-  // Offene Hülle (der Exporter schreibt OPEN_SHELL, wenn schon das Eingabe-Netz offen bzw.
-  // non-manifold ist): einfach genutzte Kanten sind dort der ehrliche Rand, kein Fehler.
-  for (const e of ents.values()) { if (e.type === 'CLOSED_SHELL') { stats.openShell = false; break; } if (e.type === 'OPEN_SHELL') stats.openShell = true; }
+  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0, solids: 0, voids: 0, volumeSkipped: 0 };
+  // Offene Hülle (der Exporter schreibt OPEN_SHELL, wenn das Eingabe-Netz dort offen bzw.
+  // non-manifold ist): einfach genutzte Kanten sind dort der ehrliche Rand, kein Fehler — aber nur in
+  // DIESER Schale (eine Datei kann dichte Körper und offene Restflächen enthalten).
+  const shellOfFace = new Map();   // Fläche → { id, type }
+  for (const [sid, e] of ents) {
+    if (e.type !== 'CLOSED_SHELL' && e.type !== 'OPEN_SHELL') continue;
+    if (e.type === 'OPEN_SHELL') stats.openShell = true;
+    for (const f of e.args[1]) shellOfFace.set(f.ref, { id: sid, type: e.type });
+  }
   const flag = (kind, msg, extra = {}) => violations.push({ kind, msg, ...extra });
 
   const P = (r) => { const a = E(r).args; return a[1]; };                    // CARTESIAN_POINT('',(x,y,z))
@@ -161,18 +177,18 @@ export function checkStepStrict(text, opts = {}) {
     if (e.type === 'CYLINDRICAL_SURFACE') {
       const ax = axis2(e.args[1]), R = e.args[2];
       const rad = (p) => { const w = sub(p, ax.o); return sub(w, mul(ax.z, dot(w, ax.z))); };
-      return { kind: 'cylinder', ax, normal: (p) => norm(rad(p)), dist: (p) => Math.abs(len(rad(p)) - R) };
+      return { kind: 'cylinder', ax, R, normal: (p) => norm(rad(p)), dist: (p) => Math.abs(len(rad(p)) - R) };
     }
     if (e.type === 'CONICAL_SURFACE') {
       const ax = axis2(e.args[1]), R = e.args[2], al = e.args[3];
       const parts = (p) => { const w = sub(p, ax.o), h = dot(w, ax.z); const q = sub(w, mul(ax.z, h)); return { h, q, rho: len(q) }; };
-      return { kind: 'cone', ax, normal: (p) => { const { q } = parts(p); return norm(sub(mul(norm(q), Math.cos(al)), mul(ax.z, Math.sin(al)))); },
+      return { kind: 'cone', ax, R, al, normal: (p) => { const { q } = parts(p); return norm(sub(mul(norm(q), Math.cos(al)), mul(ax.z, Math.sin(al)))); },
         dist: (p) => { const { h, rho } = parts(p); return Math.abs(rho - (R + h * Math.tan(al))) * Math.cos(al); } };
     }
     if (e.type === 'TOROIDAL_SURFACE') {
       const ax = axis2(e.args[1]), R = e.args[2], rr = e.args[3];
       const core = (p) => { const w = sub(p, ax.o), h = dot(w, ax.z); const q = sub(w, mul(ax.z, h)); return add(ax.o, mul(norm(q), R)); };
-      return { kind: 'torus', ax, normal: (p) => norm(sub(p, core(p))), dist: (p) => Math.abs(len(sub(p, core(p))) - rr) };
+      return { kind: 'torus', ax, R, rr, normal: (p) => norm(sub(p, core(p))), dist: (p) => Math.abs(len(sub(p, core(p))) - rr) };
     }
     if (e.type === 'SURFACE_OF_REVOLUTION') {
       const pc = curveOf(e.args[1]);
@@ -214,6 +230,7 @@ export function checkStepStrict(text, opts = {}) {
 
   // ---- Shell durchgehen
   const edgeUse = new Map();   // edgeCurveId → [{face, dir}]
+  const faceInfo = new Map();  // Fläche → { surf, loops: [{ outer, vpts, single }], verts, edges } (Volumen, Überlappung, Topologie)
   for (const [fid, fe] of ents) {
     if (fe.type !== 'ADVANCED_FACE') continue;
     stats.faces++;
@@ -222,15 +239,18 @@ export function checkStepStrict(text, opts = {}) {
     const surf = surfOf(sref);
     if (!surf.normal) { flag('unsupported', `#${fid}: Flächentyp ${surf.kind} nicht prüfbar`, { face: fid }); continue; }
     const loops = [];
+    const info = { surf, loops, verts: new Set(), edges: new Set(), ok: true };
+    faceInfo.set(fid, info);
     for (const bref of bounds) {
       const be = E(bref); stats.loops++;
       const outer = be.type === 'FACE_OUTER_BOUND';
       const bflag = be.args[2]?.en === 'F' ? -1 : 1;
       const le = E(be.args[1]);
-      if (le.type !== 'EDGE_LOOP') { flag('unsupported', `#${fid}: Bound ohne EDGE_LOOP`, { face: fid }); continue; }
+      if (le.type !== 'EDGE_LOOP') { flag('unsupported', `#${fid}: Bound ohne EDGE_LOOP`, { face: fid }); info.ok = false; continue; }
       let oes = le.args[1].map((o) => E(o));
       if (bflag < 0) oes = oes.slice().reverse();
-      const pts = []; const chain = [];
+      const pts = []; const vpts = []; const chain = [];
+      let single = null;
       for (const oe of oes) {
         const ecRef = oe.args[3]; const ec = E(ecRef); stats.edges++;
         let fwd = oe.args[4]?.en !== 'F'; if (bflag < 0) fwd = !fwd;
@@ -238,8 +258,10 @@ export function checkStepStrict(text, opts = {}) {
         const start = fwd ? vs : ve, end = fwd ? ve : vs;
         chain.push({ start, end });
         const id = ecRef.ref; if (!edgeUse.has(id)) edgeUse.set(id, []); edgeUse.get(id).push({ face: fid, fwd });
+        info.edges.add(id); info.verts.add(vs); info.verts.add(ve);
         const c = curveOf(ec.args[3]);
-        if (c.kind.startsWith('unknown')) { flag('unsupported', `#${id}: Kurventyp ${c.kind}`, { face: fid }); continue; }
+        if (c.kind.startsWith('unknown')) { flag('unsupported', `#${id}: Kurventyp ${c.kind}`, { face: fid }); info.ok = false; continue; }
+        if (oes.length === 1) single = c;
         const ps = vtx(vs), pe = vtx(ve);
         for (const p of [ps, pe]) { const d = c.dist(p); stats.maxVertexCurve = Math.max(stats.maxVertexCurve, d); if (d > TOL) flag('vertex-curve', `Kante #${id} (${c.kind}): Endpunkt ${d.toExponential(2)} mm neben der Kurve`, { face: fid, d }); }
         // Laufrichtung: Kurvenrichtung × same_sense der Kante × Nutzungsrichtung
@@ -248,12 +270,19 @@ export function checkStepStrict(text, opts = {}) {
         if (!fwd) seg = seg.slice().reverse();
         if (pts.length) seg = seg.slice(1);
         pts.push(...seg);
+        // dichte Abtastung für Volumen/Überlappung: Gerade = Endpunkte, Kurve 128 Stücke
+        const nV = c.kind === 'line' ? 1 : 128;
+        let vseg = ecSame ? sampleCurve(c, ps, pe, nV) : sampleCurve(c, pe, ps, nV).reverse();
+        if (!fwd) vseg = vseg.slice().reverse();
+        if (vpts.length) vseg = vseg.slice(1);
+        vpts.push(...vseg);
       }
+      if (vpts.length > 1 && len(sub(vpts[0], vpts[vpts.length - 1])) < 1e-12) vpts.pop();   // geschlossen: Endpunkt = Anfang
       for (let i = 0; i < chain.length; i++) {
         const a = chain[i], b = chain[(i + 1) % chain.length];
         if (a.end !== b.start && len(sub(vtx(a.end), vtx(b.start))) > 1e-9) flag('loop-chain', `#${fid}: Rand #${be.args[1].ref} unterbrochen (Kante ${i} → ${i + 1})`, { face: fid });
       }
-      loops.push({ bref: bref.ref, outer, pts });
+      loops.push({ bref: bref.ref, outer, pts, vpts, single });
       // Rand-Punkte auf der Fläche?
       let dmax = 0; for (const p of pts) dmax = Math.max(dmax, surf.dist(p));
       stats.maxVertexSurface = Math.max(stats.maxVertexSurface, dmax);
@@ -285,10 +314,185 @@ export function checkStepStrict(text, opts = {}) {
       });
     } else stats.skippedOrient++;
   }
+  const openEdgesOf = new Map();   // OPEN_SHELL → Anzahl ihrer Randkanten
   for (const [id, uses] of edgeUse) {
-    if (uses.length === 1 && stats.openShell) { stats.openEdges++; continue; }
+    const sh = uses.length === 1 ? shellOfFace.get(uses[0].face) : null;
+    if (sh && sh.type === 'OPEN_SHELL') { stats.openEdges++; openEdgesOf.set(sh.id, (openEdgesOf.get(sh.id) || 0) + 1); continue; }
     if (uses.length !== 2) flag('edge-use', `Kante #${id}: ${uses.length}× genutzt statt 2×`);
     else if (uses[0].fwd === uses[1].fwd) flag('edge-use', `Kante #${id}: beide Nutzungen gleichsinnig (Flächen #${uses[0].face}, #${uses[1].face})`);
+  }
+  // open-shell: eine OPEN_SHELL ohne einzige Randkante ist eine dichte Hülle (ISO 10303-42 open_shell:
+  // mindestens eine Kante nur einmal genutzt) — sie gehört als CLOSED_SHELL in einen Körper.
+  for (const [sid, se] of ents) if (se.type === 'OPEN_SHELL' && !openEdgesOf.get(sid)) flag('open-shell', `#${sid}: OPEN_SHELL ohne Randkante (dichte Hülle)`);
+  // shared-topology: Schalen teilen keine Ecken und Kanten — getrennte Körper nicht, ein Hohlraum nicht
+  // mit seiner Außenschale (ISO 10303-42 brep_with_voids: Schalen disjunkt).
+  {
+    const vOwner = new Map(), eOwner = new Map();
+    for (const [sid, se] of ents) {
+      if (se.type !== 'CLOSED_SHELL' && se.type !== 'OPEN_SHELL') continue;
+      const vs = new Set(), es = new Set();
+      for (const f of se.args[1]) { const fi = faceInfo.get(f.ref); if (!fi) continue; for (const v of fi.verts) vs.add(v); for (const e of fi.edges) es.add(e); }
+      for (const v of vs) { const o = vOwner.get(v); if (o === undefined) vOwner.set(v, sid); else if (o !== sid) flag('shared-topology', `VERTEX_POINT #${v} in den Schalen #${o} und #${sid}`); }
+      for (const e of es) { const o = eOwner.get(e); if (o === undefined) eOwner.set(e, sid); else if (o !== sid) flag('shared-topology', `EDGE_CURVE #${e} in den Schalen #${o} und #${sid}`); }
+    }
+  }
+  // shell-volume: orientiertes Volumen je Schale (Divergenzsatz, V = ⅓ Σ_F ∫ (x−o)·n_eff dA). Mit a
+  // beliebig: ∫(x−o)·n dA = (a−o)·∫n dA + ∫(x−a)·n dA; ∫ n_eff dA = ½ ∮ x × dx über die Ränder wie
+  // orientiert (Fläche links). (x−a)·n: Ebene/Kegel mit a = Ebenenpunkt/Spitze → 0; Zylinder (a auf der
+  // Achse) → R; Torus (a = Zentrum) → R·cos v + r — deren Flächenintegrale per Green im Parameterraum.
+  {
+    const wrapPi = (x) => { while (x > Math.PI) x -= 2 * Math.PI; while (x <= -Math.PI) x += 2 * Math.PI; return x; };
+    const faceVolume = (fi, o) => {
+      const { surf, loops } = fi;
+      let va = [0, 0, 0];
+      for (const L of loops) { const P = L.vpts; for (let i = 0; i < P.length; i++) va = add(va, cross(sub(P[i], o), sub(P[(i + 1) % P.length], o))); }
+      va = mul(va, 0.5);
+      if (surf.kind === 'plane') return dot(sub(surf.ax.o, o), va);
+      if (surf.kind === 'cone') {
+        const ta = Math.tan(surf.al);
+        if (!(Math.abs(ta) > 1e-12)) return NaN;
+        return dot(sub(sub(surf.ax.o, mul(surf.ax.z, surf.R / ta)), o), va);
+      }
+      if (surf.kind === 'cylinder') {
+        const { ax, R } = surf;
+        const ft = (p) => { const w = sub(p, ax.o); return [Math.atan2(dot(w, ax.y), dot(w, ax.x)), dot(w, ax.z)]; };
+        let J = 0;   // ∮ t dφ
+        for (const L of loops) { const P = L.vpts; for (let i = 0; i < P.length; i++) { const [f1, t1] = ft(P[i]), [f2, t2] = ft(P[(i + 1) % P.length]); J += (t1 + t2) / 2 * wrapPi(f2 - f1); } }
+        return dot(sub(ax.o, o), va) - R * R * J;
+      }
+      if (surf.kind === 'torus') {
+        const { ax, R, rr } = surf;
+        let mx = 0, my = 0;  // u relativ zur mittleren Richtung (ein Kanal-Stück überstreicht < 360°)
+        for (const L of loops) for (const p of L.vpts) { const w = sub(p, ax.o), u = Math.atan2(dot(w, ax.y), dot(w, ax.x)); mx += Math.cos(u); my += Math.sin(u); }
+        const um = Math.atan2(my, mx);
+        const uv = (p) => {
+          const w = sub(p, ax.o), u = wrapPi(Math.atan2(dot(w, ax.y), dot(w, ax.x)) - um);
+          const e = add(mul(ax.x, Math.cos(u + um)), mul(ax.y, Math.sin(u + um))), q = sub(w, mul(e, R));
+          return [u, Math.atan2(dot(q, ax.z), dot(q, e))];
+        };
+        const f = (v) => rr * (R * Math.cos(v) + rr) * (R + rr * Math.cos(v));
+        let J = 0;   // ∮ u·f(v) dv
+        for (const L of loops) { const P = L.vpts; for (let i = 0; i < P.length; i++) { const [u1, v1] = uv(P[i]), [u2, v2] = uv(P[(i + 1) % P.length]); J += (u1 * f(v1) + u2 * f(v2)) / 2 * wrapPi(v2 - v1); } }
+        return dot(sub(ax.o, o), va) + J;
+      }
+      return NaN;
+    };
+    const volCache = new Map();
+    const shellVolume = (sid) => {
+      if (volCache.has(sid)) return volCache.get(sid);
+      const se = E(sid);
+      let r = null;
+      if (se.type === 'CLOSED_SHELL') {
+        let o = null, I = 0, ok = true;
+        const bb = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+        for (const f of se.args[1]) {
+          const fi = faceInfo.get(f.ref);
+          if (!fi || !fi.ok) { ok = false; break; }
+          for (const L of fi.loops) for (const p of L.vpts) { if (!o) o = p; for (let d = 0; d < 3; d++) { bb[d] = Math.min(bb[d], p[d]); bb[d + 3] = Math.max(bb[d + 3], p[d]); } }
+          const v = o ? faceVolume(fi, o) : NaN;
+          if (!Number.isFinite(v)) { ok = false; break; }
+          I += v;
+        }
+        if (ok && o) {
+          const a = bb[3] - bb[0], b = bb[4] - bb[1], c = bb[5] - bb[2], area = 2 * (a * b + b * c + c * a);
+          r = { V: I / 3, thick: area > 0 ? Math.abs(I) / area : 0 };   // 3|V|/A_Hüllquader
+        }
+      }
+      volCache.set(sid, r);
+      return r;
+    };
+    const DEGEN = 1e-4;   // mm — mittlere Dicke darunter: Blech ohne Volumen
+    const checkShell = (bid, ref, wantPositive, what) => {
+      const sid = ref.ref ?? ref, se = E(sid);
+      if (se.type === 'ORIENTED_CLOSED_SHELL') {
+        // Hohlraum-Konvention (OpenCascade, ISO 10303-42): positive CLOSED_SHELL, Orientierung .F.
+        if (wantPositive || se.args[3]?.en !== 'F') flag('shell-volume', `#${bid}: ${what} #${sid} als ORIENTED_CLOSED_SHELL(.${se.args[3]?.en}.) — erwartet ${wantPositive ? 'CLOSED_SHELL' : '.F.'}`);
+        return checkShell(bid, se.args[2], true, `${what} (#${sid})`);
+      }
+      if (se.type !== 'CLOSED_SHELL') { flag('shell-volume', `#${bid}: ${what} #${sid} ist ${se.type}`); return; }
+      if (!wantPositive) { flag('shell-volume', `#${bid}: ${what} #${sid} nicht als ORIENTED_CLOSED_SHELL(.F.) referenziert`); return; }
+      const r = shellVolume(sid);
+      if (!r) { stats.volumeSkipped++; return; }
+      if (r.thick < DEGEN) flag('shell-volume', `#${bid}: ${what} #${sid} ohne Volumen (V = ${r.V.toExponential(3)} mm³, Blech/Finne)`);
+      else if (!(r.V > 0)) flag('shell-volume', `#${bid}: ${what} #${sid} umschließt V = ${r.V.toExponential(3)} mm³ (innen-außen vertauscht)`);
+    };
+    for (const [bid, be] of ents) {
+      if (be.type !== 'MANIFOLD_SOLID_BREP' && be.type !== 'BREP_WITH_VOIDS') continue;
+      stats.solids++;
+      checkShell(bid, be.args[1], true, 'Außenschale');
+      if (be.type === 'BREP_WITH_VOIDS') for (const vref of be.args[2]) { stats.voids++; checkShell(bid, vref, false, 'Hohlraum'); }
+    }
+  }
+  // loop-overlap: Ränder einer ebenen Fläche schneiden/berühren sich nicht; jedes Loch liegt im
+  // Außenrand, Löcher nicht ineinander. Ein Rand aus genau einem CIRCLE in der Ebene zählt exakt als
+  // Kreis, sonst als Polygon (Kurven mit 128 Stücken je Kante).
+  {
+    const EPS = 1e-7;
+    const segSeg = (a, b, c, d) => {   // 2D-Abstand zweier Strecken
+      const o = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+      const o1 = o(a, b, c), o2 = o(a, b, d), o3 = o(c, d, a), o4 = o(c, d, b);
+      if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) return 0;
+      const ps = (p, q, r) => { const dx = r[0] - q[0], dy = r[1] - q[1], l2 = dx * dx + dy * dy; const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - q[0]) * dx + (p[1] - q[1]) * dy) / l2)) : 0; return Math.hypot(p[0] - q[0] - t * dx, p[1] - q[1] - t * dy); };
+      return Math.min(ps(a, c, d), ps(b, c, d), ps(c, a, b), ps(d, a, b));
+    };
+    const circSeg = (cc, R, a, b) => {   // Abstand Kreislinie ↔ Strecke
+      const p = [a[0] - cc[0], a[1] - cc[1]], q = [b[0] - cc[0], b[1] - cc[1]], dx = q[0] - p[0], dy = q[1] - p[1], l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, -(p[0] * dx + p[1] * dy) / l2)) : 0;
+      const dmin = Math.hypot(p[0] + t * dx, p[1] + t * dy), dmax = Math.max(Math.hypot(p[0], p[1]), Math.hypot(q[0], q[1]));
+      return R < dmin ? dmin - R : (R > dmax ? R - dmax : 0);
+    };
+    const inPoly = (pt, poly) => { let inside = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const [xi, yi] = poly[i], [xj, yj] = poly[j]; if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) inside = !inside; } return inside; };
+    const bbox = (P) => { const b = [Infinity, Infinity, -Infinity, -Infinity]; for (const p of P) { b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); } return b; };
+    const dist = (A, B) => {
+      if (A.circle && B.circle) {
+        const d = Math.hypot(A.c[0] - B.c[0], A.c[1] - B.c[1]);
+        return d >= A.R + B.R ? d - A.R - B.R : (d <= Math.abs(A.R - B.R) ? Math.abs(A.R - B.R) - d : 0);
+      }
+      if (A.circle || B.circle) {
+        const C = A.circle ? A : B, P = A.circle ? B.poly : A.poly;
+        let m = Infinity;
+        for (let i = 0; i < P.length && m > EPS; i++) m = Math.min(m, circSeg(C.c, C.R, P[i], P[(i + 1) % P.length]));
+        return m;
+      }
+      const ba = bbox(A.poly), bb = bbox(B.poly);
+      if (ba[0] > bb[2] + EPS || bb[0] > ba[2] + EPS || ba[1] > bb[3] + EPS || bb[1] > ba[3] + EPS) return Infinity;
+      let m = Infinity;
+      for (let i = 0; i < A.poly.length && m > EPS; i++) {
+        const a = A.poly[i], b = A.poly[(i + 1) % A.poly.length];
+        if (Math.max(a[0], b[0]) < bb[0] - EPS || Math.min(a[0], b[0]) > bb[2] + EPS || Math.max(a[1], b[1]) < bb[1] - EPS || Math.min(a[1], b[1]) > bb[3] + EPS) continue;
+        for (let j = 0; j < B.poly.length && m > EPS; j++) {
+          const c = B.poly[j], d = B.poly[(j + 1) % B.poly.length];
+          if (Math.max(c[0], d[0]) < Math.min(a[0], b[0]) - EPS || Math.min(c[0], d[0]) > Math.max(a[0], b[0]) + EPS || Math.max(c[1], d[1]) < Math.min(a[1], b[1]) - EPS || Math.min(c[1], d[1]) > Math.max(a[1], b[1]) + EPS) continue;
+          m = Math.min(m, segSeg(a, b, c, d));
+        }
+      }
+      return m;
+    };
+    const pointOf = (S) => (S.circle ? [S.c[0] + S.R, S.c[1]] : S.poly[0]);
+    const inside = (pt, S) => (S.circle ? Math.hypot(pt[0] - S.c[0], pt[1] - S.c[1]) < S.R : inPoly(pt, S.poly));
+    for (const [fid, fi] of faceInfo) {
+      if (fi.surf.kind !== 'plane' || fi.loops.length < 2) continue;
+      const { o: O, x: X, y: Y, z: Z } = fi.surf.ax;
+      const to2 = (p) => { const w = sub(p, O); return [dot(w, X), dot(w, Y)]; };
+      const shapes = fi.loops.map((L) => {
+        const c = L.single;
+        if (c && c.kind === 'circle' && Math.abs(Math.abs(dot(c.ax.z, Z)) - 1) < 1e-9) return { circle: true, c: to2(c.ax.o), R: c.a, outer: L.outer, bref: L.bref };
+        return { poly: L.vpts.map(to2), outer: L.outer, bref: L.bref };
+      }).filter((S) => S.circle || S.poly.length >= 3);
+      let oi = shapes.findIndex((S) => S.outer);
+      if (oi < 0) continue;                                  // outer-bound meldet das schon
+      for (let i = 0; i < shapes.length; i++) {
+        for (let j = i + 1; j < shapes.length; j++) {
+          const A = shapes[i], B = shapes[j];
+          const d = dist(A, B);
+          if (d <= EPS) { flag('loop-overlap', `#${fid}: Ränder #${A.bref} und #${B.bref} schneiden/berühren sich`, { face: fid }); continue; }
+          if (i === oi || j === oi) {
+            const In = i === oi ? B : A, Out = i === oi ? A : B;
+            if (!inside(pointOf(In), Out)) flag('loop-overlap', `#${fid}: Loch #${In.bref} liegt außerhalb des Außenrands #${Out.bref}`, { face: fid });
+          } else if (inside(pointOf(A), B) || inside(pointOf(B), A)) flag('loop-overlap', `#${fid}: Löcher #${A.bref} und #${B.bref} liegen ineinander`, { face: fid });
+        }
+      }
+    }
   }
   // shell-connected: jede Schale hängt über gemeinsame Kanten zusammen (ISO 10303-42: connected
   // face set) — ein Netz aus mehreren Körpern gehört in mehrere Schalen/Körper.
