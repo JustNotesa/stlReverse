@@ -1027,8 +1027,11 @@ export function buildVolumeStepBrepV2(analysis) {
   // verrundet hat), für gerade UND gekrümmte Konturabschnitte. Die Band-Facetten entfallen.
   // Konservativ: nur geschlossene Ringbänder (Loop von P komplett verrundet, Band grenzt nur an
   // P und Wände), Band muss an P UND an den Wänden tangential anschließen (Verrundung — keine Fase,
-  // keine Senkung), Band muss schmal sein (Bandform, s. evaluateBand), neue Kontur muss einfach
-  // sein. Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt + der globale Fallback.
+  // keine Senkung) und im Querschnitt ein Kreisbogen sein, Band muss schmal sein (Bandform, s.
+  // evaluateBand), neue Kontur muss einfach sein. Liegt zwischen Rundung und Wand ein Kegel/eine
+  // Fase (Senkung mit verrundeter Kante), wird nur die Rundung geschärft, der Kegel bleibt (schräge
+  // Wand, s. splitTiltedWall). Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt + der
+  // globale Fallback.
   // (Aufruf in runPipeline() unten.)
   let bandsDefeatured = 0;
   function defeatureBands() {
@@ -1193,9 +1196,10 @@ export function buildVolumeStepBrepV2(analysis) {
         // eines Torus — die Tiefensuche bricht ab, sobald ein Punkt tiefer liegt (früh, billig).
         const H_MAX = lenL / Math.PI;
         // (2) Band wachsen: Nachbarn sind Band (schräg + nah an P), Wand (⊥ P) oder P (nur über L)
-        const band = new Set(seeds), queue = [...seeds];
-        const wallEdges = [];          // { v0, v1, wi } Bandkante zu einer Wand
-        const walls = new Set();
+        let band = new Set(seeds);
+        const queue = [...seeds];
+        let wallEdges = [];            // { v0, v1, wi, bi } Bandkante (Band-Fläche bi) zu einer Wand wi
+        let walls = new Set();
         while (queue.length && ok) {
           const fi = queue.pop();
           const fd = fds[fi];
@@ -1225,6 +1229,7 @@ export function buildVolumeStepBrepV2(analysis) {
         // läuft). Als Wand würden sie beim Projizieren in P's Ebene kollabieren und die neue Kontur
         // liefe gleichsinnig um sie herum (eBike: 6 Orientierungsfehler) → zum Band schlagen und
         // die Grenze zu den echten Wänden neu bestimmen.
+        let nonTangent = false;
         {
           const bandPts = new Set();
           for (const fi of band) for (const Lb of loopsOf(fds[fi])) for (const p of Lb) bandPts.add(vtxKey(p));
@@ -1244,10 +1249,10 @@ export function buildVolumeStepBrepV2(analysis) {
                 if (band.has(ni)) continue;
                 if (ni === pi) { if (!Ledges.has(k)) ok = false; continue; }
                 if (Math.abs(_dot3(nrm[ni], d)) <= WALL_COS && !removed.has(ni)) {
-                  // (3) Tangential an die Wand: die angrenzende Band-Facette steht fast ⊥ P (Knick
-                  // zur Wand ≤ 25°). Senkung: Kegel (45°) grenzt an die Bohrungswand → Knick 45°.
-                  if (Math.abs(_dot3(nrm[fi], d)) > TANGENT_SIN) { ok = false; break; }
-                  walls.add(ni); wallEdges.push({ v0: a, v1: b, wi: ni }); continue;
+                  // (3) Tangential an die Wand? Die angrenzende Band-Facette muss fast ⊥ P stehen
+                  // (Knick zur Wand ≤ 25°). Senkung: Kegel (45°) grenzt an die Bohrungswand → 45°.
+                  if (Math.abs(_dot3(nrm[fi], d)) > TANGENT_SIN) nonTangent = true;
+                  walls.add(ni); wallEdges.push({ v0: a, v1: b, wi: ni, bi: fi }); continue;
                 }
                 ok = false;
               }
@@ -1255,30 +1260,43 @@ export function buildVolumeStepBrepV2(analysis) {
           }
         }
         if (!ok || !wallEdges.length) return null;
+        // (3b) Nicht tangential an die Wände: nur zulässig, wenn zwischen Rundung und Wand eine
+        // Kegel-/Fasen-Lage liegt (Senkung mit verrundeter Kante) — die wird zur schrägen Wand.
+        let tilt = null, wallAng = 90;
+        if (nonTangent) {
+          tilt = splitTiltedWall(pi, band, wallEdges, Ledges, d);
+          if (!tilt) return null;
+          ({ band, walls, wallEdges } = tilt);
+          wallAng = tilt.ang;
+        }
         // (Gekrümmt ist das Band damit von selbst: tangential an P und an die Wände → die Band-
         // Normalen überstreichen mindestens 25°…65° zu P; reine Fasen scheitern schon an (1).)
         // (4) Wand-Bandkante muss genau EIN geschlossener Ring sein
         const rings = chainEdges(wallEdges);
         if (rings.length !== 1 || rings[0].length < 3) return null;
         const ring = rings[0];
-        // (5) Projektion auf P (entlang d — bleibt auf jeder Wand, da Wände d enthalten)
+        // (5) Projektion auf P (entlang d — bleibt auf jeder Wand, da Wände d enthalten; schräge
+        // Kegel-Wände: entlang ihrer Mantellinie, s. splitTiltedWall)
         const proj = new Map();       // vtxKey(alt) → neuer Punkt
         let hLo = Infinity, hHi = -Infinity;
         for (const p of ring) {
           const h = _dot3(d, p) - off;
           if (Math.abs(h) < hLo) hLo = Math.abs(h); if (Math.abs(h) > hHi) hHi = Math.abs(h);
           if (Math.abs(h) < 1e-6 || Math.abs(h) > H_MAX) { ok = false; break; }
-          proj.set(vtxKey(p), [p[0] - d[0] * h, p[1] - d[1] * h, p[2] - d[2] * h]);
+          const q = tilt ? tilt.project(p, h) : [p[0] - d[0] * h, p[1] - d[1] * h, p[2] - d[2] * h];
+          if (!q) { ok = false; break; }
+          proj.set(vtxKey(p), q);
         }
         if (!ok) return null;
         // Gleichmäßige Bandtiefe: bei einer echten Deckfläche liegt die ganze Bandkante auf EINER
         // Höhe über P (= Verrundungsradius). Schwankt sie (Deck-Rundung vs. Eckradius), ist P eine
         // Seitenwand, um die zufällig auch ein Band läuft → nicht diese Fläche entrunden.
         if (hHi - hLo > Math.max(0.01, 0.02 * hHi)) return null;
-        // (5a) Rundungsprofil: im Querschnitt ist ein Verrundungsband EIN Kreisbogen (Radius = Band-
-        // tiefe r), tangential an P und die Wände. Ein Punkt in Tiefe h liegt dort, wo die Flächen-
-        // normale um α(h) = acos(1 − h/r) gegen P geneigt ist — die Normalen der angrenzenden Band-
-        // Facetten (an L zusätzlich P mit 0°, am Wandring die Wand mit 90°) müssen α(h) einschließen.
+        // (5a) Rundungsprofil: im Querschnitt ist ein Verrundungsband EIN Kreisbogen (Radius r),
+        // tangential an P und die Wände (Neigung θw, senkrecht 90°; Bandtiefe = r·(1 − cos θw)). Ein
+        // Punkt in Tiefe h liegt dort, wo die Flächennormale um α(h) = acos(1 − h/r) gegen P geneigt
+        // ist — die Normalen der angrenzenden Band-Facetten (an L zusätzlich P mit 0°, am Wandring die
+        // Wand mit θw) müssen α(h) einschließen.
         // Eine flache Zone im Band liegt zu tief/zu flach für ihre Neigung: Senkungskegel zwischen
         // zwei Kanten-Rundungen (tangential an P UND an die Bohrung!), verrundete Fase → kein Band.
         {
@@ -1289,9 +1307,10 @@ export function buildVolumeStepBrepV2(analysis) {
             for (const Lb of loopsOf(fds[fi])) for (const p of Lb) { note(p, ang); pts.set(vtxKey(p), p); }
           }
           for (const p of L) note(p, 0);
-          for (const p of ring) note(p, 90);
+          for (const p of ring) note(p, wallAng);
+          const invR = (1 - Math.cos(wallAng * Math.PI / 180)) / hHi;
           for (const [k, p] of pts) {
-            const al = Math.acos(Math.max(-1, Math.min(1, 1 - Math.abs(_dot3(d, p) - off) / hHi))) * 180 / Math.PI;
+            const al = Math.acos(Math.max(-1, Math.min(1, 1 - Math.abs(_dot3(d, p) - off) * invR))) * 180 / Math.PI;
             if (al < lo.get(k) - PROFILE_TOL_DEG || al > hi.get(k) + PROFILE_TOL_DEG) return null;
           }
         }
@@ -1299,7 +1318,7 @@ export function buildVolumeStepBrepV2(analysis) {
         // Ebene von P und die echte(n) Ebene(n) seiner Wand/Wände setzen (kleinste Verschiebung; an
         // der Ecke zweier Wände = Schnittpunkt dreier Ebenen). Nur µm-Korrekturen (≤ SNAP_MAX), und
         // nur für alle Punkte gemeinsam — sonst bleibt die einfache Projektion.
-        const planes = snapProjection(pi, proj, wallEdges, d);
+        const planes = tilt ? null : snapProjection(pi, proj, wallEdges, d);
         const newLoop = [];
         for (const p of ring) {
           const q = proj.get(vtxKey(p));
@@ -1338,6 +1357,94 @@ export function buildVolumeStepBrepV2(analysis) {
         if (!ok) return null;
         return { pi, L, newLoop, walls, band, proj, planes };
       }
+    }
+
+    // (3b) Senkung/Fase mit verrundeter Deck-Kante: das Band (Rundung + Kegel) reicht bis zur Bohrungs-
+    // wand und schließt dort NICHT tangential an. Liegen alle an die Wände grenzenden Band-Facetten
+    // auf EINER Neigung θc (± 0.5°), ist diese Lage ein Kegel/eine Fase: sie wird zur schrägen „Wand“,
+    // das Band ist nur die Rundung zwischen P und Kegel (flacher als θc, tangential an den Kegel, berührt
+    // die alten Wände nicht), und der Kegel reicht nirgends bis P. Die neue Kante ist Kegel ∩ P: jeder
+    // Ringpunkt läuft entlang der Mantellinie (Schnitt der Kegel-Facetten durch ihn; eine einzelne
+    // Facette: Fallrichtung in ihrer Ebene) bis P — die Senkung bleibt, nur ihre Kanten-Rundung fällt.
+    // → { band, walls, wallEdges, ang: θc, project(p, h) } | null
+    function splitTiltedWall(pi, band, wallEdges, Ledges, d) {
+      const angOf = (fi) => Math.acos(Math.min(1, Math.abs(_dot3(nrm[fi], d)))) * 180 / Math.PI;
+      const B = new Set(wallEdges.map((e) => e.bi));
+      let tc = 0; for (const fi of B) tc += angOf(fi); tc /= B.size;
+      for (const fi of B) if (Math.abs(angOf(fi) - tc) > 0.5) return null;
+      if (!(tc > 2 && 90 - tc > 25)) return null;
+      const C = new Set(B), stack = [...B];
+      while (stack.length) {
+        const fi = stack.pop();
+        for (const Lb of loopsOf(fds[fi])) {
+          for (let i = 0; i < Lb.length; i++) {
+            for (const o of edgeOwners.get(edgeKeyFn(Lb[i], Lb[(i + 1) % Lb.length])) || []) {
+              if (o.fi === fi || C.has(o.fi) || !band.has(o.fi)) continue;
+              if (Math.abs(angOf(o.fi) - tc) <= 0.5) { C.add(o.fi); stack.push(o.fi); }
+            }
+          }
+        }
+      }
+      const R = new Set([...band].filter((fi) => !C.has(fi)));
+      if (!R.size) return null;
+      let aMin = 90, aMax = 0;
+      for (const fi of R) { const a = angOf(fi); if (a > tc - 0.5) return null; aMin = Math.min(aMin, a); aMax = Math.max(aMax, a); }
+      if (aMax - aMin < 0.25 * tc) return null;   // gekrümmt (≥ 2 Schichten) — eine einzelne Schräge (Doppel-Senkung) ist keine Rundung
+      for (const fi of C) {
+        for (const Lb of loopsOf(fds[fi])) for (let i = 0; i < Lb.length; i++) if (Ledges.has(edgeKeyFn(Lb[i], Lb[(i + 1) % Lb.length]))) return null;
+      }
+      const edges = [];
+      for (const fi of R) {
+        for (const Lb of loopsOf(fds[fi])) {
+          for (let i = 0; i < Lb.length; i++) {
+            const a = Lb[i], b = Lb[(i + 1) % Lb.length];
+            const others = (edgeOwners.get(edgeKeyFn(a, b)) || []).filter((o) => o.fi !== fi);
+            if (others.length !== 1) return null;
+            const ni = others[0].fi;
+            if (R.has(ni) || ni === pi) continue;
+            if (!C.has(ni) || tc - angOf(fi) > 25) return null;   // berührt die alte Wand / nicht tangential an den Kegel
+            edges.push({ v0: a, v1: b, wi: ni, bi: fi });
+          }
+        }
+      }
+      if (!edges.length) return null;
+      const ringKeys = new Set();
+      for (const e of edges) { ringKeys.add(vtxKey(e.v0)); ringKeys.add(vtxKey(e.v1)); }
+      const W = new Set(), at = new Map();       // Kegel-Facetten am Ring; Ringpunkt → Facetten
+      for (const fi of C) {
+        for (const Lb of loopsOf(fds[fi])) {
+          for (const p of Lb) {
+            const k = vtxKey(p);
+            if (!ringKeys.has(k)) continue;
+            W.add(fi);
+            let s = at.get(k); if (!s) { s = new Set(); at.set(k, s); } s.add(fi);
+          }
+        }
+      }
+      const project = (p, h) => {
+        const fs = [...(at.get(vtxKey(p)) || [])];
+        if (!fs.length) return null;
+        let best = null;
+        for (let i = 0; i < fs.length; i++) {
+          for (let j = i + 1; j < fs.length; j++) {
+            const c = _cross3(nrm[fs[i]], nrm[fs[j]]), l = Math.hypot(c[0], c[1], c[2]);
+            if (!best || l > best.l) best = { c, l };
+          }
+        }
+        let g;
+        if (best && best.l > 1e-3) {
+          g = [best.c[0] / best.l, best.c[1] / best.l, best.c[2] / best.l];
+          for (const f of fs) if (Math.abs(_dot3(nrm[f], g)) > 1e-3) return null;   // keine gemeinsame Mantellinie
+        } else {
+          const n = nrm[fs[0]], k = _dot3(d, n);
+          g = _norm3([d[0] - n[0] * k, d[1] - n[1] * k, d[2] - n[2] * k]);
+        }
+        const gd = _dot3(g, d);
+        if (Math.abs(gd) < 0.2) return null;
+        const t = -h / gd;
+        return [p[0] + g[0] * t, p[1] + g[1] * t, p[2] + g[2] * t];
+      };
+      return { band: R, walls: W, wallEdges: edges, ang: tc, project };
     }
 
     // (5b) Hilfen: projizierte Punkte auf die exakten Ebenen setzen → Map(fi → Ebene) | null.

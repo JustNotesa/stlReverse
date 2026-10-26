@@ -679,6 +679,12 @@ export const BODIES = [
     columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, rw: 0.5, N: 8 } })],
     expect: { mode: 'sharp' },
   },
+  {
+    id: 'x7', extra: true, file: 'v2_x_fase_rundung_oben',
+    desc: 'Rechteck 40×30×10, oben 45°-Fase (Tiefe 1.5), nur die Kante Fase → Deckfläche r=0.5 verrundet (Ziel: scharfe Fase)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, N: 8 } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
   // ── Bandform (ersetzt die Schranken RMAX/Bandfläche ≤ 3× Deckfläche): Kuppe ≠ Verrundung ──
   {
     id: 'y1', extra: true, file: 'v2_x_kuppe',
