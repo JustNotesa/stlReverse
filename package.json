@@ -6,9 +6,9 @@
   "description": "Firefox/Chrome Add-on zur heuristischen Rückführung von STL-Meshes in parametrische Beschreibungen",
   "main": "analysis-core.js",
   "scripts": {
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/analysis-core.test.js",
-    "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/e2e/",
+    "test": "node tests/run-all.mjs",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testMatch '<rootDir>/tests/e2e/**/*.test.js'",
     "test:bore": "node tests/bore-analytic-regression.mjs",
     "lint": "web-ext lint",
     "test:golden": "node tests/golden-regression.mjs",
@@ -16,6 +16,18 @@
     "test:collinear": "node tests/collinear-regression.mjs",
     "test:v2": "node tests/fixtures-v2/check.mjs --quick",
     "test:tube": "node tests/tube-regression.mjs"
+  },
+  "jest": {
+    "testMatch": [
+      "<rootDir>/tests/*.test.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "<rootDir>/\\.claude/"
+    ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/\\.claude/"
+    ]
   },
   "keywords": [],
   "author": "",

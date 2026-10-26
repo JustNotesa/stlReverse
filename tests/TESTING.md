@@ -3,26 +3,47 @@
 ## Verfügbare Test-Kommandos
 
 ```bash
-# Alle Tests ausführen
+# ALLE schnellen Regressionen nacheinander (tests/run-all.mjs):
+# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → collinear.
+# Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
 npm test
 
-# Nur Unit-Tests
+# Nur Unit-Tests (Jest: tests/*.test.js — analysis-core + utils)
 npm run test:unit
 
-# Nur E2E-Tests (Browser-Automatisierung)
+# Einzelne Regressions-Suiten
+npm run test:golden      # Kennzahlen je Sample vs. tests/golden.json
+npm run test:v2          # Härtetest kurz (voll: node tests/fixtures-v2/check.mjs)
+npm run test:ebike       # Scorecard verrundetes eBike (47 Flächen)
+npm run test:tube        # 6 Synthetik-Kanäle
+npm run test:bore        # Dünnplatten-Bohrungen → CYLINDRICAL_SURFACE
+npm run test:collinear   # kollineare Kantenpunkte
+
+# Nur E2E-Tests (Puppeteer; läuft bei npm test bewusst NICHT mit)
 npm run test:e2e
 
 # Add-on validieren (Mozilla Linter)
 npm run lint
 ```
 
+Jest ist in `package.json` auf `tests/*.test.js` begrenzt (`testMatch`) und
+ignoriert `.claude/` (Agent-Worktrees im Haupt-Checkout) sowie `node_modules`
+— `tests/e2e/` läuft nur über `npm run test:e2e` (CLI-`--testMatch`-Override).
+
 ## Unit-Tests
 
-Die Unit-Tests in `tests/analysis-core.test.js` testen die Kern-Logik:
+Die Unit-Tests in `tests/analysis-core.test.js` testen die Kern-Logik —
+seit 2026-10 gegen die heutige Pipeline (alle Erwartungswerte gemessen):
 
-- **STL-Parsing**: ASCII und Binary STL-Dateien
-- **Mesh-Analyse**: Bounding Box, Face-Counting
-- **Feature-Erkennung**: Planare Flächen, Zylinder, Kegel, Kugeln
+- **STL-Parsing**: ASCII und Binary STL-Dateien, Validierung
+- **Mesh-Analyse**: Bounding Box, Umriss-Projektionen, Volumen/Oberfläche
+  (analyseMesh liefert KEINE Primitive mehr)
+- **Erkennung** über den Worker-Ablauf `buildNormalGroups →
+  unifyCoplanarGroups → recognizePrimitives → detectTubes`:
+  Zylinder/Bohrungen (Radius, Achse, Höhe), Kanäle (eBike), Negativkontrollen
+  (Würfel/Kegel/Kugel). Exakte Gesamt-Zählungen pro Sample pinnt der Golden-Test.
+
+Dazu `tests/utils.test.js` für die UI-Helfer (`utils.js`).
 
 ## E2E-Tests (Browser-Automatisierung)
 
@@ -32,6 +53,14 @@ Die E2E-Tests in `tests/e2e/addon.test.js` verwenden Puppeteer für echte Browse
 - Slider-Funktionalität
 - Canvas-Rendering
 - CSS-Loading
+
+> **Stand 2026-10: teilweise veraltet.** Die Selektoren `#canvas-3d`,
+> `#plane-table`, `#cylinder-table`, `#cone-table`, `#sphere-table` gibt es in
+> popup.html nicht mehr (Primitiv-Tabellen wurden mit der alten Erkennung
+> entfernt; statt eines 3D-Canvas gibt es die 4 Viewer-Panels). Die beiden
+> Tests „Canvas-Elemente" und „HTML-Struktur" schlagen deshalb fehl — bei einer
+> Überarbeitung auf `#stl-viewer`/`#features-viewer`/`#brep-viewer`/
+> `#step-occt-viewer` umstellen.
 
 ---
 
