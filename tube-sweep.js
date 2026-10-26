@@ -587,7 +587,33 @@ const kinkOf = (t1, t2) => Math.atan2(cr2(norm2(t1), norm2(t2)), dot2(norm2(t1),
 // unkritisch, weil die Übergangskurven als starr mitgeführter Profilkreis BEIDEN Nachbarflächen
 // exakt angehören — sie erzeugen nur einen Haarknick in der Wand. CAD-Bahnen aus Geraden und
 // Bögen werden so wieder zu genau diesen Stücken.
-function simplifyChain(chain, Q, tol, maxKink, startT) {
+//
+// Laufzeit: Je Start k wird jedes Ende l absteigend probiert (Gerade, sonst Bogen per Goldenem
+// Schnitt über die Pfeilhöhe) — bei langen Freiform-Ketten O(Kette² · Stationen · 42). Die
+// folgenden Abkürzungen ändern das Ergebnis NICHT (gleiche Stücke, gleiche Zahlen):
+//  • Stationen je [k, l) als Index-Bereich (nach Stück sortiert) statt Q.filter — alle
+//    Auswertungen darauf sind Maxima, also reihenfolge-unabhängig.
+//  • Schwellen-Prüfungen (Abweichung ≤ tol) brechen bei der ersten Station > tol ab; billige
+//    Knick-Prüfungen zuerst (reine Funktionen, gleiches UND-Ergebnis).
+//  • Goldener Schnitt: von zwei verglichenen Werten wird der größere verworfen — eine neue
+//    Auswertung darf abbrechen, sobald ihr Teil-Maximum den behaltenen Wert übersteigt (der
+//    Vergleich steht dann fest; zuerst die zuletzt schlechteste Station). Die letzte Auswertung
+//    wurde nie gelesen und entfällt.
+//  • Unmöglichkeits-Beweis (provenInfeasible): Stationen auf beiden Seiten der Sehne bzw.
+//    unverträgliche Kreis-Schranken → kein Stück durch J[k], J[l] kann passen → Gerade und
+//    Goldener Schnitt scheitern sicher und werden übersprungen (mit Rundungs-Reserve, s. dort).
+//    Das trifft auf Freiform-Ketten fast alle langen Läufe (gemessen ~97 % der (k,l)-Paare).
+//  • maxPieces: Die Anker-Kette gewinnt bei Stück-Gleichstand; sobald feststeht, dass die
+//    vereinfachte Kette nicht kürzer wird als sie, Abbruch ({ tooMany }).
+// Sicherheitsnetz SIMPLIFY_BUDGET (Arbeitseinheiten: 1 je Station im Sehnen-/Kreis-Durchlauf,
+// 8 je Abstands-Auswertung; gemessen ~12 ns je Einheit auf Effizienz-Kernen): darüber Abbruch
+// ({ overBudget }) — die Anker-Kette, falls vorhanden, sonst bleibt der Kanal facettiert, statt
+// den Worker unabsehbar zu blockieren. Größter gemessener Fall (Freiform-Kanal, 43k Dreiecke):
+// 1.5e7 Einheiten — das Budget liegt ~13-fach darüber.
+// Nicht-endliche Eingaben (kommen nicht vor): ohne Schranken-Abbruch und Unmöglichkeits-Beweis.
+const SIMPLIFY_BUDGET = 2e8;
+const DEV_WORK = 8;
+function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity) {
   const owner = Q.map((q) => { let bi = 0, bd = Infinity; chain.forEach((pc, i) => { const d = distToPiece2(q, pc); if (d < bd) { bd = d; bi = i; } }); return bi; });
   const J = [chain[0].A, ...chain.map((pc) => pc.B)];
   // Am offenen Kettenende wird verlängert/angesetzt → dortige End-Tangente muss erhalten bleiben
@@ -597,36 +623,140 @@ function simplifyChain(chain, Q, tol, maxKink, startT) {
   // sein Lagefehler gegenüber der Bahn → begrenzt wird die kumulierte Summe, nicht der Einzelknick.
   let cum = 0;
   const kinkOk = (pc) => Math.abs(cum + kinkOf(tPrev, pc.ta)) <= maxKink;
+  // Stationen nach Stück-Zuordnung gruppiert: Stationen zu [k, l) = Bereich [first[k], first[l]).
+  const nC = chain.length, nQ = Q.length;
+  const first = new Int32Array(nC + 1);
+  for (let i = 0; i < nQ; i++) first[owner[i] + 1]++;
+  for (let o = 0; o < nC; o++) first[o + 1] += first[o];
+  const X = new Float64Array(nQ), Y = new Float64Array(nQ);
+  { const fill = first.slice(); for (let i = 0; i < nQ; i++) { const p = fill[owner[i]]++; X[p] = Q[i][0]; Y[p] = Q[i][1]; } }
+  let finite = true;
+  for (let i = 0; i < nQ; i++) if (!Number.isFinite(X[i]) || !Number.isFinite(Y[i])) finite = false;
+  for (const p of J) if (!Number.isFinite(p[0]) || !Number.isFinite(p[1])) finite = false;
+  let work = 0, hot = -1;
+  const TWO_PI = 2 * Math.PI;
+  // Max. Abstand (= distToPiece2, gleiche Arithmetik) der Stationen [i0, i1) zum Stück pc. Abbruch,
+  // sobald das Teil-Maximum `cut` übersteigt (strict) bzw. erreicht; cut = Infinity → exakt.
+  // (j = i0 − 1: zuerst die Station `hot`, dann alle — hot doppelt ändert kein Maximum.)
+  const devRange = (pc, i0, i1, cut, strict) => {
+    let m = 0, arg = -1, n = 0;
+    const h0 = hot >= i0 && hot < i1 ? hot : -1;
+    if (pc.kind === 'line') {
+      const A0 = pc.A[0], A1 = pc.A[1], dx = pc.B[0] - A0, dy = pc.B[1] - A1, den = (dx * dx + dy * dy) || 1;
+      for (let j = h0 >= 0 ? i0 - 1 : i0; j < i1; j++) {
+        const i = j < i0 ? h0 : j, x = X[i], y = Y[i];
+        const s = Math.max(0, Math.min(1, ((x - A0) * dx + (y - A1) * dy) / den));
+        const d = Math.hypot(x - (A0 + dx * s), y - (A1 + dy * s));
+        n++; if (d > m) arg = i; m = Math.max(m, d);
+        if (strict ? m > cut : m >= cut) { work += DEV_WORK * n; hot = arg; return m; }
+      }
+    } else {
+      const A0 = pc.A[0], A1 = pc.A[1], B0 = pc.B[0], B1 = pc.B[1], C0 = pc.C[0], C1 = pc.C[1];
+      const a0x = A0 - C0, a0y = A1 - C1, sg = Math.sign(pc.th), ath = Math.abs(pc.th), R = pc.R;
+      for (let j = h0 >= 0 ? i0 - 1 : i0; j < i1; j++) {
+        const i = j < i0 ? h0 : j, x = X[i], y = Y[i], wx = x - C0, wy = y - C1;
+        let rel = Math.atan2(a0x * wy - a0y * wx, a0x * wx + a0y * wy) * sg;
+        if (rel < 0) rel += TWO_PI;
+        const d = rel <= ath ? Math.abs(Math.hypot(wx, wy) - R) : Math.min(Math.hypot(x - A0, y - A1), Math.hypot(x - B0, y - B1));
+        n++; if (d > m) arg = i; m = Math.max(m, d);
+        if (strict ? m > cut : m >= cut) { work += DEV_WORK * n; hot = arg; return m; }
+      }
+    }
+    work += DEV_WORK * n; if (arg >= 0) hot = arg;
+    return m;
+  };
+  // Beweis „kein Stück durch A = J[k], B = J[l] (Gerade oder Bogen mit Pfeilhöhe |h| ≤ H) trifft
+  // alle Stationen [i0, i1) bis tol“ — dann scheitern Gerade UND Goldener Schnitt sicher (die
+  // Station mit Abstand > tol fällt auch in der gerundeten Rechnung von distToPiece2 durch).
+  // Geometrie: Bögen über derselben Sehne sind Graphen y_h(x) mit 0 ≤ ∂y/∂h ≤ 1 → zwei Bögen liegen
+  // höchstens |Δh| auseinander, ein Bogen mit |h| < L/2 liegt ganz auf EINER Seite der Sehne.
+  // Rundung: distToPiece2 rechnet für fast gerade Bögen mit Radius ≈ L²/(8|h|) — Fehler ≈ 1e-15·
+  // Radius. Darum zwei Regime:
+  //  (1) |h| ≤ H_S (inkl. Gerade): Stück ≤ H_S neben der Sehne, Fehler ≤ 1.25e-7·L² (|h| ≥ 1e-9,
+  //      darunter Gerade) → eine Station mit |y| > tol + H_S + 1e-9 + 1e-6·L² schließt alle aus.
+  //  (2) H_S < |h| ≤ H: Radius ≤ L²/8e-4 → Fehler ≤ ~1e-12·L², Reserve τ0 = tol + 1e-9 + 1e-10·L².
+  //      (a) Zwei Seiten: Stationen > τ0 auf beiden Seiten der Sehne → jeder Bogen verfehlt eine.
+  //      (b) Kreis-Schranke: Mittelpunkt C = M + c·n, R² = L²/4 + c², h ↔ c = (h² − L²/4)/(2h)
+  //          (monoton). Station mit x längs / y quer zur Sehne, P = x² + y² − L²/4: Abstand zum
+  //          VOLLEN Kreis ρ = |P − 2yc| / (|q − C| + R) ≤ Abstand zum Bogen. ρ ≤ τ0 ⇒ |P − 2yc| ≤
+  //          2Rτ0 + τ0² ≤ 2Rτ (τ = τ0(1 + τ0/L), da R ≥ L/2) ⇒ quadratisch in c:
+  //          c ∈ [(P·y − s)/(2(y² − τ²)), (P·y + s)/(2(y² − τ²))], s = τ·√(P² + L²(y² − τ²)).
+  //          Trifft der Schnitt dieser Intervalle die zulässigen c (h ∈ (H_S, H] ⇔ c ∈ (c(H_S), c(H)],
+  //          gespiegelt für h < 0) nicht, verfehlt jeder Bogen eine Station um > τ0.
+  //          Nur gut konditionierte Stationen (|y| > 2τ); Intervalle mit Rundungs-Reserve.
+  const H_S = 1e-4;
+  const provenInfeasible = (i0, i1, A, c, L, n0, n1, H, tol, offMax, offMin) => {
+    const tauS = tol + H_S + 1e-9 + 1e-6 * L * L;                                     // (1)
+    if (!(offMax > tauS || offMin < -tauS)) return false;
+    if (!(H > H_S)) return true;
+    const tau0 = tol + 1e-9 + 1e-10 * L * L;                                           // (2)
+    if (offMax > tau0 && offMin < -tau0) return true;                                  // (a)
+    const L2q = L * L / 4, tau = tau0 * (1 + tau0 / L), t2 = tau * tau;                // (b)
+    const d0 = c[0] / L, d1 = c[1] / L, M0 = A[0] + 0.5 * c[0], M1 = A[1] + 0.5 * c[1];
+    let cLo = -Infinity, cHi = Infinity;
+    for (let i = i0; i < i1; i++) {
+      const y = (X[i] - A[0]) * n0 + (Y[i] - A[1]) * n1;
+      if (!(Math.abs(y) > 2 * tau)) continue;
+      const x = (X[i] - M0) * d0 + (Y[i] - M1) * d1;
+      const P = x * x + y * y - L2q, den = y * y - t2, s = tau * Math.sqrt(P * P + 4 * L2q * den);
+      const c1 = (P * y - s) / (2 * den), c2 = (P * y + s) / (2 * den);
+      const sl = 1e-9 * (Math.abs(c1) + Math.abs(c2) + L + 1);
+      if (c1 - sl > cLo) cLo = c1 - sl;
+      if (c2 + sl < cHi) cHi = c2 + sl;
+      if (cLo > cHi) { work += i - i0 + 1; return true; }
+    }
+    work += i1 - i0;
+    if (!(cHi < Infinity)) return false; // keine Station gut konditioniert → kein Beweis
+    const cOf = (h) => (h * h - L2q) / (2 * h), cS = cOf(H_S), cH = cOf(H); // cS < cH < 0
+    const sl = 1e-9 * (Math.abs(cS) + L + 1);
+    const missPos = cHi < cS - sl || cLo > cH + sl;   // verfehlt (c(H_S), c(H)]   (h > 0)
+    const missNeg = cHi < -cH - sl || cLo > -cS + sl; // verfehlt [−c(H), −c(H_S)) (h < 0)
+    return missPos && missNeg;
+  };
   const out = [];
   let k = 0, tPrev = startT;
   while (k < chain.length) {
+    if (out.length + 1 >= maxPieces) return { tooMany: true };
     let best = null;
     for (let l = chain.length; l > k; l--) {
-      const pts = Q.filter((_, i) => owner[i] >= k && owner[i] < l);
-      const devOf = (pc) => { let m = 0; for (const q of pts) m = Math.max(m, distToPiece2(q, pc)); return m; };
-      // Gerade?
-      const ln = pieceThrough(J[k], J[l], 0);
-      if (ln && devOf(ln) <= tol && kinkOk(ln) && endOk(ln, l)) { best = { pc: ln, l }; break; }
-      // Bogen: Pfeilhöhe h per Goldenem Schnitt (max. Abweichung minimieren)
-      const c = sub2(J[l], J[k]), L = len2(c);
-      if (!(L > 1e-9)) continue;
-      const n = [-c[1] / L, c[0] / L];
-      let H = 0.01; for (const q of pts) H = Math.max(H, Math.abs(dot2(sub2(q, J[k]), n)) * 1.5 + 0.01);
-      H = Math.min(H, L / 2 * 0.999);
-      const f = (h) => { const pc = pieceThrough(J[k], J[l], h); return pc ? devOf(pc) : Infinity; };
-      let lo = -H, hi = H; const gr = (Math.sqrt(5) - 1) / 2;
-      let x1 = hi - gr * (hi - lo), x2 = lo + gr * (hi - lo), f1 = f(x1), f2 = f(x2);
-      for (let it = 0; it < 40; it++) {
-        if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - gr * (hi - lo); f1 = f(x1); }
-        else { lo = x1; x1 = x2; f1 = f2; x2 = lo + gr * (hi - lo); f2 = f(x2); }
+      if (work > SIMPLIFY_BUDGET) return { overBudget: true, work };
+      const i0 = first[k], i1 = first[l], A = J[k], B = J[l];
+      const c = sub2(B, A), L = len2(c);
+      if (!(L > 1e-9)) continue; // (wie früher: Gerade = null, Bogen übersprungen)
+      // Sehnen-Abstände der Stationen: Bogen-Suchbereich H (wie früher) + Seiten-Extrema (Beweis)
+      const n0 = -c[1] / L, n1 = c[0] / L;
+      let H = 0.01, offMax = -Infinity, offMin = Infinity;
+      for (let i = i0; i < i1; i++) {
+        const off = (X[i] - A[0]) * n0 + (Y[i] - A[1]) * n1;
+        H = Math.max(H, Math.abs(off) * 1.5 + 0.01);
+        if (off > offMax) offMax = off;
+        if (off < offMin) offMin = off;
       }
-      const pc = pieceThrough(J[k], J[l], 0.5 * (lo + hi));
-      if (pc && devOf(pc) <= tol && kinkOk(pc) && endOk(pc, l)) { best = { pc, l }; break; }
+      work += i1 - i0;
+      H = Math.min(H, L / 2 * 0.999);
+      if (finite && provenInfeasible(i0, i1, A, c, L, n0, n1, H, tol, offMax, offMin)) {
+        if (l === k + 1) { best = { pc: chain[k], l }; break; }
+        continue;
+      }
+      // Gerade?
+      const ln = pieceThrough(A, B, 0);
+      if (ln && kinkOk(ln) && endOk(ln, l) && devRange(ln, i0, i1, tol, true) <= tol) { best = { pc: ln, l }; break; }
+      // Bogen: Pfeilhöhe h per Goldenem Schnitt (max. Abweichung minimieren)
+      const f = (h, cut, strict) => { const pc = pieceThrough(A, B, h); return pc ? devRange(pc, i0, i1, finite ? cut : Infinity, finite ? strict : true) : Infinity; };
+      let lo = -H, hi = H; const gr = (Math.sqrt(5) - 1) / 2;
+      let x1 = hi - gr * (hi - lo), x2 = lo + gr * (hi - lo), f1 = f(x1, Infinity, true), f2 = f(x2, f1, true);
+      for (let it = 0; it < 40; it++) {
+        const used = it < 39; // die Auswertung der letzten Runde las nie jemand
+        if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - gr * (hi - lo); if (used) f1 = f(x1, f2, false); }
+        else { lo = x1; x1 = x2; f1 = f2; x2 = lo + gr * (hi - lo); if (used) f2 = f(x2, f1, true); }
+      }
+      const pc = pieceThrough(A, B, 0.5 * (lo + hi));
+      if (pc && kinkOk(pc) && endOk(pc, l) && devRange(pc, i0, i1, tol, true) <= tol) { best = { pc, l }; break; }
       if (l === k + 1) { best = { pc: chain[k], l }; break; } // Original-Stück behalten
     }
     cum += kinkOf(tPrev, best.pc.ta); out.push(best.pc); tPrev = best.pc.tb; k = best.l;
   }
-  return out;
+  return { pieces: out, work };
 }
 
 // ── Anker-Kette: CAD-Bahnen aus Geraden und Bögen exakt zurückgewinnen ─────────
@@ -1060,11 +1190,17 @@ function fitTube(T, cand, keyOf, loops) {
   const biarcPieces = chain.length;
   // Fast gerade Bögen (Pfeilhöhe < 0.5 µm) als Geraden — sonst entstehen Tori mit R ≈ 10⁶ mm
   chain = chain.map((pc) => (pc.kind === 'arc' && pc.R * (1 - Math.cos(pc.th / 2)) < 5e-4 ? { kind: 'line', A: pc.A, B: pc.B, ta: norm2(sub2(pc.B, pc.A)), tb: norm2(sub2(pc.B, pc.A)) } : pc));
-  chain = simplifyChain(mergePieces(chain), Q, FIT_TOL, MAX_KINK, chainStart.t);
-  let chainKind = 'Biarc (vereinfacht)';
-  // Alternative: Anker-Kette (exakte Geraden/Bögen, G1) — gewinnt, wenn sie mit weniger Stücken auskommt
+  // Alternative: Anker-Kette (exakte Geraden/Bögen, G1) — gewinnt, wenn sie mit höchstens so vielen
+  // Stücken auskommt wie die vereinfachte Biarc-Kette. Sie wird ZUERST bestimmt, damit die
+  // Vereinfachung abbrechen kann, sobald sie nicht mehr kürzer werden kann (Ergebnis wie früher).
   const anc = fitAnchorChain(Q, { ...chainStart, free: endA.isCircle }, FIT_TOL, 1.5, 1.25 * rProf);
-  if (anc && anc.length <= chain.length) {
+  const simp = simplifyChain(mergePieces(chain), Q, FIT_TOL, MAX_KINK, chainStart.t, anc ? anc.length : Infinity);
+  // Arbeitsbudget überschritten (Sicherheitsnetz, s. simplifyChain): Anker-Kette, falls vorhanden,
+  // sonst bleibt der Kanal facettiert — statt den Worker unabsehbar lange zu blockieren.
+  if (simp.overBudget && !anc) return fail('Bahn-Vereinfachung zu aufwendig', { biarcPieces, work: simp.work });
+  let chainKind = 'Biarc (vereinfacht)';
+  chain = simp.pieces || null; // null: Abbruch (tooMany/overBudget) → nur mit Anker-Kette weiter
+  if (anc && (!chain || anc.length <= chain.length)) {
     chain = mergePieces(anc); chainKind = 'Anker (Geraden/Bögen)';
     if (endA.isCircle && Math.abs(kinkOf(chainStart.t, chain[0].ta)) > 1e-9) {
       // Start-Tangente aus der Anfangs-Geraden → Profil-Neigung γ neu (Profil = Mündungskreis bleibt)
