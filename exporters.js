@@ -651,31 +651,36 @@ export function buildVolumeStepBrepV2(analysis) {
   }
 
   // D-Loch-Schutz (Review-Fund b): alle ECKEN eines D-Lochs (Kreis mit Sehnen-Abflachung) liegen
-  // auf dem Radius — die Punktprüfungen allein sehen die Sehne nicht. Ein echter (voll
-  // tessellierter) Kreis hat aber gleichmäßige Segmentwinkel; die Sehne überspannt ein Mehrfaches
-  // des Medians. Daher: jede Ringkante ≤ SEG_UNIFORM_FACTOR × Median-Segmentwinkel, sonst kein
-  // voller Zylinder. (2.05 statt 2.0: simplifyMesh darf einen Zwischenpunkt entfernt haben →
-  // exakt doppelter Winkel, plus Rundung.)
+  // auf dem Radius — die Punktprüfungen allein sehen die Sehne nicht. Ein echter tessellierter
+  // Kreis hat keine einzelne Kante, die ein Mehrfaches der übrigen überspannt; die Sehne schon.
+  // Bezug ist der WINKEL-GEWICHTETE Median („typische grobe Kante“: die Kanten mindestens dieser
+  // Größe decken die halbe Umrundung ab) — ein einfacher Median kippt bei Netzen mit
+  // abwechselnd langen und kurzen Randkanten (block_with_hole: 179× 1.77° + 179× 0.23°) auf die
+  // kurzen. Regel: größte Kante ≤ SEG_UNIFORM_FACTOR × gewichteter Median und ≤ 45° (≥ 8
+  // Segmente; deckt auch eine Sehne über mehr als die halbe Umrundung ab). (2.05 statt 2.0:
+  // simplifyMesh darf einen Zwischenpunkt entfernt haben → exakt doppelter Winkel, plus Rundung.)
   const SEG_UNIFORM_FACTOR = 2.05;
+  const SEG_ABS_MAX = 45 * Math.PI / 180 + 1e-9;
   const ringAngleUniform = (ring, center, axis) => {
     const n = ring.length;
     if (n < 3) return false;
     const angs = [];
-    let prev = null;
+    let prev = null, total = 0;
     for (let i = 0; i <= n; i++) {
       const w = _sub3(ring[i % n], center), t = _dot3(w, axis);
       const r = [w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t];
       if (prev) {
         // beide Radialvektoren ⟂ Achse → cross·axis = vorzeichenbehafteter Sinus-Anteil
         const ang = Math.abs(Math.atan2(_dot3(_cross3(prev, r), axis), _dot3(prev, r)));
-        if (ang > 1e-9) angs.push(ang); // deckungsgleiche Punkte überspringen
+        if (ang > 1e-9) { angs.push(ang); total += ang; } // deckungsgleiche Punkte überspringen
       }
       prev = r;
     }
     if (angs.length < 3) return false;
-    angs.sort((a, b) => a - b);
-    const med = angs[angs.length >> 1];
-    return med > 0 && angs[angs.length - 1] <= SEG_UNIFORM_FACTOR * med;
+    angs.sort((a, b) => b - a); // absteigend
+    let cum = 0, wMed = angs[angs.length - 1];
+    for (const a of angs) { cum += a; if (cum >= total / 2) { wMed = a; break; } }
+    return angs[0] <= SEG_ABS_MAX && angs[0] <= SEG_UNIFORM_FACTOR * wMed;
   };
 
   // Rand-Loops → 2 koaxiale Rand-Kreise auf dem Primitiv-Zylinder (gemeinsamer Kern von
@@ -685,7 +690,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const axis = _norm3(prim.axis), ap = prim.axisPoint, R = prim.radius;
     const tol = Math.max(0.08, 0.06 * R);
     const refDir = computeRefDir(axis);
-    const rims = [];
+    const meas = [];
     for (const loop of loops) {
       let st = 0; for (const pt of loop) st += _dot3(_sub3(pt, ap), axis);
       const meanT = st / loop.length;
@@ -698,11 +703,20 @@ export function buildVolumeStepBrepV2(analysis) {
         sr += perp;
       }
       if (!ringAngleUniform(loop, center, axis)) return null; // D-Loch (Sehne) → kein Zylinder
-      const rimKey = `${fixZero(center[0], 3)},${fixZero(center[1], 3)},${fixZero(center[2], 3)}|${fixZero(R, 3)}`;
-      // loopR = GEMESSENER Radius des Rand-Loops (Mittel der Achsabstände) — Referenz für den
-      // Direkt-Abgleich; `radius` (Fit des Primitivs) bleibt die Geometrie der Kreiskante.
-      rims.push({ center, axis, radius: R, refDir, rimKey, meanT, loopR: sr / loop.length });
+      meas.push({ center, meanT, loopR: sr / loop.length });
     }
+    // Radius der Kreiskanten: der GEMESSENE Rand-Radius (Mittel der Achsabstände beider Ringe), wenn
+    // beide Ringe übereinstimmen — die Ecken eines tessellierten Kreises liegen exakt auf ihm. Der
+    // Fit des Primitivs enthält an verrundeten Mündungen zusätzlich die ersten, fast senkrechten
+    // Verrundungsfacetten (S1-Körper: Fit R 4.0048 statt 4.0 → Loch 0.12 % zu weit). Weichen die
+    // Ringe voneinander ab, bleibt der Fit (wie bisher). loopR bleibt je Ring die Referenz für den
+    // Direkt-Abgleich.
+    const rTol = Math.max(0.01, 0.002 * R);
+    const Rc = Math.abs(meas[0].loopR - meas[1].loopR) <= rTol ? (meas[0].loopR + meas[1].loopR) / 2 : R;
+    const rims = meas.map(({ center, meanT, loopR }) => ({
+      center, axis, radius: Rc, refDir, meanT, loopR,
+      rimKey: `${fixZero(center[0], 3)},${fixZero(center[1], 3)},${fixZero(center[2], 3)}|${fixZero(Rc, 3)}`,
+    }));
     rims.sort((a, b) => a.meanT - b.meanT); // [unten, oben]
     if (rims[0].rimKey === rims[1].rimKey) return null; // null-Höhe / kollabiert
     return rims;
@@ -765,6 +779,25 @@ export function buildVolumeStepBrepV2(analysis) {
   // des Bohrungskerns z≈0.4/R10 ↔ Mündungskreis z=0/R10.5) → Verrundungsfacetten blieben übrig →
   // Hülle offen → globaler Fallback verwarf auch korrekte v2-Bänder.
   const RIM_AXIAL_TOL = 0.05;
+  // Liegt der Kreis (center, R, ⟂ axis) in der Ebene der Deckfläche, wie assemble() sie emittiert
+  // (PLANE durch fd.centroid, Normale fd.normal)? Strikte Importer prüfen „Rand liegt auf der
+  // Fläche“ (tests/step-strict.mjs: 1e-4 mm). Gefährdet sind Kreise, deren Achse nicht von genau
+  // dieser Deckfläche stammt: Primitiv-Fit (Bestandspfad) oder die Gegenseite im scharfen Pfad
+  // (Parallel-Gate erlaubt ~0.8° → Abweichung R·sin δ). Toleranz: 1e-5 mm bzw. die eigene
+  // Ebenheit der Deckfläche (Float32-Rauschen großer Koordinaten), falls größer — der Kreis darf
+  // nicht schlechter liegen als die Polygon-Punkte, die er ersetzt. Geprüft an 8 Kreispunkten.
+  const CIRCLE_PLANE_TOL = 1e-5; // mm
+  const circleOnDeck = (center, R, axis, fd) => {
+    const n = _norm3(fd.normal), u = computeRefDir(axis), v = _norm3(_cross3(axis, u));
+    let tol = CIRCLE_PLANE_TOL;
+    for (const L of [fd.outer, ...fd.inner]) for (const p of L) tol = Math.max(tol, Math.abs(_dot3(_sub3(p, fd.centroid), n)));
+    for (let k = 0; k < 8; k++) {
+      const a = k * Math.PI / 4, ca = R * Math.cos(a), sa = R * Math.sin(a);
+      const p = [center[0] + u[0] * ca + v[0] * sa, center[1] + u[1] * ca + v[1] * sa, center[2] + u[2] * ca + v[2] * sa];
+      if (!(Math.abs(_dot3(_sub3(p, fd.centroid), n)) <= tol)) return false;
+    }
+    return true;
+  };
   const innerMatchesRim = (loop, normal, rim) => {
     if (Math.abs(_dot3(normal, rim.axis)) < 0.985) return false; // Wand ~⟂ zur Achse (≤10°)
     let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
@@ -837,9 +870,11 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const plan of tentative) {
       const matched = []; const claimed = new Set(); let okAll = true;
       for (const rim of plan.rims) {
-        // (1) direkter Treffer
+        // (1) direkter Treffer — der Kreis muss zudem IN der Ebene der Deckfläche liegen (die
+        // Kreis-Achse ist hier die des Primitiv-Fits; ein leicht gekippter Fit stünde sonst neben
+        // der Deckfläche → strikte Importer verwerfen die Fläche)
         let hit = null;
-        for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim)) { hit = inner; break; } } if (hit) break; }
+        for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd)) { hit = inner; break; } } if (hit) break; }
         if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
         // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX) — nur mit Defeaturing-Toggle
         let cham = null;
@@ -856,6 +891,7 @@ export function buildVolumeStepBrepV2(analysis) {
             // Chamfer-Pfad überall verhinderte.)
             const dz = circ.meanT;
             if (Math.abs(dz) < CHAMFER_MIN || Math.abs(dz) > CHAMFER_MAX) continue;
+            if (!circleOnDeck(circ.center, circ.radius, rim.axis, fd)) continue; // Flach-Kreis in der Deckebene
             cham = { inner, circ, dz }; break;
           }
           if (cham) break;
@@ -1738,6 +1774,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) >= 0) return null; // konvex → keine Bohrung
     }
+    if (!circleOnDeck(c0, R, axis, decks[0].fd) || !circleOnDeck(c1, R, axis, decks[1].fd)) return null;
     const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
     if (rim0.rimKey === rim1.rimKey) return null;
     return {
@@ -1785,12 +1822,12 @@ export function buildVolumeStepBrepV2(analysis) {
   // CYLINDRICAL_SURFACE, wenn beide Rand-Loops EXAKT der AUSSEN-Loop je einer ebenen Deckfläche
   // sind (bei der Bohrung ist es ein Innen-Loop). Dieselben harten Gates wie sharpBorePlan:
   // Ränder eben in der Deckebene, exakt auf dem Kreis, feine und GLEICHMÄSSIGE Segmentwinkel
-  // (D-Wellen-Schutz), volle Umrundung, Wand ⟂ zu den Deckflächen. Liegt ein Rand nicht direkt
-  // auf einer ebenen Deckfläche (Fase/Verrundung an der Außenkante, Zapfen auf einer Platte:
-  // Rand = Innen-Loop), bleibt der Mantel konservativ facettiert — einen Fasen-Kegel-Pfad gibt
-  // es hier bewusst (noch) nicht. Emission in assemble() als EIGENER Block; die Orientierung
-  // wird dort geometrisch hergeleitet (Flächennormale von der Achse weg) und vom Wasserdicht-
-  // Verdikt + occt-Volumen abgesichert.
+  // (D-Wellen-Schutz), volle Umrundung, Wand ⟂ zu den Deckflächen, Kreis in der Deck-Ebene.
+  // Liegt ein Rand nicht direkt auf einer ebenen Deckfläche (Fase/Verrundung an der Außenkante,
+  // Zapfen auf einer Platte: Rand = Innen-Loop), bleibt der Mantel konservativ facettiert — einen
+  // Fasen-Kegel-Pfad gibt es hier bewusst (noch) nicht. Emission in assemble() als EIGENER Block
+  // (same_sense .T., Ränder so, dass die Fläche links liegt); geprüft mit tests/step-strict.mjs
+  // (ohne Heilung) und occt-Volumen gegen den exakten Zylinder (tests/mantle-regression.mjs).
   let mantlePlans = [];
   const sharpMantlePlan = (entry, owners, fdsOfGroup, taken) => {
     const W = new Set();
@@ -1885,6 +1922,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) <= 0) return null; // konkav → Bohrung, kein Mantel
     }
+    if (!circleOnDeck(c0, R, axis, decks[0].fd) || !circleOnDeck(c1, R, axis, decks[1].fd)) return null;
     const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
     if (rim0.rimKey === rim1.rimKey) return null;
     return {
@@ -2119,7 +2157,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
   // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
   const entMark = entities.length, idMark = id;
-  const assemble = (faceDefsArg, plans, tubesArg = []) => {
+  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = []) => {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
@@ -2133,12 +2171,25 @@ export function buildVolumeStepBrepV2(analysis) {
     // Kanal-Mündungen (rimKey 'tube…') bringen ihre Orientierung aus tube-sweep.js mit (.T.).
     const isTubeRim = (rim) => String(rim.rimKey).startsWith('tube');
     const holeLoopForward = (rim, faceNormal) => isTubeRim(rim) || _dot3(rim.axis, faceNormal) < 0;
+    // Außenrand einer Deckfläche (konvexer Mantel): GEGEN den Uhrzeigersinn um die Flächennormale.
+    const outerLoopForward = (rim, faceNormal) => _dot3(rim.axis, faceNormal) > 0;
 
-    // Flachflächen (Innen-Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert).
+    // Flachflächen (Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert: Innen-Loops
+    // an Bohrungen/Kanälen, der Außen-Loop an konvexen Mänteln).
     for (const { outer, inner, normal, centroid } of faceDefsArg) {
-      const outerOe = buildLoopEdges(outer);
-      if (outerOe.length < 3) continue;
-      const bounds = [addFaceOuterBound(addEdgeLoop(outerOe))];
+      let outerBound;
+      if (outer.circleRim) {
+        const rim = outer.circleRim;
+        const ce = getOrCreateCircleEdge(rim.rimKey, rim);
+        const fwd = outerLoopForward(rim, normal);
+        useCircle(rim.rimKey, fwd);
+        outerBound = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)]));
+      } else {
+        const outerOe = buildLoopEdges(outer);
+        if (outerOe.length < 3) continue;
+        outerBound = addFaceOuterBound(addEdgeLoop(outerOe));
+      }
+      const bounds = [outerBound];
       for (const innerLoop of inner) {
         if (innerLoop.circleRim) {
           const rim = innerLoop.circleRim;
@@ -2199,6 +2250,30 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
 
+    // Konvexe Außenmäntel (Welle, Zapfen, Scheiben-Außenwand): wie oben 1 CYLINDRICAL_SURFACE mit
+    // 2 vollen Kreis-Bounds, aber die STEP-Zylindernormale (von der Achse weg) zeigt hier schon aus
+    // dem Material → same_sense .T.. Fläche links vom Rand: am unteren Ende läuft der Rand gegen
+    // den Uhrzeigersinn um die Achse, am oberen im Uhrzeigersinn (Gegenrichtung zum Außenrand der
+    // jeweiligen Deckfläche → je Kreis 1×fwd/1×rev).
+    for (const plan of mantlesArg) {
+      const r0 = plan.rims[0];
+      const ax = r0.axis;
+      const cylSurf = addCylindricalSurface(addAxis2Placement3D(plan.surfCenter, ax, r0.refDir), r0.radius);
+      const tOf = (rim) => _dot3(_sub3(rim.center, plan.surfCenter), ax);
+      const tMid = plan.rims.reduce((s, rim) => s + tOf(rim), 0) / plan.rims.length;
+      const bounds = [];
+      for (let r = 0; r < plan.rims.length; r++) {
+        const rim = plan.rims[r];
+        const ce = getOrCreateCircleEdge(rim.rimKey, rim);
+        const isTop = tOf(rim) > tMid;
+        const fwd = !isTop === (_dot3(rim.axis, ax) > 0);
+        useCircle(rim.rimKey, fwd);
+        const loopId = addEdgeLoop([addOrientedEdge(ce.ecId, fwd)]);
+        bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
+      }
+      faceIds.push(addAdvancedFace(bounds, cylSurf, true));
+    }
+
     // Kanal-Flächenketten (tube-sweep.js): Stück k zwischen Kurve k und k+1. Profil ⟂ Bahn (γ=0):
     // Gerade → CYLINDRICAL_SURFACE, Bogen → TOROIDAL_SURFACE. Profil geneigt (γ≠0, Profilkreis auf
     // der Mündungsfläche skizziert): Gerade → SURFACE_OF_LINEAR_EXTRUSION, Bogen →
@@ -2257,6 +2332,7 @@ export function buildVolumeStepBrepV2(analysis) {
         boundaryEdges: bE, nonManifoldEdges: nmE, orientationDefects: oD,
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
+        mantlesConverted: mantlesArg.length,
         tubesConverted: tubesArg.length,
         tubePieces: tubesArg.reduce((n, tp) => n + tp.spec.pieces.length, 0),
       },
@@ -2305,9 +2381,11 @@ export function buildVolumeStepBrepV2(analysis) {
       return { pts: L, keys, prev, next, edges, dead: null };
     };
     for (const fd of fds) {
-      const outer = mkRec(fd.outer);
-      if (outer.edges < 3) continue;               // assemble() überspringt die ganze Fläche
-      recs.push(outer);
+      if (!fd.outer.circleRim) {                   // Kreis-Außenrand (konvexer Mantel): keine Linien-Kanten
+        const outer = mkRec(fd.outer);
+        if (outer.edges < 3) continue;             // assemble() überspringt die ganze Fläche
+        recs.push(outer);
+      }
       for (const L of fd.inner) {
         if (L.circleRim) continue;
         const r = mkRec(L);
@@ -2384,7 +2462,7 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   const assembleCurrent = () => {
     removeCollinearPoints(faceDefs);
-    const a = assemble(faceDefs, finalPlans, tubePlans);
+    const a = assemble(faceDefs, finalPlans, tubePlans, mantlePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
@@ -2392,9 +2470,10 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   runPipeline(true);
   let asm = assembleCurrent();
-  // Fallback-Stufe 1 (nur mit Toggle): öffnet eine Bohrungs- oder Kanal-Umwandlung die Hülle, ohne
-  // sie neu bauen (Defeaturing bleibt) — sonst verwarf der globale Fallback auch korrekte Bänder/Ecken.
-  if (DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0) && !asm.report.watertight) {
+  // Fallback-Stufe 1 (nur mit Toggle): öffnet eine Bohrungs-, Mantel- oder Kanal-Umwandlung die
+  // Hülle, ohne sie neu bauen (Defeaturing bleibt) — sonst verwarf der globale Fallback auch korrekte
+  // Bänder/Ecken.
+  if (DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0) && !asm.report.watertight) {
     runPipeline(false);
     asm = assembleCurrent();
   }
@@ -2402,7 +2481,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
   // die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung läuft auch
   // hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
-  if ((asm.report.boresConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
+  if ((asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
     const fallbackDefs = buildFaceDefs(null);
     removeCollinearPoints(fallbackDefs);
     asm = assemble(fallbackDefs, []);
