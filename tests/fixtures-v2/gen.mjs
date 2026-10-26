@@ -47,6 +47,21 @@ export const roundedRectProfile = (w, h, Rc, seg) => {
 };
 // L-Profil (Schenkel a×t und t×b) mit einspringender (konkaver) senkrechter Ecke, CCW
 export const lProfile = (a, b, t) => [[0, 0], [a, 0], [a, t], [t, t], [t, b], [0, b]];
+// Rechteck w×h, Unter- und Oberkante als flacher Kreisbogen (Stich f nach außen, seg Segmente); die
+// Ecken bleiben echte Knicke. Kanten 0…seg−1 unten, seg rechts, seg+1…2·seg oben, 2·seg+1 links. CCW
+export const bulgeProfile = (w, h, f, seg) => {
+  const R = ((w / 2) ** 2 + f * f) / (2 * f), cy = R - f, pm = Math.asin(w / 2 / R), pts = [];
+  for (let k = 0; k <= seg; k++) { const ph = -pm + 2 * pm * k / seg; pts.push([w / 2 + R * Math.sin(ph), cy - R * Math.cos(ph)]); }
+  for (let k = 0; k <= seg; k++) { const ph = -pm + 2 * pm * k / seg; pts.push([w / 2 - R * Math.sin(ph), h - cy + R * Math.cos(ph)]); }
+  return pts;
+};
+// Langloch-Profil (Stadion): Geraden der Länge len, Halbkreise R (seg Segmente je Halbkreis), CCW
+export const slotProfile = (len, R, seg) => {
+  const pts = [];
+  for (let k = 0; k <= seg; k++) { const a = -PI / 2 + PI * k / seg; pts.push([R + len + R * Math.cos(a), R + R * Math.sin(a)]); }
+  for (let k = 0; k <= seg; k++) { const a = PI / 2 + PI * k / seg; pts.push([R + R * Math.cos(a), R + R * Math.sin(a)]); }
+  return pts;
+};
 
 export const polyArea = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; s += p[0] * q[1] - q[0] * p[1]; } return s / 2; };
 
@@ -774,6 +789,55 @@ export const BODIES = [
     desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben nur an den zwei Kanten der einspringenden Ecke',
     columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [2, 3] } })],
     expect: { mode: 'sharp', bands: 1 },
+  },
+  // ── Offene Bänder mit MEHREREN getrennten verrundeten Abschnitten in einem Loop (je Abschnitt ein Band) ──
+  {
+    id: 'd6', extra: true, file: 'v2_x_offen_zwei_trapez',
+    desc: 'Trapez (0,0)-(40,0)-(30,30)-(0,30) ×10, Verrundung r=1.5 oben an Unter- UND Oberkante (zwei Abschnitte, gemeinsame schräge Stirnwand) — v1 kollabierte die Rundung früher auf der schrägen Stirnwand (ΔV +25 mm³, wasserdicht)',
+    columns: [plate([[0, 0], [40, 0], [30, 30], [0, 30]], 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 2] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd7', extra: true, file: 'v2_x_offen_zwei_l',
+    desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben an zwei getrennten Abschnitten (Unterkante + rechte Kante, Innenkanten der Ecke)',
+    columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 1, 3, 4] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd8', extra: true, file: 'v2_x_offen_zwei_boegen',
+    desc: 'Block 40×30 mit flach gebogener Unter-/Oberkante (Stich 3, 8 Seg.) ×10, Verrundung r=1 oben entlang beider Bögen (zwei Abschnitte, Bogen-Wände), Seiten scharf',
+    columns: [plate(bulgeProfile(40, 30, 3, 8), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd9', extra: true, file: 'v2_x_offen_vier_achteck',
+    desc: 'Achteck (Umkreis R15) ×10, Verrundung r=1 oben an jeder zweiten Kante (vier Abschnitte, Stirnwände unter 45°)',
+    columns: [plate(Array.from({ length: 8 }, (_, i) => { const a = (2 * PI * i) / 8 + PI / 8; return [20 + 15 * Math.cos(a), 15 + 15 * Math.sin(a)]; }), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1, N: 8, edges: [0, 2, 4, 6] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd11', extra: true, file: 'v2_x_offen_einspringend',
+    desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben ab der EINSPRINGENDEN Ecke (Innenkante senkrecht + obere Kante): die Stirnwand läuft dort über die Ecke hinaus — der geschärfte Rand darf nicht auf derselben Geraden zurücklaufen (Spitze der Breite 0, step-strict loop-fold)',
+    columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [3, 4] } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'd12', extra: true, file: 'v2_x_halbkreis_hoch',
+    desc: 'Profil Rechteck 20×20 mit Halbkreis R10 oben (15 Seg., Facette genau bei 90°), 40 hoch, OHNE Rundung — von der Seitenwand aus sah der Viertelbogen bis zur 90°-Facette wie eine Rundung aus (Basis 69260ed: eckig, ΔV +1719 mm³ bei dichter Hülle)',
+    columns: [plate([[0, 0], [20, 0], ...Array.from({ length: 16 }, (_, k) => { const a = PI * k / 15; return [10 + 10 * Math.cos(a), 20 + 10 * Math.sin(a)]; })], 40, { kind: 'sharp' })],
+    expect: { mode: 'skip' },
+  },
+  {
+    id: 'd13', extra: true, file: 'v2_x_offen_duenn',
+    desc: 'dünne Platte 40×30×2.5, Verrundung r=1 oben UND unten an zwei Kanten (offene Bänder, Steg 0.5 mm = 0.5·r — Untergrenze der Seitenwand-Schranke)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 2.5, null, { bottom: { kind: 'round', r: 1, N: 8, edges: [0, 1] }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd10', extra: true, file: 'v2_x_langloch_hoch',
+    desc: 'Langloch-Zapfen (Geraden 20, Halbkreise R5 mit 16 Seg.) 40 hoch, OHNE Rundung — eine Halbkreis-Facette hat links und rechts tangentiale Nachbarn (zwei „Abschnitte“), ein Viertelkreis bis zur 90°-Facette sähe aus wie eine Rundung: die Enden müssen rund bleiben',
+    columns: [plate(slotProfile(20, 5, 16), 40, { kind: 'sharp' })],
+    expect: { mode: 'skip' },
   },
   // ── Bandform (ersetzt die Schranken RMAX/Bandfläche ≤ 3× Deckfläche): Kuppe ≠ Verrundung ──
   {
