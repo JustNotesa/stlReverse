@@ -829,8 +829,8 @@ export const BODIES = [
   },
   {
     id: 'd13', extra: true, file: 'v2_x_offen_duenn',
-    desc: 'dünne Platte 40×30×2.5, Verrundung r=1 oben UND unten an zwei Kanten (offene Bänder, Steg 0.5 mm = 0.5·r — Untergrenze der Seitenwand-Schranke)',
-    columns: [plate(rectProfile(0, 0, 40, 30), 2.5, null, { bottom: { kind: 'round', r: 1, N: 8, edges: [0, 1] }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1] } })],
+    desc: 'dünne Platte 40×30×2.6, Verrundung r=1 oben UND unten an zwei Kanten (offene Bänder, Steg 0.6 mm = 0.6·r — knapp über der Seitenwand-Schranke 0.5)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 2.6, null, { bottom: { kind: 'round', r: 1, N: 8, edges: [0, 1] }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1] } })],
     expect: { mode: 'sharp' },
   },
   {
