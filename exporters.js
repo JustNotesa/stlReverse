@@ -656,11 +656,16 @@ export function buildVolumeStepBrepV2(analysis) {
   // Bezug ist der WINKEL-GEWICHTETE Median („typische grobe Kante“: die Kanten mindestens dieser
   // Größe decken die halbe Umrundung ab) — ein einfacher Median kippt bei Netzen mit
   // abwechselnd langen und kurzen Randkanten (block_with_hole: 179× 1.77° + 179× 0.23°) auf die
-  // kurzen. Regel: größte Kante ≤ SEG_UNIFORM_FACTOR × gewichteter Median und ≤ 45° (≥ 8
-  // Segmente; deckt auch eine Sehne über mehr als die halbe Umrundung ab). (2.05 statt 2.0:
-  // simplifyMesh darf einen Zwischenpunkt entfernt haben → exakt doppelter Winkel, plus Rundung.)
+  // kurzen. Regel: größte Kante ≤ SEG_UNIFORM_FACTOR × gewichteter Median und ≤ SEG_MAX_DEG
+  // (deckt auch eine Sehne über mehr als die halbe Umrundung ab). (2.05 statt 2.0: simplifyMesh
+  // darf einen Zwischenpunkt entfernt haben → exakt doppelter Winkel, plus Rundung.)
+  // SEG_MAX_DEG = 42° (≥ 9 Segmente) gilt für ALLE Kreis-Pfade (Bohrung scharf/Bestand, Mantel):
+  // ein reguläres Achteck (45°) bleibt ein Achteck — als Kreis wäre die Fläche um 10 % falsch, und
+  // der Grenzfall „genau 45°“ entschied sonst das Float-Rauschen. Feinere Tessellierungen (CAD-
+  // Exporte: ≥ 16 Segmente, alle Samples ≤ 11.25°) sind nicht betroffen.
   const SEG_UNIFORM_FACTOR = 2.05;
-  const SEG_ABS_MAX = 45 * Math.PI / 180 + 1e-9;
+  const SEG_MAX_DEG = 42;
+  const SEG_ABS_MAX = SEG_MAX_DEG * Math.PI / 180;
   const ringAngleUniform = (ring, center, axis) => {
     const n = ring.length;
     if (n < 3) return false;
@@ -1660,7 +1665,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // leicht geneigte Verrundungsfacetten (eBike: R 2.51 statt 2.50, Höhe zu kurz). Das Primitiv
   // bestimmt nur, welche Flächen zur Lochwand gehören. Bohrungen, die hier nicht passen (Mündung
   // nicht geschärft, echte Fase, …), nimmt danach der bisherige Pfad (direkt/Fase).
-  const SHARP_SEG_MAX_DEG = 45;     // Rand-Polygon: jede Kante überspannt ≤ 45° (≥ 8 Segmente)
+  const SHARP_SEG_MAX_DEG = SEG_MAX_DEG; // Rand-Polygon: jede Kante überspannt ≤ 42° (≥ 9 Segmente, s. ringAngleUniform)
   const SHARP_WALL_AXIS_COS = 0.02; // Wand-Normale ⟂ Achse (≤ ~1.1°)
   const loopEdgeCount = (L) => { let n = 0; for (let i = 0; i < L.length; i++) if (vtxKey(L[i]) !== vtxKey(L[(i + 1) % L.length])) n++; return n; };
   // Kreis-Fit (Kåsa, algebraisch) der Punkte in der Ebene ⟂ axis → { center, radius } | null
@@ -1934,16 +1939,41 @@ export function buildVolumeStepBrepV2(analysis) {
   // zur analytischen Kreis-Kante (fd.outer.circleRim). Scheitert ein Gate → facettiert lassen.
   const convertMantles = () => {
     if (!mantleById.size) return;
-    const owners = new Map();       // Kante → [{ fi, loop }]
     const fdsOfGroup = new Map();   // Gruppe → [fi]
     faceDefs.forEach((fd, fi) => {
       if (fd.group) { let a = fdsOfGroup.get(fd.group); if (!a) { a = []; fdsOfGroup.set(fd.group, a); } a.push(fi); }
+    });
+    // Rand-Punkte der Kandidaten-Wände (Kanten genau 1× in der Wand) — die Kanten-Eigentümer werden
+    // nur für Kanten zwischen solchen Punkten gesammelt (sharpMantlePlan fragt nur Randkanten ab).
+    // Spart bei großen Netzen den vollständigen Kanten-Index (Stress-Rohr, Toggle AUS: ~80 ms).
+    const rimVerts = new Set();
+    for (const entry of mantleById.values()) {
+      const cnt = new Map();
+      for (const g of entry.groups) {
+        for (const fi of (fdsOfGroup.get(g) || [])) {
+          const fd = faceDefs[fi];
+          for (const L of [fd.outer, ...fd.inner]) {
+            for (let i = 0; i < L.length; i++) {
+              const a = L[i], b = L[(i + 1) % L.length];
+              if (vtxKey(a) === vtxKey(b)) continue;
+              const k = edgeKeyFn(a, b), e = cnt.get(k);
+              if (e) e.n++; else cnt.set(k, { n: 1, a, b });
+            }
+          }
+        }
+      }
+      for (const e of cnt.values()) if (e.n === 1) { rimVerts.add(vtxKey(e.a)); rimVerts.add(vtxKey(e.b)); }
+    }
+    if (!rimVerts.size) return;
+    const owners = new Map();       // Randkante → [{ fi, loop }]
+    faceDefs.forEach((fd, fi) => {
       for (const L of [fd.outer, ...fd.inner]) {
         if (L.circleRim) continue;
         for (let i = 0; i < L.length; i++) {
           const a = L[i], b = L[(i + 1) % L.length];
-          if (vtxKey(a) === vtxKey(b)) continue;
-          const k = edgeKeyFn(a, b);
+          const ka = vtxKey(a), kb = vtxKey(b);
+          if (ka === kb || !rimVerts.has(ka) || !rimVerts.has(kb)) continue;
+          const k = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
           let o = owners.get(k); if (!o) { o = []; owners.set(k, o); }
           o.push({ fi, loop: L });
         }
@@ -2482,6 +2512,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // wasserdicht ist, sonst die Basislinie (deren Entitäten dafür gesichert und zurückgeschrieben werden).
   const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.tubesConverted > 0 ||
     filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0;
+  let fallbackStage = 0, stage1Tried = false;
   if (converted && !asm.report.watertight) {
     const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0);
     const fallbackDefs = buildFaceDefs(null);
@@ -2490,12 +2521,13 @@ export function buildVolumeStepBrepV2(analysis) {
     base.report.filletsDefeatured = 0;
     base.report.bandsDefeatured = 0;
     base.report.cornersDefeatured = 0;
-    asm = base;
+    asm = base; fallbackStage = 2;
     if (stage1 && base.report.watertight) {
+      stage1Tried = true;
       const baseEntities = entities.slice(entMark), baseId = id;
       runPipeline(false);
       const s1 = assembleCurrent();
-      if (s1.report.watertight) asm = s1;
+      if (s1.report.watertight) { asm = s1; fallbackStage = 1; }
       else {
         entities.length = entMark;
         for (const e of baseEntities) entities.push(e);
@@ -2503,6 +2535,10 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
   }
+  // Befund für Tests/Diagnose: 0 = keine Fallback-Stufe, 1 = ohne Bohrungen/Mäntel/Kanäle neu
+  // gebaut, 2 = facettierte Basislinie; stage1Tried = Stufe 1 wurde überhaupt versucht.
+  asm.report.fallbackStage = fallbackStage;
+  asm.report.stage1Tried = stage1Tried;
   const allFaceIds = asm.faceIds;
   const report = asm.report;
   if (allFaceIds.length < 2) return null;
