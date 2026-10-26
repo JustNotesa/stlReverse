@@ -102,17 +102,24 @@ function pcaAxis(normals) {
 }
 
 // Kåsa-Kreis-Fit in der Ebene ⊥ axis → { center3d, radius, meanDev, maxDev }.
+// Heiße Schleifen skalar ausgerollt (identische Operations-Reihenfolge wie die frühere
+// Vektor-Helfer-Fassung, nur ohne Array-Allokationen pro Punkt — Ergebnisse bit-identisch).
 function fitCircleInPlane(points, axis) {
-  const c0 = centroid3(points);
+  // centroid3 inline (gleiche Summen-Reihenfolge)
+  let sx = 0, sy = 0, sz0 = 0;
+  for (const p of points) { sx += p[0]; sy += p[1]; sz0 += p[2]; }
+  const is = 1 / (points.length || 1);
+  const c0x = sx * is, c0y = sy * is, c0z = sz0 * is;
   let u = cross(axis, [1, 0, 0]);
   if (len(u) < 1e-6) u = cross(axis, [0, 1, 0]);
   u = norm(u);
   const v = norm(cross(axis, u));
+  const ux = u[0], uy = u[1], uz = u[2], vx = v[0], vy = v[1], vz = v[2];
   let Sxx=0, Sxy=0, Syy=0, Sx=0, Sy=0, Sxz=0, Syz=0, Sz=0;
   const N = points.length;
   for (const p of points) {
-    const d = sub(p, c0);
-    const x = dot(d, u), y = dot(d, v), z = x*x + y*y;
+    const dx = p[0] - c0x, dy = p[1] - c0y, dz = p[2] - c0z;          // sub(p, c0)
+    const x = dx*ux + dy*uy + dz*uz, y = dx*vx + dy*vy + dz*vz, z = x*x + y*y; // dot(d,u), dot(d,v)
     Sxx+=x*x; Sxy+=x*y; Syy+=y*y; Sx+=x; Sy+=y; Sxz+=x*z; Syz+=y*z; Sz+=z;
   }
   const sol = solve3([[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,N]], [-Sxz,-Syz,-Sz]);
@@ -121,9 +128,18 @@ function fitCircleInPlane(points, axis) {
   const r2 = cu*cu + cv*cv - sol[2];
   if (r2 <= 0) return null;
   const radius = Math.sqrt(r2);
-  const center = add(c0, add(scale(u, cu), scale(v, cv)));
+  // add(c0, add(scale(u, cu), scale(v, cv))) inline
+  const ctx = c0x + (ux*cu + vx*cv), cty = c0y + (uy*cu + vy*cv), ctz = c0z + (uz*cu + vz*cv);
+  const center = [ctx, cty, ctz];
+  const ax0 = axis[0], ax1 = axis[1], ax2 = axis[2];
   let sum = 0, mx = 0;
-  for (const p of points) { const d = Math.abs(perpDist(p, center, axis) - radius); sum += d; if (d > mx) mx = d; }
+  for (const p of points) {
+    // perpDist(p, center, axis) inline
+    const wx = p[0] - ctx, wy = p[1] - cty, wz = p[2] - ctz;
+    const along = wx*ax0 + wy*ax1 + wz*ax2;
+    const d = Math.abs(Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along) - radius);
+    sum += d; if (d > mx) mx = d;
+  }
   return { center, radius, meanDev: sum / N, maxDev: mx };
 }
 
@@ -133,15 +149,30 @@ function fitCircleRobust(points, axis) {
   let fit = fitCircleInPlane(points, axis);
   if (!fit) return null;
   let pts = points;
+  const ax0 = axis[0], ax1 = axis[1], ax2 = axis[2];
   for (let it = 0; it < 4 && pts.length >= 8; it++) {
-    const res = pts.map(p => ({ p, r: Math.abs(perpDist(p, fit.center, axis) - fit.radius) }));
-    res.sort((a, b) => a.r - b.r);
-    const med = res[Math.floor(res.length / 2)].r || 1e-9;
+    // Residuen skalar in Typed-Array statt {p,r}-Objekten; stabiler Index-Sort liefert
+    // exakt dieselbe Permutation wie der frühere Objekt-Sort (gleiche Vergleichswerte).
+    const n = pts.length;
+    const rs = new Float64Array(n);
+    const cx = fit.center[0], cy = fit.center[1], cz = fit.center[2], R = fit.radius;
+    for (let i = 0; i < n; i++) {
+      const p = pts[i];
+      const wx = p[0] - cx, wy = p[1] - cy, wz = p[2] - cz;         // perpDist inline
+      const along = wx*ax0 + wy*ax1 + wz*ax2;
+      rs[i] = Math.abs(Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along) - R);
+    }
+    const idx = new Array(n);
+    for (let i = 0; i < n; i++) idx[i] = i;
+    idx.sort((a, b) => rs[a] - rs[b]);
+    const med = rs[idx[Math.floor(n / 2)]] || 1e-9;
     // Residual-Schwelle relativ zum MEDIAN (unempfindlich gegen einen kontaminierten Startfit);
     // mit Mindest-Behalt, damit echte Kreis-Punkte nicht weggetrimmt werden.
-    let keep = res.filter(x => x.r <= 2.5 * med).map(x => x.p);
-    const floor = Math.max(6, Math.floor(res.length * 0.5));
-    if (keep.length < floor) keep = res.slice(0, floor).map(x => x.p);
+    const lim = 2.5 * med;
+    let keep = [];
+    for (let i = 0; i < n; i++) { const j = idx[i]; if (rs[j] <= lim) keep.push(pts[j]); }
+    const floor = Math.max(6, Math.floor(n * 0.5));
+    if (keep.length < floor) { keep = []; for (let i = 0; i < floor; i++) keep.push(pts[idx[i]]); }
     const f2 = fitCircleInPlane(keep, axis);
     if (!f2) break;
     const converged = Math.abs(f2.radius - fit.radius) < 1e-4 * (fit.radius || 1);
@@ -157,8 +188,13 @@ function coverageDeg(points, axisPoint, axis) {
   if (len(u) < 1e-6) u = cross(axis, [0, 1, 0]);
   u = norm(u);
   const v = norm(cross(axis, u));
+  const px = axisPoint[0], py = axisPoint[1], pz = axisPoint[2];
+  const ux = u[0], uy = u[1], uz = u[2], vx = v[0], vy = v[1], vz = v[2];
   const ang = [];
-  for (const p of points) { const d = sub(p, axisPoint); ang.push(Math.atan2(dot(d, v), dot(d, u))); }
+  for (const p of points) {
+    const dx = p[0] - px, dy = p[1] - py, dz = p[2] - pz;           // sub(p, axisPoint)
+    ang.push(Math.atan2(dx*vx + dy*vy + dz*vz, dx*ux + dy*uy + dz*uz));
+  }
   if (ang.length < 2) return 0;
   ang.sort((a, b) => a - b);
   let maxGap = (ang[0] + 2 * Math.PI) - ang[ang.length - 1];
@@ -204,7 +240,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       const v0 = vs[t*3], v1 = vs[t*3+1], v2 = vs[t*3+2];
       const n = triNormal(v0, v1, v2);
       if (!n) continue;
-      tris.push({ n, v: [v0, v1, v2], c: centroid3([v0, v1, v2]), g: gi });
+      tris.push({ n, v: [v0, v1, v2], g: gi }); // (Schwerpunkt wurde nie gelesen — entfällt)
       for (const vv of [v0, v1, v2]) for (let k = 0; k < 3; k++) { if (vv[k] < mn[k]) mn[k] = vv[k]; if (vv[k] > mx[k]) mx[k] = vv[k]; }
     }
   });
@@ -219,12 +255,17 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // in der Adjazenz (Grow musste den Umweg nehmen, Naht-Seeds sahen ihren Wand-Nachbarn nicht).
   const fz = (x) => { const s = x.toFixed(4); return s === '-0.0000' ? '0.0000' : s; };
   const key  = (p) => `${fz(p[0])},${fz(p[1])},${fz(p[2])}`;
-  const ekey = (a, b) => { const ka = key(a), kb = key(b); return ka < kb ? ka + '|' + kb : kb + '|' + ka; };
+  // Vertex-Keys je Facette EINMAL berechnen und cachen (toFixed ist teuer) — Adjazenz,
+  // hingeAxis und isPrism vergleichen danach nur noch gecachte Strings (gleiche Werte).
+  const triKeys = new Array(T);
   const edgeToTris = new Map();
   for (let i = 0; i < T; i++) {
     const v = tris[i].v;
+    const tk = [key(v[0]), key(v[1]), key(v[2])];
+    triKeys[i] = tk;
     for (let k = 0; k < 3; k++) {
-      const e = ekey(v[k], v[(k + 1) % 3]);
+      const ka = tk[k], kb = tk[(k + 1) % 3];
+      const e = ka < kb ? ka + '|' + kb : kb + '|' + ka;           // ekey inline
       let a = edgeToTris.get(e); if (!a) { a = []; edgeToTris.set(e, a); }
       a.push(i);
     }
@@ -232,10 +273,16 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const adj = Array.from({ length: T }, () => []);
   for (const t of edgeToTris.values()) if (t.length === 2) { adj[t[0]].push(t[1]); adj[t[1]].push(t[0]); }
 
-  // Helfer: passt ein Dreieck auf das Zylinder-Modell?
+  // Helfer: passt ein Dreieck auf das Zylinder-Modell? (skalar, allokationsfrei)
   const fits = (ti, ap, ax, r, distTol) => {
-    if (Math.abs(dot(tris[ti].n, ax)) > AXIS_PERP) return false;   // Normale ⊥ Achse?
-    for (const vv of tris[ti].v) if (Math.abs(perpDist(vv, ap, ax) - r) > distTol) return false;
+    const t = tris[ti], n = t.n;
+    if (Math.abs(n[0]*ax[0] + n[1]*ax[1] + n[2]*ax[2]) > AXIS_PERP) return false; // Normale ⊥ Achse?
+    const px = ap[0], py = ap[1], pz = ap[2], ax0 = ax[0], ax1 = ax[1], ax2 = ax[2];
+    for (const vv of t.v) {
+      const wx = vv[0] - px, wy = vv[1] - py, wz = vv[2] - pz;     // perpDist inline
+      const along = wx*ax0 + wy*ax1 + wz*ax2;
+      if (Math.abs(Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along) - r) > distTol) return false;
+    }
     return true;
   };
   // Wiederverwendbarer Scratch-Puffer (Generations-Stempel) statt new Uint8Array(T) pro Aufruf.
@@ -297,9 +344,12 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // entlang der Achse nicht systematisch driften (Kegel: d(radius)/d(achse) = tan(Halbwinkel)).
     {
       let st = 0, sp = 0, stt = 0, stp = 0; const nN = verts.length;
+      const ccx = circ.center[0], ccy = circ.center[1], ccz = circ.center[2];
+      const ax0 = axis[0], ax1 = axis[1], ax2 = axis[2];
       for (const vv of verts) {
-        const t = dot(sub(vv, circ.center), axis);
-        const pd = perpDist(vv, circ.center, axis);
+        const wx = vv[0] - ccx, wy = vv[1] - ccy, wz = vv[2] - ccz; // sub(vv, center)
+        const t = wx*ax0 + wy*ax1 + wz*ax2;                        // = dot(w, axis) = along
+        const pd = Math.hypot(wx - ax0*t, wy - ax1*t, wz - ax2*t); // perpDist inline
         st += t; sp += pd; stt += t * t; stp += t * pd;
       }
       const den = nN * stt - st * st;
@@ -347,14 +397,31 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // Achse exakt (Wand-Normalen liegen in der Ebene ⊥ Achse) → Iteration entkippt die Achse.
     let m = modelIn;
     for (let it = 0; it < 4; it++) {
-      const rhos = regionArr.map(ti => {
-        let s = 0; for (const vv of tris[ti].v) s += perpDist(vv, m.axisPoint, m.axis);
-        return { ti, rho: s / 3, s: Math.abs(dot(tris[ti].n, m.axis)) };
-      }).sort((a, b) => a.rho - b.rho);
-      const rhoLo = rhos[Math.floor(rhos.length * 0.1)].rho;
+      // ρ/s skalar in Typed-Arrays + stabiler Index-Sort (statt Objekt-map+sort) —
+      // gleiche Werte, gleiche Permutation, gleiche cand-Reihenfolge.
+      const nR = regionArr.length;
+      const rho = new Float64Array(nR), sN = new Float64Array(nR);
+      const apx = m.axisPoint[0], apy = m.axisPoint[1], apz = m.axisPoint[2];
+      const ax0 = m.axis[0], ax1 = m.axis[1], ax2 = m.axis[2];
+      for (let i = 0; i < nR; i++) {
+        const t = tris[regionArr[i]];
+        let s = 0;
+        for (const vv of t.v) {
+          const wx = vv[0] - apx, wy = vv[1] - apy, wz = vv[2] - apz; // perpDist inline
+          const along = wx*ax0 + wy*ax1 + wz*ax2;
+          s += Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along);
+        }
+        rho[i] = s / 3;
+        sN[i] = Math.abs(t.n[0]*ax0 + t.n[1]*ax1 + t.n[2]*ax2);
+      }
+      const idx = new Array(nR);
+      for (let i = 0; i < nR; i++) idx[i] = i;
+      idx.sort((a, b) => rho[a] - rho[b]);
+      const rhoLo = rho[idx[Math.floor(nR * 0.1)]];
       const band = Math.max(0.12, 0.05 * rhoLo);
+      const lim = rhoLo + band;
       const cand = [];
-      for (const x of rhos) { if (x.rho <= rhoLo + band && x.s <= AXIS_PERP) cand.push(x.ti); }
+      for (let i = 0; i < nR; i++) { const j = idx[i]; if (rho[j] <= lim && sN[j] <= AXIS_PERP) cand.push(regionArr[j]); }
       if (cand.length < MIN_TRIS) return null;
       const { axis: ax, values } = pcaAxis(cand.map(ti => tris[ti].n));
       const verts = [];
@@ -365,9 +432,20 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     }
     // Finaler harter Kern: streng ⊥ Normale + enges Radial-Residuum (schließt Fillet-Ringe aus).
     const tol = Math.max(0.08, 0.05 * m.radius);
-    const hard = regionArr.filter(ti =>
-      Math.abs(dot(tris[ti].n, m.axis)) <= CORE_PERP &&
-      tris[ti].v.every(vv => Math.abs(perpDist(vv, m.axisPoint, m.axis) - m.radius) <= tol));
+    const hpx = m.axisPoint[0], hpy = m.axisPoint[1], hpz = m.axisPoint[2];
+    const ha0 = m.axis[0], ha1 = m.axis[1], ha2 = m.axis[2], hr = m.radius;
+    const hard = [];
+    for (const ti of regionArr) {                                   // filter(⊥ && every) inline
+      const t = tris[ti];
+      if (Math.abs(t.n[0]*ha0 + t.n[1]*ha1 + t.n[2]*ha2) > CORE_PERP) continue;
+      let ok = true;
+      for (const vv of t.v) {
+        const wx = vv[0] - hpx, wy = vv[1] - hpy, wz = vv[2] - hpz; // perpDist inline
+        const along = wx*ha0 + wy*ha1 + wz*ha2;
+        if (Math.abs(Math.hypot(wx - ha0*along, wy - ha1*along, wz - ha2*along) - hr) > tol) { ok = false; break; }
+      }
+      if (ok) hard.push(ti);
+    }
     if (hard.length < MIN_TRIS) return null;
     const { axis: axH, values: valsH } = pcaAxis(hard.map(ti => tris[ti].n));
     const vertsH = [];
@@ -380,9 +458,15 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // (sphere_full/hemisphere dürfen nicht als „Bohrung" durchrutschen).
     const coreSet = new Set(hard);
     let s = 0, n = 0;
+    const gpx = mH.axisPoint[0], gpy = mH.axisPoint[1], gpz = mH.axisPoint[2];
+    const ga0 = mH.axis[0], ga1 = mH.axis[1], ga2 = mH.axis[2], gr = mH.radius;
     for (const ti of regionArr) {
       if (coreSet.has(ti)) continue;
-      for (const vv of tris[ti].v) { s += perpDist(vv, mH.axisPoint, mH.axis) - mH.radius; n++; }
+      for (const vv of tris[ti].v) {
+        const wx = vv[0] - gpx, wy = vv[1] - gpy, wz = vv[2] - gpz; // perpDist inline
+        const along = wx*ga0 + wy*ga1 + wz*ga2;
+        s += Math.hypot(wx - ga0*along, wy - ga1*along, wz - ga2*along) - gr; n++;
+      }
     }
     // Schwelle bewusst ENG (0.4% von r): ein Kugel-Äquator-Band krümmt nur sanft nach innen
     // (−1.8% bei ±15°-Band) und rutschte bei 2% durch (sphere_full-Regression). Loch-Mündungs-
@@ -479,15 +563,20 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // fernen Ebenen-Eckpunkte im Radius-Fit (Platte mit r=3-Verrundungen → Schein-Zylinder
   // R≈19.5, empirisch belegt).
   const profW = (ti, ax) => {
-    const d = norm(cross(ax, tris[ti].n));
+    const t = tris[ti], n = t.n;
+    // norm(cross(ax, n)) inline (gleiche Reihenfolge: len||1, dann Division je Komponente)
+    let dx = ax[1]*n[2] - ax[2]*n[1], dy = ax[2]*n[0] - ax[0]*n[2], dz = ax[0]*n[1] - ax[1]*n[0];
+    const l = Math.hypot(dx, dy, dz) || 1;
+    dx /= l; dy /= l; dz /= l;
     let lo = Infinity, hi = -Infinity;
-    for (const vv of tris[ti].v) { const t = dot(vv, d); if (t < lo) lo = t; if (t > hi) hi = t; }
+    for (const vv of t.v) { const s = vv[0]*dx + vv[1]*dy + vv[2]*dz; if (s < lo) lo = s; if (s > hi) hi = s; }
     return hi - lo;
   };
-  // Scharnier-Achse = gemeinsame Kante ti↔m (normiert) oder null.
+  // Scharnier-Achse = gemeinsame Kante ti↔m (normiert) oder null. Vergleich über gecachte Keys.
   const hingeAxis = (ti, m) => {
+    const ka = triKeys[ti], kb = triKeys[m], va = tris[ti].v;
     const sh = [];
-    for (const va of tris[ti].v) for (const vb of tris[m].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { if (ka[i] === kb[j]) { sh.push(va[i]); break; } }
     return sh.length === 2 ? norm(sub(sh[1], sh[0])) : null;
   };
   // Gekrümmte Nachbarn (Knick im Saat-Fenster), kleinster Knick zuerst; stabil sortiert →
@@ -550,8 +639,9 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       for (const m of adj[ti]) {
         if (m < ti || !inR.has(m)) continue;
         if (dot(tris[ti].n, tris[m].n) > Math.cos(0.5 * DEG)) continue; // koplanar (Diagonale)
+        const ka = triKeys[ti], kb = triKeys[m], va = tris[ti].v;
         const sh = [];
-        for (const va of tris[ti].v) for (const vb of tris[m].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { if (ka[i] === kb[j]) { sh.push(va[i]); break; } }
         if (sh.length !== 2) return false;
         const e = norm(sub(sh[1], sh[0]));
         if (Math.abs(dot(e, ax)) < Math.cos(2 * DEG)) return false;
