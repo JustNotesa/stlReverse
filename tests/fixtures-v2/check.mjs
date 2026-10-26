@@ -24,7 +24,8 @@
 // Kanten-Rundung weg, Kegel bleibt) oder ein Kegel durch die Rundung (Chamfer-Pfad), s. cskVariant.
 //   exakt     → OK
 //   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der STEP-Unsicherheit 0.01 mm)
-//   sonst     → Soll-Verletzung (Exit 1); ebenso: offen, occt-Fehler, Fallback verwirft v2, zu langsam
+//   sonst     → Soll-Verletzung (Exit 1); ebenso: offen, occt-Fehler, Fallback verwirft v2, zu langsam,
+//               Verstoß gegen strikte Importer (tests/step-strict.mjs inkl. loop-fold, je Export AUS/AN/v2)
 // Passt eine Variante, die nicht das Ziel ist (Rundung bleibt, obwohl v2 schärfen sollte) →
 // Hinweis „Ziel verfehlt“ (sicher, aber nicht defeaturet).
 //
@@ -40,6 +41,7 @@ import { buildNormalGroups } from '../../region-growing.js';
 import { unifyCoplanarGroups } from '../../face-unification.js';
 import { recognizePrimitives } from '../../primitive-recognition.js';
 import { detectTubes } from '../../tube-sweep.js';
+import { checkStepStrict } from '../step-strict.mjs';
 
 // Anderen Exporter prüfen (z. B. einen Fix-Kandidaten): V2_EXPORTER=/pfad/exporters.js node …
 const { buildVolumeStepBrepV2 } = await import(process.env.V2_EXPORTER ? pathToFileURL(process.env.V2_EXPORTER).href : '../../exporters.js');
@@ -491,6 +493,7 @@ async function checkBody(body, occt) {
       cones: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
       occt: !!parsed.success, occtMeshes: (parsed.meshes || []).length,
       volume: otris.length ? meshVolume(otris) : NaN, otris, step: res.step,
+      strict: checkStepStrict(res.step, { folds: true }).violations.map((v) => v.kind),
     };
   };
   const off = run(false, groups);
@@ -506,6 +509,7 @@ async function checkBody(body, occt) {
     if (r.orientationDefects) out.problems.push(`${tag}: ${r.orientationDefects} Orientierungsfehler`);
     if (!r.occt) out.problems.push(`${tag}: occt parst die STEP nicht`);
     else if (r.occtMeshes !== 1) out.problems.push(`${tag}: occt liefert ${r.occtMeshes} Netze statt 1`);
+    if (r.strict.length) { const k = {}; for (const v of r.strict) k[v] = (k[v] || 0) + 1; out.problems.push(`${tag}: ${r.strict.length} Verstöße gegen strikte Importer (tests/step-strict.mjs) ${JSON.stringify(k)}`); }
   }
   const limit = Math.max(EXPORT_LIMIT_MS, 3 * (off.exportMs || 0));
   if (on.exported && on.exportMs > limit) out.problems.push(`AN: Export ${Math.round(on.exportMs)} ms > ${Math.round(limit)} ms`);
