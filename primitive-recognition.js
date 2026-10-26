@@ -30,6 +30,9 @@ const dot   = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
 const len   = (a) => Math.hypot(a[0], a[1], a[2]);
 const norm  = (a) => { const l = len(a) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+// centroid3 und perpDist (unten) sind die REFERENZ-Formeln der heißen Schleifen: dort skalar
+// „inline“ ausgerollt (gleiche Operations-Reihenfolge → bit-gleiche Ergebnisse), hier nur noch
+// als Definition dessen, was die Kommentare „centroid3/perpDist inline“ meinen.
 const centroid3 = (vs) => { let c = [0,0,0]; for (const v of vs) c = add(c, v); return scale(c, 1 / (vs.length || 1)); };
 
 const triNormal = (v0, v1, v2) => {
@@ -90,79 +93,243 @@ function eigenSym3(M) {
 }
 
 // Achse = Eigenvektor des kleinsten Eigenwerts der Normalen-Kovarianz (Normalen ⊥ Achse).
-function pcaAxis(normals) {
-  const M = [[0,0,0],[0,0,0],[0,0,0]];
-  for (const n of normals) {
-    M[0][0]+=n[0]*n[0]; M[0][1]+=n[0]*n[1]; M[0][2]+=n[0]*n[2];
-    M[1][1]+=n[1]*n[1]; M[1][2]+=n[1]*n[2]; M[2][2]+=n[2]*n[2];
+// Summen skalar (gleiche Reihenfolge wie M[i][j] += …) — `normals` ist eine Liste von
+// Normalen ODER (mit `getN`) eine Facetten-Liste, deren Normale getN(ti) liefert.
+function pcaAxis(normals, getN) {
+  let m00 = 0, m01 = 0, m02 = 0, m11 = 0, m12 = 0, m22 = 0;
+  for (const e of normals) {
+    const n = getN ? getN(e) : e;
+    m00+=n[0]*n[0]; m01+=n[0]*n[1]; m02+=n[0]*n[2];
+    m11+=n[1]*n[1]; m12+=n[1]*n[2]; m22+=n[2]*n[2];
   }
-  M[1][0]=M[0][1]; M[2][0]=M[0][2]; M[2][1]=M[1][2];
-  const e = eigenSym3(M);
+  const e = eigenSym3([[m00, m01, m02], [m01, m11, m12], [m02, m12, m22]]);
   return { axis: norm(e.vectors[0]), values: e.values };
 }
 
-// Kåsa-Kreis-Fit in der Ebene ⊥ axis → { center3d, radius, meanDev, maxDev }.
-function fitCircleInPlane(points, axis) {
-  const c0 = centroid3(points);
+// Orthonormalbasis (u, v) der Ebene ⊥ axis — dieselbe Konstruktion wie überall in diesem Modul.
+function planeBasis(axis) {
   let u = cross(axis, [1, 0, 0]);
   if (len(u) < 1e-6) u = cross(axis, [0, 1, 0]);
   u = norm(u);
-  const v = norm(cross(axis, u));
+  return [u, norm(cross(axis, u))];
+}
+
+// ── Flache Punkt-Puffer ─────────────────────────────────────────────────────
+// Die heißen Fits arbeiten auf einem Float64Array (x,y,z je Punkt) und Index-Listen statt auf
+// Arrays von Vertex-Referenzen: kein Pointer-Chasing, keine Push-Arrays pro Trimm-Schritt.
+// Alle Summen laufen in DERSELBEN Punkt-Reihenfolge wie früher → Ergebnisse bit-identisch.
+let IDENT = new Uint32Array(0);           // 0,1,2,… (wächst bei Bedarf, nur gelesen)
+function identIdx(n) {
+  if (IDENT.length < n) { IDENT = new Uint32Array(Math.max(n, 2 * IDENT.length)); for (let i = 0; i < IDENT.length; i++) IDENT[i] = i; }
+  return IDENT;
+}
+
+// Kåsa-Kern in der Ebene ⊥ axis (Basis u, v) über die Punkte P[ids[0..m-1]] →
+// { center, radius } OHNE Abweichungs-Statistik (identische Arithmetik wie früher
+// fitCircleInPlane, nur flach).
+function circleCoreFlat(P, ids, m, u, v) {
+  // centroid3 inline (gleiche Summen-Reihenfolge)
+  let sx = 0, sy = 0, sz0 = 0;
+  for (let i = 0; i < m; i++) { const o = 3 * ids[i]; sx += P[o]; sy += P[o + 1]; sz0 += P[o + 2]; }
+  const is = 1 / (m || 1);
+  const c0x = sx * is, c0y = sy * is, c0z = sz0 * is;
+  const ux = u[0], uy = u[1], uz = u[2], vx = v[0], vy = v[1], vz = v[2];
   let Sxx=0, Sxy=0, Syy=0, Sx=0, Sy=0, Sxz=0, Syz=0, Sz=0;
-  const N = points.length;
-  for (const p of points) {
-    const d = sub(p, c0);
-    const x = dot(d, u), y = dot(d, v), z = x*x + y*y;
+  for (let i = 0; i < m; i++) {
+    const o = 3 * ids[i];
+    const dx = P[o] - c0x, dy = P[o + 1] - c0y, dz = P[o + 2] - c0z;   // sub(p, c0)
+    const x = dx*ux + dy*uy + dz*uz, y = dx*vx + dy*vy + dz*vz, z = x*x + y*y; // dot(d,u), dot(d,v)
     Sxx+=x*x; Sxy+=x*y; Syy+=y*y; Sx+=x; Sy+=y; Sxz+=x*z; Syz+=y*z; Sz+=z;
   }
-  const sol = solve3([[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,N]], [-Sxz,-Syz,-Sz]);
+  const sol = solve3([[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,m]], [-Sxz,-Syz,-Sz]);
   if (!sol) return null;
   const cu = -sol[0]/2, cv = -sol[1]/2;
   const r2 = cu*cu + cv*cv - sol[2];
   if (r2 <= 0) return null;
   const radius = Math.sqrt(r2);
-  const center = add(c0, add(scale(u, cu), scale(v, cv)));
+  // add(c0, add(scale(u, cu), scale(v, cv))) inline
+  return { center: [c0x + (ux*cu + vx*cv), c0y + (uy*cu + vy*cv), c0z + (uz*cu + vz*cv)], radius };
+}
+
+// Kåsa-Kreis-Fit über ALLE n Punkte von P → { center, radius, meanDev, maxDev }.
+// Optional `pdOut`/`alOut` (Float64Array ≥ n): je Punkt Achsabstand (perpDist) und Achs-
+// Koordinate relativ zum Fit-Mittelpunkt — exakt die Werte, die validateRegion für den
+// Konizitäts-Test noch einmal berechnet hätte (gleiche Formel, gleiche Operanden).
+function fitCircleFlat(P, n, axis, pdOut, alOut) {
+  const [u, v] = planeBasis(axis);
+  const f = circleCoreFlat(P, identIdx(n), n, u, v);
+  if (!f) return null;
+  const center = f.center, radius = f.radius;
+  const ctx = center[0], cty = center[1], ctz = center[2];
+  const ax0 = axis[0], ax1 = axis[1], ax2 = axis[2];
   let sum = 0, mx = 0;
-  for (const p of points) { const d = Math.abs(perpDist(p, center, axis) - radius); sum += d; if (d > mx) mx = d; }
-  return { center, radius, meanDev: sum / N, maxDev: mx };
+  for (let i = 0; i < n; i++) {
+    // perpDist(p, center, axis) inline
+    const o = 3 * i;
+    const wx = P[o] - ctx, wy = P[o + 1] - cty, wz = P[o + 2] - ctz;
+    const along = wx*ax0 + wy*ax1 + wz*ax2;
+    const pd = Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along);
+    if (pdOut) { pdOut[i] = pd; alOut[i] = along; }
+    const d = Math.abs(pd - radius);
+    sum += d; if (d > mx) mx = d;
+  }
+  return { center, radius, meanDev: sum / n, maxDev: mx };
+}
+
+// ── Stabiler Index-Sort über nicht-negative Doubles ─────────────────────────
+// Liefert die Indizes 0..n−1 aufsteigend nach keys[0..n−1], bei Gleichstand in Index-
+// Reihenfolge — exakt die Permutation des früheren stabilen Comparator-Sorts
+// idx.sort((a, b) => keys[a] − keys[b]). Für größere n per LSD-Radix über die IEEE-754-
+// Bitmuster (nicht-negative Doubles: Bitmuster ordnungs-monoton und wert-eindeutig) —
+// ohne JS-Comparator, der auf unsortierten Eingaben ~10× teurer war. −0 wird auf +0
+// normiert (der Comparator behandelt beide gleich); NaN/∞/negative Schlüssel (kommen hier
+// nicht vor) und Big-Endian-Plattformen nehmen sicherheitshalber den Comparator-Weg.
+const LITTLE_ENDIAN = new Uint8Array(new Float64Array([1]).buffer)[7] === 0x3f;
+function sortIdxStable(keys, n) {
+  let ok = true;
+  for (let i = 0; i < n; i++) {
+    const k = keys[i];
+    if (!(k >= 0) || k === Infinity) { ok = false; break; }
+    if (k === 0) keys[i] = 0; // −0 → +0
+  }
+  // Kleine oder schon fast sortierte Eingaben (Trimm-Iterationen ≥ 2: Reihenfolge der Vor-
+  // Iteration) per Einfüge-Sortierung — mit Verschiebe-Deckel, sonst Radix.
+  if (ok) {
+    const ins = insertionIdx(keys, n, n <= 64 ? Infinity : 4 * n);
+    if (ins) return ins;
+    if (LITTLE_ENDIAN) return n >= 2000 ? radixIdx11(keys, n) : radixIdx8(keys, n);
+  }
+  const idx = new Array(n);
+  for (let i = 0; i < n; i++) idx[i] = i;
+  idx.sort((a, b) => keys[a] - keys[b]);
+  return idx;
+}
+// Stabile Einfüge-Sortierung der Indizes (Gleichstand: Eingabe-Reihenfolge); null, sobald mehr als
+// maxMoves Verschiebungen nötig wären (ungeordnete Eingabe → Radix ist dann billiger).
+function insertionIdx(keys, n, maxMoves) {
+  const a = new Uint32Array(n);
+  let moves = 0;
+  for (let i = 0; i < n; i++) {
+    const k = keys[i];
+    let j = i - 1;
+    while (j >= 0 && keys[a[j]] > k) { a[j + 1] = a[j]; j--; }
+    moves += i - 1 - j;
+    if (moves > maxMoves) return null;
+    a[j + 1] = i;
+  }
+  return a;
+}
+// 8 Byte-Stellen, alle Histogramme in EINEM Durchlauf; Stellen, in denen alle Schlüssel
+// übereinstimmen, werden übersprungen (No-op-Pass). Stabil (Scatter in Eingabe-Reihenfolge).
+function radixIdx8(keys, n) {
+  const kb = new Uint8Array(keys.buffer, keys.byteOffset, n * 8);
+  const H = new Uint32Array(8 * 256);
+  for (let i = 0; i < n; i++) { const o = 8 * i; for (let d = 0; d < 8; d++) H[(d << 8) + kb[o + d]]++; }
+  let a = null, b = new Uint32Array(n);
+  for (let d = 0; d < 8; d++) {
+    const base = d << 8;
+    if (H[base + kb[d]] === n) continue;   // alle im Eimer des ersten Schlüssels → No-op
+    let sum = 0;
+    for (let k = 0; k < 256; k++) { const c = H[base + k]; H[base + k] = sum; sum += c; }
+    if (a === null) { for (let i = 0; i < n; i++) b[H[base + kb[8 * i + d]]++] = i; a = b; b = new Uint32Array(n); }
+    else { for (let i = 0; i < n; i++) { const j = a[i]; b[H[base + kb[8 * j + d]]++] = j; } const t = a; a = b; b = t; }
+  }
+  if (a === null) { a = new Uint32Array(n); for (let i = 0; i < n; i++) a[i] = i; }
+  return a;
+}
+// Wie radixIdx8, aber 6 Stellen à 11 Bit (Bits 0–10, 11–21, 22–32, 33–43, 44–54, 55–63)
+// über die beiden 32-Bit-Hälften je Schlüssel — für größere n schneller (weniger Pässe).
+const digit11 = (lo, hi, d) => {
+  switch (d) {
+    case 0: return lo & 2047;
+    case 1: return (lo >>> 11) & 2047;
+    case 2: return ((lo >>> 22) | (hi << 10)) & 2047;
+    case 3: return (hi >>> 1) & 2047;
+    case 4: return (hi >>> 12) & 2047;
+    default: return hi >>> 23;
+  }
+};
+function radixIdx11(keys, n) {
+  const kw = new Uint32Array(keys.buffer, keys.byteOffset, n * 2); // [lo, hi] je Double
+  const H = new Uint32Array(6 * 2048);
+  for (let i = 0; i < n; i++) {
+    const lo = kw[2 * i], hi = kw[2 * i + 1];
+    H[lo & 2047]++; H[2048 + ((lo >>> 11) & 2047)]++; H[4096 + (((lo >>> 22) | (hi << 10)) & 2047)]++;
+    H[6144 + ((hi >>> 1) & 2047)]++; H[8192 + ((hi >>> 12) & 2047)]++; H[10240 + (hi >>> 23)]++;
+  }
+  let a = null, b = new Uint32Array(n);
+  for (let d = 0; d < 6; d++) {
+    const base = d * 2048;
+    if (H[base + digit11(kw[0], kw[1], d)] === n) continue;   // alle im selben Eimer → No-op
+    let sum = 0;
+    for (let k = 0; k < 2048; k++) { const c = H[base + k]; H[base + k] = sum; sum += c; }
+    if (a === null) { for (let i = 0; i < n; i++) b[H[base + digit11(kw[2 * i], kw[2 * i + 1], d)]++] = i; a = b; b = new Uint32Array(n); }
+    else { for (let i = 0; i < n; i++) { const j = a[i]; b[H[base + digit11(kw[2 * j], kw[2 * j + 1], d)]++] = j; } const t = a; a = b; b = t; }
+  }
+  if (a === null) { a = new Uint32Array(n); for (let i = 0; i < n; i++) a[i] = i; }
+  return a;
 }
 
 // Robuster Kreis-Fit: getrimmte Kåsa-Iteration — verwirft Ausreißer (z. B. tangentiale
 // Ebenen-Punkte, die nicht auf dem Zylinder liegen) und konvergiert auf den Mehrheits-Kreis.
-function fitCircleRobust(points, axis) {
-  let fit = fitCircleInPlane(points, axis);
+// Eingabe: n Punkte flach in P. Rückgabe { center, radius } (die Abweichungs-Statistik der
+// Zwischen-Fits las nie ein Aufrufer). Residuen nur EINMAL je Iteration (früher zusätzlich als
+// Abweichungs-Durchlauf in fitCircleInPlane), Trimm-Mengen als Index-Listen in derselben
+// Reihenfolge wie früher die Punkt-Listen → bit-identische Fits.
+function fitCircleRobustFlat(P, n, axis) {
+  const [u, v] = planeBasis(axis);
+  let ids = identIdx(n), m = n;
+  let fit = circleCoreFlat(P, ids, m, u, v);
   if (!fit) return null;
-  let pts = points;
-  for (let it = 0; it < 4 && pts.length >= 8; it++) {
-    const res = pts.map(p => ({ p, r: Math.abs(perpDist(p, fit.center, axis) - fit.radius) }));
-    res.sort((a, b) => a.r - b.r);
-    const med = res[Math.floor(res.length / 2)].r || 1e-9;
+  const ax0 = axis[0], ax1 = axis[1], ax2 = axis[2];
+  const rs = new Float64Array(n); // Residuen-Puffer (m schrumpft je Iteration)
+  for (let it = 0; it < 4 && m >= 8; it++) {
+    const cx = fit.center[0], cy = fit.center[1], cz = fit.center[2], R = fit.radius;
+    for (let i = 0; i < m; i++) {
+      const o = 3 * ids[i];
+      const wx = P[o] - cx, wy = P[o + 1] - cy, wz = P[o + 2] - cz;   // perpDist inline
+      const along = wx*ax0 + wy*ax1 + wz*ax2;
+      rs[i] = Math.abs(Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along) - R);
+    }
+    const idx = sortIdxStable(rs, m);
+    const med = rs[idx[Math.floor(m / 2)]] || 1e-9;
     // Residual-Schwelle relativ zum MEDIAN (unempfindlich gegen einen kontaminierten Startfit);
     // mit Mindest-Behalt, damit echte Kreis-Punkte nicht weggetrimmt werden.
-    let keep = res.filter(x => x.r <= 2.5 * med).map(x => x.p);
-    const floor = Math.max(6, Math.floor(res.length * 0.5));
-    if (keep.length < floor) keep = res.slice(0, floor).map(x => x.p);
-    const f2 = fitCircleInPlane(keep, axis);
+    const lim = 2.5 * med;
+    const keep = new Uint32Array(m);
+    let k = 0;
+    for (let i = 0; i < m; i++) { const j = idx[i]; if (rs[j] <= lim) keep[k++] = ids[j]; }
+    const floor = Math.max(6, Math.floor(m * 0.5));
+    if (k < floor) { k = 0; for (let i = 0; i < floor; i++) keep[k++] = ids[idx[i]]; }
+    const f2 = circleCoreFlat(P, keep, k, u, v);
     if (!f2) break;
     const converged = Math.abs(f2.radius - fit.radius) < 1e-4 * (fit.radius || 1);
-    fit = f2; pts = keep;
+    fit = f2; ids = keep; m = k;
     if (converged) break;
   }
   return fit;
 }
 
-// Winkel-Abdeckung um die Achse = 360° − größte Lücke (über Punkt-Winkel).
-function coverageDeg(points, axisPoint, axis) {
-  let u = cross(axis, [1, 0, 0]);
-  if (len(u) < 1e-6) u = cross(axis, [0, 1, 0]);
-  u = norm(u);
-  const v = norm(cross(axis, u));
-  const ang = [];
-  for (const p of points) { const d = sub(p, axisPoint); ang.push(Math.atan2(dot(d, v), dot(d, u))); }
-  if (ang.length < 2) return 0;
-  ang.sort((a, b) => a - b);
-  let maxGap = (ang[0] + 2 * Math.PI) - ang[ang.length - 1];
-  for (let i = 1; i < ang.length; i++) { const g = ang[i] - ang[i - 1]; if (g > maxGap) maxGap = g; }
+// Winkel-Abdeckung um die Achse = 360° − größte Lücke (über Punkt-Winkel), n Punkte flach in P.
+// Sortiert wird ein Float64Array nativ (numerisch aufsteigend): dieselbe Werte-Folge wie der
+// frühere Comparator-Sort (nur ±0 könnten die Plätze tauschen — Lücken/Ergebnis identisch).
+function coverageDegFlat(P, n, axisPoint, axis) {
+  const [u, v] = planeBasis(axis);
+  const px = axisPoint[0], py = axisPoint[1], pz = axisPoint[2];
+  const ux = u[0], uy = u[1], uz = u[2], vx = v[0], vy = v[1], vz = v[2];
+  if (n < 2) return 0;
+  let ang = new Float64Array(n), nan = false;
+  for (let i = 0; i < n; i++) {
+    const o = 3 * i;
+    const dx = P[o] - px, dy = P[o + 1] - py, dz = P[o + 2] - pz;   // sub(p, axisPoint)
+    const a = Math.atan2(dx*vx + dy*vy + dz*vz, dx*ux + dy*uy + dz*uz);
+    if (a !== a) nan = true;
+    ang[i] = a;
+  }
+  if (nan) ang = Array.from(ang).sort((a, b) => a - b); // (kommt nicht vor) — exakt wie früher
+  else ang.sort();
+  let maxGap = (ang[0] + 2 * Math.PI) - ang[n - 1];
+  for (let i = 1; i < n; i++) { const g = ang[i] - ang[i - 1]; if (g > maxGap) maxGap = g; }
   return (2 * Math.PI - maxGap) / DEG;
 }
 
@@ -204,7 +371,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       const v0 = vs[t*3], v1 = vs[t*3+1], v2 = vs[t*3+2];
       const n = triNormal(v0, v1, v2);
       if (!n) continue;
-      tris.push({ n, v: [v0, v1, v2], c: centroid3([v0, v1, v2]), g: gi });
+      tris.push({ n, v: [v0, v1, v2], g: gi }); // (Schwerpunkt wurde nie gelesen — entfällt)
       for (const vv of [v0, v1, v2]) for (let k = 0; k < 3; k++) { if (vv[k] < mn[k]) mn[k] = vv[k]; if (vv[k] > mx[k]) mx[k] = vv[k]; }
     }
   });
@@ -213,18 +380,39 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const diag = len(sub(mx, mn)) || 1;
   const MAX_RADIUS = opts.maxRadius ?? diag; // Zylinder größer als das Bauteil ist unplausibel
 
+  // Facetten-Ecken flach (9 Werte je Facette) — Quelle für die flachen Fit-Puffer.
+  const TV = new Float64Array(9 * T);
+  for (let i = 0; i < T; i++) {
+    const v = tris[i].v, o = 9 * i;
+    for (let k = 0; k < 3; k++) { const vv = v[k]; TV[o + 3 * k] = vv[0]; TV[o + 3 * k + 1] = vv[1]; TV[o + 3 * k + 2] = vv[2]; }
+  }
+  // Ecken einer Facetten-Liste in Listen-Reihenfolge flach packen (= früher verts.push(…v)).
+  const packTris = (list) => {
+    const n = list.length, P = new Float64Array(9 * n);
+    for (let i = 0; i < n; i++) { const s = 9 * list[i], o = 9 * i; for (let k = 0; k < 9; k++) P[o + k] = TV[s + k]; }
+    return P;
+  };
+  const triN = (ti) => tris[ti].n;
+  const pcaTris = (list) => pcaAxis(list, triN);
+  const robustFitTris = (list, axis) => fitCircleRobustFlat(packTris(list), 3 * list.length, axis);
+
   // 2) Manifold-Adjazenz
   // −0/+0 vereinheitlichen (wie fixZero im Exporter): an der Naht rotationssymmetrischer
   // Teile (θ = 0/2π) liefert sin(2π) ≈ −2e-16 → "-0.0000" ≠ "0.0000" → die Naht-Kante fehlte
   // in der Adjazenz (Grow musste den Umweg nehmen, Naht-Seeds sahen ihren Wand-Nachbarn nicht).
   const fz = (x) => { const s = x.toFixed(4); return s === '-0.0000' ? '0.0000' : s; };
   const key  = (p) => `${fz(p[0])},${fz(p[1])},${fz(p[2])}`;
-  const ekey = (a, b) => { const ka = key(a), kb = key(b); return ka < kb ? ka + '|' + kb : kb + '|' + ka; };
+  // Vertex-Keys je Facette EINMAL berechnen und cachen (toFixed ist teuer) — Adjazenz,
+  // hingeAxis und isPrism vergleichen danach nur noch gecachte Strings (gleiche Werte).
+  const triKeys = new Array(T);
   const edgeToTris = new Map();
   for (let i = 0; i < T; i++) {
     const v = tris[i].v;
+    const tk = [key(v[0]), key(v[1]), key(v[2])];
+    triKeys[i] = tk;
     for (let k = 0; k < 3; k++) {
-      const e = ekey(v[k], v[(k + 1) % 3]);
+      const ka = tk[k], kb = tk[(k + 1) % 3];
+      const e = ka < kb ? ka + '|' + kb : kb + '|' + ka;           // ekey inline
       let a = edgeToTris.get(e); if (!a) { a = []; edgeToTris.set(e, a); }
       a.push(i);
     }
@@ -232,10 +420,16 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const adj = Array.from({ length: T }, () => []);
   for (const t of edgeToTris.values()) if (t.length === 2) { adj[t[0]].push(t[1]); adj[t[1]].push(t[0]); }
 
-  // Helfer: passt ein Dreieck auf das Zylinder-Modell?
+  // Helfer: passt ein Dreieck auf das Zylinder-Modell? (skalar, allokationsfrei)
   const fits = (ti, ap, ax, r, distTol) => {
-    if (Math.abs(dot(tris[ti].n, ax)) > AXIS_PERP) return false;   // Normale ⊥ Achse?
-    for (const vv of tris[ti].v) if (Math.abs(perpDist(vv, ap, ax) - r) > distTol) return false;
+    const t = tris[ti], n = t.n;
+    if (Math.abs(n[0]*ax[0] + n[1]*ax[1] + n[2]*ax[2]) > AXIS_PERP) return false; // Normale ⊥ Achse?
+    const px = ap[0], py = ap[1], pz = ap[2], ax0 = ax[0], ax1 = ax[1], ax2 = ax[2];
+    for (const vv of t.v) {
+      const wx = vv[0] - px, wy = vv[1] - py, wz = vv[2] - pz;     // perpDist inline
+      const along = wx*ax0 + wy*ax1 + wz*ax2;
+      if (Math.abs(Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along) - r) > distTol) return false;
+    }
     return true;
   };
   // Wiederverwendbarer Scratch-Puffer (Generations-Stempel) statt new Uint8Array(T) pro Aufruf.
@@ -278,9 +472,10 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // extrahierten Zylinder-Kern (Rettungspfad für verrundungs-umgebene Bohrungen).
   const validateRegion = (regionArr, modelIn) => {
     if (regionArr.length < MIN_TRIS) return { ok: false, reason: 'tris' };
-    const verts = [];
-    for (const ti of regionArr) for (const vv of tris[ti].v) verts.push(vv);
-    const circ = fitCircleInPlane(verts, modelIn.axis);
+    const nV = 3 * regionArr.length;
+    const verts = packTris(regionArr);                 // flach, gleiche Reihenfolge wie früher
+    const pdA = new Float64Array(nV), alA = new Float64Array(nV);
+    const circ = fitCircleFlat(verts, nV, modelIn.axis, pdA, alA);
     if (!circ) return { ok: false, reason: 'fit' };
     const r = circ.radius;
     if (!(r >= MIN_RADIUS && r <= MAX_RADIUS)) return { ok: false, reason: 'radius' };
@@ -295,18 +490,19 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     if (Math.sqrt(s2 / regionArr.length) > AXIS_RMS_MAX) return { ok: false, reason: 'axisrms' };
     // Konizitäts-Test (global, fängt auch dünne Kegel-Scheiben): der Abstand zur Achse darf
     // entlang der Achse nicht systematisch driften (Kegel: d(radius)/d(achse) = tan(Halbwinkel)).
+    // Achs-Koordinate t und Achsabstand pd je Vertex relativ zu circ.center sind exakt die
+    // Werte aus dem Abweichungs-Durchlauf des Fits (gleiche Formel/Operanden) — wiederverwendet.
     {
-      let st = 0, sp = 0, stt = 0, stp = 0; const nN = verts.length;
-      for (const vv of verts) {
-        const t = dot(sub(vv, circ.center), axis);
-        const pd = perpDist(vv, circ.center, axis);
+      let st = 0, sp = 0, stt = 0, stp = 0; const nN = nV;
+      for (let i = 0; i < nV; i++) {
+        const t = alA[i], pd = pdA[i];
         st += t; sp += pd; stt += t * t; stp += t * pd;
       }
       const den = nN * stt - st * st;
       const slope = Math.abs(den) > 1e-9 ? (nN * stp - st * sp) / den : 0;
       if (Math.abs(slope) > TAPER_MAX) return { ok: false, reason: 'taper' };
     }
-    const cov = coverageDeg(verts, axisPoint, axis);
+    const cov = coverageDegFlat(verts, nV, axisPoint, axis);
     if (cov < MIN_COV) return { ok: false, reason: 'coverage' };
     const full = cov >= FULL_COV;
     // Krümmungs-Rand-Test für TEIL-Zylinder (Fillets): müssen von EBENEN Flächen begrenzt sein,
@@ -346,43 +542,88 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // findet die Wand trotzdem; die PCA einer beliebigen WAND-Teilmenge liefert die wahre
     // Achse exakt (Wand-Normalen liegen in der Ebene ⊥ Achse) → Iteration entkippt die Achse.
     let m = modelIn;
+    const nR = regionArr.length;
+    const rho = new Float64Array(nR), sN = new Float64Array(nR);
+    let prevCand = null;
     for (let it = 0; it < 4; it++) {
-      const rhos = regionArr.map(ti => {
-        let s = 0; for (const vv of tris[ti].v) s += perpDist(vv, m.axisPoint, m.axis);
-        return { ti, rho: s / 3, s: Math.abs(dot(tris[ti].n, m.axis)) };
-      }).sort((a, b) => a.rho - b.rho);
-      const rhoLo = rhos[Math.floor(rhos.length * 0.1)].rho;
+      // ρ/s skalar in Typed-Arrays + stabiler Index-Sort (statt Objekt-map+sort) —
+      // gleiche Werte, gleiche Permutation, gleiche cand-Reihenfolge.
+      const apx = m.axisPoint[0], apy = m.axisPoint[1], apz = m.axisPoint[2];
+      const ax0 = m.axis[0], ax1 = m.axis[1], ax2 = m.axis[2];
+      for (let i = 0; i < nR; i++) {
+        const ti = regionArr[i], o = 9 * ti;
+        let s = 0;
+        for (let k = 0; k < 9; k += 3) {
+          const wx = TV[o + k] - apx, wy = TV[o + k + 1] - apy, wz = TV[o + k + 2] - apz; // perpDist inline
+          const along = wx*ax0 + wy*ax1 + wz*ax2;
+          s += Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along);
+        }
+        rho[i] = s / 3;
+        const n = tris[ti].n;
+        sN[i] = Math.abs(n[0]*ax0 + n[1]*ax1 + n[2]*ax2);
+      }
+      const idx = sortIdxStable(rho, nR);
+      const rhoLo = rho[idx[Math.floor(nR * 0.1)]];
       const band = Math.max(0.12, 0.05 * rhoLo);
+      const lim = rhoLo + band;
       const cand = [];
-      for (const x of rhos) { if (x.rho <= rhoLo + band && x.s <= AXIS_PERP) cand.push(x.ti); }
+      for (let i = 0; i < nR; i++) { const j = idx[i]; if (rho[j] <= lim && sN[j] <= AXIS_PERP) cand.push(regionArr[j]); }
       if (cand.length < MIN_TRIS) return null;
-      const { axis: ax, values } = pcaAxis(cand.map(ti => tris[ti].n));
-      const verts = [];
-      for (const ti of cand) for (const vv of tris[ti].v) verts.push(vv);
-      const circ = fitCircleRobust(verts, ax);
+      // Gleiche Kandidaten-Liste (Elemente UND Reihenfolge) wie in der Vor-Iteration → PCA und
+      // Fit lieferten exakt das aktuelle m erneut (= Fixpunkt, s.u.) → ohne die Fits abbrechen.
+      if (prevCand && prevCand.length === cand.length) {
+        let same = true;
+        for (let i = 0; i < cand.length; i++) if (prevCand[i] !== cand[i]) { same = false; break; }
+        if (same) break;
+      }
+      prevCand = cand;
+      const { axis: ax, values } = pcaTris(cand);
+      const circ = robustFitTris(cand, ax);
       if (!circ || !(circ.radius >= MIN_RADIUS && circ.radius <= MAX_RADIUS)) return null;
-      m = { axis: ax, axisPoint: circ.center, radius: circ.radius, circ, values };
+      // Fixpunkt: Die Iteration liest von m nur axis + axisPoint. Liefert sie exakt dieselben
+      // Werte zurück, rechnen alle weiteren Iterationen bit-genau dasselbe → abbrechen
+      // (gleiches Ergebnis, ohne die restlichen Fits).
+      const c = circ.center, fixed = ax[0] === ax0 && ax[1] === ax1 && ax[2] === ax2 &&
+        c[0] === apx && c[1] === apy && c[2] === apz;
+      m = { axis: ax, axisPoint: c, radius: circ.radius, circ, values };
+      if (fixed) break;
     }
     // Finaler harter Kern: streng ⊥ Normale + enges Radial-Residuum (schließt Fillet-Ringe aus).
     const tol = Math.max(0.08, 0.05 * m.radius);
-    const hard = regionArr.filter(ti =>
-      Math.abs(dot(tris[ti].n, m.axis)) <= CORE_PERP &&
-      tris[ti].v.every(vv => Math.abs(perpDist(vv, m.axisPoint, m.axis) - m.radius) <= tol));
+    const hpx = m.axisPoint[0], hpy = m.axisPoint[1], hpz = m.axisPoint[2];
+    const ha0 = m.axis[0], ha1 = m.axis[1], ha2 = m.axis[2], hr = m.radius;
+    const hard = [];
+    for (const ti of regionArr) {                                   // filter(⊥ && every) inline
+      const t = tris[ti];
+      if (Math.abs(t.n[0]*ha0 + t.n[1]*ha1 + t.n[2]*ha2) > CORE_PERP) continue;
+      let ok = true;
+      for (const vv of t.v) {
+        const wx = vv[0] - hpx, wy = vv[1] - hpy, wz = vv[2] - hpz; // perpDist inline
+        const along = wx*ha0 + wy*ha1 + wz*ha2;
+        if (Math.abs(Math.hypot(wx - ha0*along, wy - ha1*along, wz - ha2*along) - hr) > tol) { ok = false; break; }
+      }
+      if (ok) hard.push(ti);
+    }
     if (hard.length < MIN_TRIS) return null;
-    const { axis: axH, values: valsH } = pcaAxis(hard.map(ti => tris[ti].n));
-    const vertsH = [];
-    for (const ti of hard) for (const vv of tris[ti].v) vertsH.push(vv);
-    const circH = fitCircleRobust(vertsH, axH);
+    const { axis: axH, values: valsH } = pcaTris(hard);
+    const circH = robustFitTris(hard, axH);
     if (!circH || !(circH.radius >= MIN_RADIUS && circH.radius <= MAX_RADIUS)) return null;
     const mH = { axis: axH, axisPoint: circH.center, radius: circH.radius, circ: circH, values: valsH };
     // Anti-Kugel-Wächter: die WEGGETRIMMTEN Facetten müssen nach AUSSEN krümmen (Loch-Mündungs-
     // Fillet: ρ ≥ R) — krümmen sie nach INNEN (ρ < R), ist die Region ein Kugel-Äquator-Band
     // (sphere_full/hemisphere dürfen nicht als „Bohrung" durchrutschen).
-    const coreSet = new Set(hard);
+    const gc = ++gen;                                   // Kern-Markierung (statt Set)
+    for (const ti of hard) stamp[ti] = gc;
     let s = 0, n = 0;
+    const gpx = mH.axisPoint[0], gpy = mH.axisPoint[1], gpz = mH.axisPoint[2];
+    const ga0 = mH.axis[0], ga1 = mH.axis[1], ga2 = mH.axis[2], gr = mH.radius;
     for (const ti of regionArr) {
-      if (coreSet.has(ti)) continue;
-      for (const vv of tris[ti].v) { s += perpDist(vv, mH.axisPoint, mH.axis) - mH.radius; n++; }
+      if (stamp[ti] === gc) continue;
+      for (const vv of tris[ti].v) {
+        const wx = vv[0] - gpx, wy = vv[1] - gpy, wz = vv[2] - gpz; // perpDist inline
+        const along = wx*ga0 + wy*ga1 + wz*ga2;
+        s += Math.hypot(wx - ga0*along, wy - ga1*along, wz - ga2*along) - gr; n++;
+      }
     }
     // Schwelle bewusst ENG (0.4% von r): ein Kugel-Äquator-Band krümmt nur sanft nach innen
     // (−1.8% bei ±15°-Band) und rutschte bei 2% durch (sphere_full-Regression). Loch-Mündungs-
@@ -419,10 +660,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     rescueWork += region2.length;
     const fail = { ok: false, touched: region2 };
     if (region2.length < MIN_TRIS) return fail;
-    const { axis: ax2, values: vals2 } = pcaAxis(region2.map(ti => tris[ti].n));
-    const verts2 = [];
-    for (const ti of region2) for (const vv of tris[ti].v) verts2.push(vv);
-    const circ2 = fitCircleRobust(verts2, ax2);
+    const { axis: ax2, values: vals2 } = pcaTris(region2);
+    const circ2 = robustFitTris(region2, ax2);
     if (!circ2 || !(circ2.radius >= MIN_RADIUS && circ2.radius <= MAX_RADIUS)) return fail;
     const model2 = { axis: ax2, axisPoint: circ2.center, radius: circ2.radius, circ: circ2, values: vals2 };
     let v2 = validateRegion(region2, model2);
@@ -445,7 +684,11 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // gegen Junk-Seeds ab).
   const acceptPrim = (v, tagged, consumeArr) => {
     let tMin = Infinity, tMax = -Infinity;
-    for (const vv of v.verts) { const tt = dot(sub(vv, v.circ.center), v.axis); if (tt < tMin) tMin = tt; if (tt > tMax) tMax = tt; }
+    const P = v.verts, c = v.circ.center, a = v.axis;                // flach (validateRegion)
+    for (let o = 0; o < P.length; o += 3) {
+      const tt = (P[o] - c[0]) * a[0] + (P[o + 1] - c[1]) * a[1] + (P[o + 2] - c[2]) * a[2]; // dot(sub(vv, c), a)
+      if (tt < tMin) tMin = tt; if (tt > tMax) tMax = tt;
+    }
     const prim = {
       type: 'cylinder', kind: v.full ? 'bore' : 'fillet', full: v.full,
       id: primitives.length, axis: v.axis, axisPoint: add(v.circ.center, scale(v.axis, tMin)), radius: v.r, height: tMax - tMin,
@@ -479,15 +722,20 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // fernen Ebenen-Eckpunkte im Radius-Fit (Platte mit r=3-Verrundungen → Schein-Zylinder
   // R≈19.5, empirisch belegt).
   const profW = (ti, ax) => {
-    const d = norm(cross(ax, tris[ti].n));
+    const t = tris[ti], n = t.n;
+    // norm(cross(ax, n)) inline (gleiche Reihenfolge: len||1, dann Division je Komponente)
+    let dx = ax[1]*n[2] - ax[2]*n[1], dy = ax[2]*n[0] - ax[0]*n[2], dz = ax[0]*n[1] - ax[1]*n[0];
+    const l = Math.hypot(dx, dy, dz) || 1;
+    dx /= l; dy /= l; dz /= l;
     let lo = Infinity, hi = -Infinity;
-    for (const vv of tris[ti].v) { const t = dot(vv, d); if (t < lo) lo = t; if (t > hi) hi = t; }
+    for (const vv of t.v) { const s = vv[0]*dx + vv[1]*dy + vv[2]*dz; if (s < lo) lo = s; if (s > hi) hi = s; }
     return hi - lo;
   };
-  // Scharnier-Achse = gemeinsame Kante ti↔m (normiert) oder null.
+  // Scharnier-Achse = gemeinsame Kante ti↔m (normiert) oder null. Vergleich über gecachte Keys.
   const hingeAxis = (ti, m) => {
+    const ka = triKeys[ti], kb = triKeys[m], va = tris[ti].v;
     const sh = [];
-    for (const va of tris[ti].v) for (const vb of tris[m].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { if (ka[i] === kb[j]) { sh.push(va[i]); break; } }
     return sh.length === 2 ? norm(sub(sh[1], sh[0])) : null;
   };
   // Gekrümmte Nachbarn (Knick im Saat-Fenster), kleinster Knick zuerst; stabil sortiert →
@@ -550,8 +798,9 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       for (const m of adj[ti]) {
         if (m < ti || !inR.has(m)) continue;
         if (dot(tris[ti].n, tris[m].n) > Math.cos(0.5 * DEG)) continue; // koplanar (Diagonale)
+        const ka = triKeys[ti], kb = triKeys[m], va = tris[ti].v;
         const sh = [];
-        for (const va of tris[ti].v) for (const vb of tris[m].v) { if (key(va) === key(vb)) { sh.push(va); break; } }
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { if (ka[i] === kb[j]) { sh.push(va[i]); break; } }
         if (sh.length !== 2) return false;
         const e = norm(sub(sh[1], sh[0]));
         if (Math.abs(dot(e, ax)) < Math.cos(2 * DEG)) return false;
@@ -616,8 +865,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     let strictN = 0;
     for (const ti of boot) if (Math.abs(dot(tris[ti].n, axis0)) <= STRICT_PERP) strictN++;
     if (strictN < 4) continue;
-    const bverts = []; for (const ti of boot) for (const vv of tris[ti].v) bverts.push(vv);
-    const circ0 = fitCircleRobust(bverts, axis0);
+    const circ0 = robustFitTris(boot, axis0);
     if (!circ0 || !(circ0.radius >= MIN_RADIUS && circ0.radius <= MAX_RADIUS)) continue;
     // Wachsen + Nachfitten (enge Toleranz — die Achse ist ja exakt)
     p1tried[seed] = 1; // derselbe Seed wird in Phase 1 nie zweimal probiert
@@ -625,10 +873,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     if (region.length < MIN_TRIS) { p1Fail(axis0, region); continue; }
     let model = null, bad = false;
     for (let pass = 0; pass < 2; pass++) {
-      const { axis: axF, values } = pcaAxis(region.map(ti => tris[ti].n));
-      const verts = [];
-      for (const ti of region) for (const vv of tris[ti].v) verts.push(vv);
-      const circ = fitCircleRobust(verts, axF);
+      const { axis: axF, values } = pcaTris(region);
+      const circ = robustFitTris(region, axF);
       if (!circ || !(circ.radius >= MIN_RADIUS && circ.radius <= MAX_RADIUS)) { bad = true; break; }
       model = { axis: axF, axisPoint: circ.center, radius: circ.radius, circ, values };
       region = grow(seed, model.axisPoint, model.axis, model.radius, Math.max(DIST_ABSTOL, DIST_RELTOL * circ.radius), visited);
@@ -647,9 +893,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // (Kontamination fügt höchstens Facetten hinzu, nimmt keine Umlauf-Abdeckung weg). Teil-
     // Bögen (Verrundungs-Spalten, Torus-Patches) → sofort aufgeben.
     {
-      const cv = [];
-      for (const ti of region) for (const vv of tris[ti].v) cv.push(vv);
-      if (coverageDeg(cv, model.axisPoint, model.axis) < FULL_COV) {
+      if (coverageDegFlat(packTris(region), 3 * region.length, model.axisPoint, model.axis) < FULL_COV) {
         // Teil-Umlauf: Kandidat für eine GERADE KANTEN-VERRUNDUNG (Fillet). Streng prüfen,
         // OHNE Rettungspfad: echtes Prisma (alle inneren Scharnier-Kanten ∥ Achse — billig, bricht
         // auf Torus-/Kegel-Patches an der ersten gedrehten Kante ab) → reguläre Gates inkl.
@@ -716,9 +960,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       }
     }
     if (boot.length < 4) { visited[seed] = 1; continue; }
-    const axisB = pcaAxis(boot.map(ti => tris[ti].n)).axis;
-    const bverts = []; for (const ti of boot) for (const vv of tris[ti].v) bverts.push(vv);
-    const circB = fitCircleRobust(bverts, axisB);
+    const axisB = pcaTris(boot).axis;
+    const circB = robustFitTris(boot, axisB);
     if (!circB || !(circB.radius >= MIN_RADIUS && circB.radius <= MAX_RADIUS)) { visited[seed] = 1; continue; }
 
     // Erstes Wachsen mit großzügiger Toleranz; die genaue Achse/Radius kommt aus dem Nachfitten.
@@ -728,11 +971,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     // Nachfitten: Achse via PCA der Normalen, Radius/Center via Kåsa
     let model = null;
     for (let pass = 0; pass < 2; pass++) {
-      const normals = region.map(ti => tris[ti].n);
-      const { axis: axF, values } = pcaAxis(normals);
-      const verts = [];
-      for (const ti of region) for (const vv of tris[ti].v) verts.push(vv);
-      const circ = fitCircleRobust(verts, axF);
+      const { axis: axF, values } = pcaTris(region);
+      const circ = robustFitTris(region, axF);
       if (!circ || !(circ.radius >= MIN_RADIUS && circ.radius <= MAX_RADIUS)) { region = null; break; }
       model = { axis: axF, axisPoint: circ.center, radius: circ.radius, circ, values };
       const distTol = Math.max(DIST_ABSTOL, DIST_RELTOL * circ.radius);
