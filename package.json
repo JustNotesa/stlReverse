@@ -11,7 +11,7 @@
     "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testMatch '<rootDir>/tests/e2e/**/*.test.js'",
     "test:bore": "node tests/bore-analytic-regression.mjs",
     "lint": "web-ext lint",
-    "build:xpi": "web-ext build --overwrite-dest --filename \"stl-reverse-{version}.xpi\" --ignore-files tests \"tests/**\" samples \"samples/**\" test-results \"test-results/**\" archive \"archive/**\" cst-test \"cst-test/**\" web-ext-artifacts \"web-ext-artifacts/**\" segmentation.js panel4.json \"*.md\" package.json package-lock.json",
+    "build:xpi": "web-ext build --overwrite-dest --filename \"stl-reverse-{version}.xpi\" --ignore-files tests \"tests/**\" samples \"samples/**\" test-results \"test-results/**\" archive \"archive/**\" cst-test \"cst-test/**\" web-ext-artifacts \"web-ext-artifacts/**\" segmentation.js panel4.json updates.json \"*.md\" package.json package-lock.json",
     "test:golden": "node tests/golden-regression.mjs",
     "test:ebike": "node tests/ebike-scorecard.mjs",
     "test:collinear": "node tests/collinear-regression.mjs",
