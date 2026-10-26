@@ -2403,6 +2403,7 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     const rings = chainEdges(rimEdges);
     if (rings.length !== 2) return null;                       // voller Mantel: genau 2 Ränder
+    if (rings[0].length + rings[1].length !== rimEdges.length) return null; // jede Randkante in einem der Ringe
     // Jeder Rand = KOMPLETTER Loop (außen oder innen) genau einer Deckfläche — oder eine Fase (C):
     // Kegel-Band zwischen Rand und dem kompletten Loop einer Deckfläche (band ≠ null)
     const ends = [];
@@ -2740,7 +2741,7 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     if (nStart !== startKeys.size) return null;                 // Start-Ring ganz am Rand des Bandes
     const rings = chainEdges(rimEdges);
-    if (rings.length > 1) return null;
+    if (rings.length > 1 || rings.reduce((s, r) => s + r.length, 0) !== rimEdges.length) return null; // jede Randkante in genau einem Ring
     let deck = null;
     if (rings.length === 1) {
       const dr = rings[0];
