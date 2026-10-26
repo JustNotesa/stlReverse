@@ -211,7 +211,8 @@ export function buildVolumeStepBrepV2(analysis) {
   const DEFEATURE = analysis?.defeature !== false;
 
   // ---- Test-Hooks (nur Tests/Node, tests/orientation-guard.mjs): STLREV_TEST_FLIP='bore'|'mantle'|
-  // 'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen ABSICHTLICH um,
+  // 'mantlecone'|'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen
+  // ABSICHTLICH um ('mantlecone' = konvexe Kegel-Mäntel, 'cone' = Fasen-Kegel der Bohrungen),
   // 'tubecurve' die mittlere Übergangskurve jedes Kanals (beide Nutzungen). Die Kanten-Bilanz
   // (fwd/rev) bleibt dabei ausgeglichen, das Wasserdicht-Verdikt sieht nichts — genau diese Fälle
   // muss der Orientierungs-Wächter (assemble) fangen. STLREV_TEST_GUARD_REPORT_ONLY=1: Wächter
@@ -316,9 +317,12 @@ export function buildVolumeStepBrepV2(analysis) {
     entities.push(`#${sid}=CYLINDRICAL_SURFACE('',#${placId},${toStep(radius)});`);
     return sid;
   };
+  // Halbwinkel mit 12 Nachkommastellen (wie Richtungen): mit 6 lag der Rand eines langen Kegels
+  // allein durch die Rundung des Winkels neben der Fläche (Fehler ≈ Mantellänge · 5e-7 / cos²α —
+  // ab ~150 mm über der Toleranz strikter Importer, tests/step-strict.mjs).
   const addConicalSurface = (placId, radius, semiAngle) => {
     const sid = id++;
-    entities.push(`#${sid}=CONICAL_SURFACE('',#${placId},${toStep(radius)},${toStep(semiAngle)});`);
+    entities.push(`#${sid}=CONICAL_SURFACE('',#${placId},${toStep(radius)},${toStepDir(semiAngle)});`);
     return sid;
   };
   const addAdvancedFace = (boundIds, surfId, sameSense) => {
@@ -2343,15 +2347,19 @@ export function buildVolumeStepBrepV2(analysis) {
   // ---- Konvexe Außen-Zylindermäntel (Welle, Zapfen, Scheiben-/Rohr-Außenwand) ----
   // Spiegelbild des scharfen Bohrungs-Pfads: ein voll umlaufender KONVEXER Mantel (radialScore
   // deutlich positiv — Facetten-Normalen zeigen von der Achse WEG) wird zu EINER
-  // CYLINDRICAL_SURFACE, wenn beide Rand-Loops EXAKT der AUSSEN-Loop je einer ebenen Deckfläche
-  // sind (bei der Bohrung ist es ein Innen-Loop). Dieselben harten Gates wie sharpBorePlan:
-  // Ränder eben in der Deckebene, exakt auf dem Kreis, feine und GLEICHMÄSSIGE Segmentwinkel
-  // (D-Wellen-Schutz), volle Umrundung, Wand ⟂ zu den Deckflächen, Kreis in der Deck-Ebene.
-  // Liegt ein Rand nicht direkt auf einer ebenen Deckfläche (Fase/Verrundung an der Außenkante,
-  // Zapfen auf einer Platte: Rand = Innen-Loop), bleibt der Mantel konservativ facettiert — einen
-  // Fasen-Kegel-Pfad gibt es hier bewusst (noch) nicht. Emission in assemble() als EIGENER Block
-  // (same_sense .T., Ränder so, dass die Fläche links liegt); geprüft mit tests/step-strict.mjs
-  // (ohne Heilung) und occt-Volumen gegen den exakten Zylinder (tests/mantle-regression.mjs).
+  // CYLINDRICAL_SURFACE, wenn beide Rand-Loops EXAKT ein kompletter Loop je einer ebenen Deckfläche
+  // sind: meist der AUSSEN-Loop (Welle, Scheibe), beim Zapfen auf einer Platte bzw. der Stufenwelle
+  // auf einer Seite ein INNEN-Loop (Platte um den Zapfen, Schulter der Stufenwelle). Dieselben
+  // harten Gates wie sharpBorePlan: Ränder eben in der Deckebene, exakt auf dem Kreis, feine und
+  // GLEICHMÄSSIGE Segmentwinkel (D-Wellen-Schutz), volle Umrundung, Wand ⟂ zu den Deckflächen,
+  // Kreis in der Deck-Ebene, Wand konvex. Ein Innen-Loop als Deck bekommt die Kreis-Kante mit
+  // derselben Lochrand-Regel wie eine Bohrung (assemble: holeLoopForward — im Uhrzeigersinn um die
+  // Flächennormale), der Mantel nutzt sie gegenläufig.
+  // Liegt ein Rand nicht direkt auf einer ebenen Deckfläche (Fase/Verrundung an der Außenkante),
+  // bleibt der Mantel konservativ facettiert — einen Fasen-Kegel-Pfad gibt es hier bewusst (noch)
+  // nicht. Emission in assemble() als EIGENER Block (same_sense .T., Ränder so, dass die Fläche
+  // links liegt); geprüft mit tests/step-strict.mjs (ohne Heilung) und occt-Volumen gegen den
+  // exakten Zylinder (tests/mantle-regression.mjs).
   let mantlePlans = [];
   const sharpMantlePlan = (entry, owners, fdsOfGroup, taken) => {
     const W = new Set();
@@ -2384,7 +2392,7 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     const rings = chainEdges(rimEdges);
     if (rings.length !== 2) return null;                       // voller Mantel: genau 2 Ränder
-    // Jeder Rand = KOMPLETTER AUSSEN-Loop genau einer Deckfläche
+    // Jeder Rand = KOMPLETTER Loop (außen oder innen) genau einer Deckfläche
     const decks = [];
     for (const ring of rings) {
       let own = null;
@@ -2394,7 +2402,7 @@ export function buildVolumeStepBrepV2(analysis) {
         own = o;
       }
       const fd = faceDefs[own.fi];
-      if (fd.outer !== own.loop || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
+      if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
       decks.push({ fi: own.fi, fd, loop: own.loop, ring });
     }
     if (decks[0].fi === decks[1].fi) return null;
@@ -2454,8 +2462,9 @@ export function buildVolumeStepBrepV2(analysis) {
       wall: W, decks: [decks[0].loop, decks[1].loop],
     };
   };
-  // Alle passenden konvexen Mäntel umwandeln: Wandflächen entfallen, die Deck-AUSSEN-Loops werden
-  // zur analytischen Kreis-Kante (fd.outer.circleRim). Scheitert ein Gate → facettiert lassen.
+  // Alle passenden konvexen Mäntel umwandeln: Wandflächen entfallen, die Deck-Loops werden zur
+  // analytischen Kreis-Kante (loop.circleRim; Außen- oder Innen-Loop). Scheitert ein Gate →
+  // facettiert lassen.
   const convertMantles = () => {
     if (!mantleById.size) return;
     const fdsOfGroup = new Map();   // Gruppe → [fi]
@@ -2511,12 +2520,268 @@ export function buildVolumeStepBrepV2(analysis) {
     if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
   };
 
+  // ---- Konvexe Kegel-Mäntel (Kegelstumpf, Kegel mit Spitze) als CONICAL_SURFACE ----
+  // Die Erkennung (primitive-recognition.js) kennt keine Kegel — die Kandidaten kommen direkt aus
+  // der Topologie: Saat ist ein Loop (außen oder innen) einer ebenen Fläche, der ein feiner,
+  // gleichmäßig unterteilter VOLLKREIS ist (ringAsCircle). Die Facetten jenseits dieses Loops und
+  // alle über Kanten anschließenden Facetten mit GLEICHER Neigung zur Achse (Normale von der Achse
+  // weg = konvex) bilden die Wand. Ihr Rand muss sein:
+  //   Kegelstumpf: genau 2 Ringe — der Saat-Loop und ein KOMPLETTER Loop einer zweiten, parallelen
+  //     ebenen Deckfläche, mit anderem Radius (gleicher Radius = Zylinder → nicht hier);
+  //   Kegel mit Spitze: genau 1 Ring (die Saat), alle Facetten laufen in EINEM Punkt auf der Achse
+  //     zusammen (CONE_APEX).
+  // Harte Gates wie beim Zylinder-Mantel: Ringe exakt auf ihrem Kreis in der Deckebene, Segmente
+  // ≤ 42° und gleichmäßig (D-Schutz), volle Umrundung, koaxial; JEDER Wand-Punkt auf dem Kegel
+  // (Toleranz wie beim Zylinder), jede Facetten-Normale passt zur Kegel-Normale (konvex), Kreise in
+  // den Deck-Ebenen (circleOnDeck). Sonst bleibt die Wand facettiert. Flache, geneigte oder
+  // unterbrochene Deckel, Kegel-Ketten ohne Deckfläche dazwischen und konkave Kegel (Senkung,
+  // konisches Loch) bleiben damit facettiert.
+  // Emission in assemble() als eigener Block (s. dort): same_sense .T. (die STEP-Kegelnormale zeigt
+  // beim konvexen Kegel aus dem Material), Fläche links vom Rand, Spitze als VERTEX_LOOP.
+  let mantleConePlans = [];
+  const CONE_APEX = true;           // Kegel mit Spitze umwandeln (VERTEX_LOOP an der Spitze)
+  const CONE_TILT_TOL = 0.03;       // Wand-Flood: Achsanteil der Facetten-Normale wie die Saat (≈ ±1.7°)
+  const CONE_NORMAL_COS = Math.cos(10 * Math.PI / 180); // Facetten-Normale ↔ Kegel-Normale
+  const CONE_MIN_SEG = 9;           // ≥ 9 Segmente (SEG_MAX_DEG = 42°)
+  const CONE_MAX_WALL = 20000;      // Wand-Flächen je Kandidat (Laufzeit-Schutz)
+  // Geschlossener Punktzug (Ebene ⟂ n) als Vollkreis → { center, radius } | null: jeder Punkt in
+  // der Kreisebene und auf dem Kreis, Segmente ≤ 42°, volle Umrundung, gleichmäßig.
+  const ringAsCircle = (ring, n) => {
+    if (ring.length < CONE_MIN_SEG) return null;
+    const f = fitCircleInPlane(ring, n);
+    if (!f) return null;
+    const tol = Math.max(0.01, 0.002 * f.radius);
+    const rad = (p) => { const w = _sub3(p, f.center), t = _dot3(w, n); return { t, r: [w[0] - n[0] * t, w[1] - n[1] * t, w[2] - n[2] * t] }; };
+    let turn = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const a = rad(ring[i]), b = rad(ring[(i + 1) % ring.length]);
+      if (Math.abs(a.t) > tol || Math.abs(Math.hypot(a.r[0], a.r[1], a.r[2]) - f.radius) > tol) return null;
+      const ang = Math.atan2(_dot3(_cross3(a.r, b.r), n), _dot3(a.r, b.r));
+      if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return null;
+      turn += ang;
+    }
+    if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return null;
+    if (!ringAngleUniform(ring, f.center, n)) return null;
+    return f;
+  };
+  const faceCentroid = (fd) => {
+    let cx = 0, cy = 0, cz = 0, k = 0;
+    for (const L of [fd.outer, ...fd.inner]) for (const p of L) { cx += p[0]; cy += p[1]; cz += p[2]; k++; }
+    return [cx / k, cy / k, cz / k];
+  };
+  // Plan für EINEN Saat-Loop → { plan, wall:Set<fi>, decks:[Loop…], rims:[Kreis…] } | null
+  const sharpConePlan = (seed, owners, taken) => {
+    const fi0 = seed.fi, L0 = seed.loop;
+    const n0 = _norm3(faceDefs[fi0].normal);
+    const cs = seed.center;
+    // Wand-Saat: je Kante des Saat-Loops genau EINE Fläche auf der anderen Seite
+    const W = new Set();
+    for (let i = 0; i < L0.length; i++) {
+      const a = L0[i], b = L0[(i + 1) % L0.length];
+      if (vtxKey(a) === vtxKey(b)) continue;
+      const others = (owners.get(edgeKeyFn(a, b)) || []).filter((o) => o.fi !== fi0);
+      if (others.length !== 1 || taken.has(others[0].fi)) return null;
+      W.add(others[0].fi);
+    }
+    // Neigung der Saat-Facetten zur Achse (Deck-Normale): weder Zylinder-Wand (⟂, < 0.2°) noch
+    // Deckfläche (∥). Toleranz der Neigung relativ (grobe/ungleichmäßige Teilung: die Facetten-
+    // Neigung schwankt um wenige % von α), damit bei kleiner Formschräge keine Zylinder-Facette
+    // (Neigung 0) mitläuft.
+    let a0 = 0;
+    for (const fi of W) a0 += _dot3(_norm3(faceDefs[fi].normal), n0);
+    a0 /= W.size;
+    if (!(Math.abs(a0) > 0.003 && Math.abs(a0) < 0.9998)) return null;
+    const tiltTol = Math.min(CONE_TILT_TOL, Math.max(0.0015, 0.5 * Math.abs(a0)));
+    const fitMemo = new Map();
+    const fits = (fi) => {
+      let ok = fitMemo.get(fi);
+      if (ok !== undefined) return ok;
+      const fd = faceDefs[fi], n = _norm3(fd.normal);
+      ok = !fd.outer.circleRim && !fd.inner.some((L) => L.circleRim) && Math.abs(_dot3(n, n0) - a0) <= tiltTol;
+      if (ok) { // konvex: Normale zeigt von der Achse weg
+        const w = _sub3(faceCentroid(fd), cs), t = _dot3(w, n0);
+        ok = _dot3(n, [w[0] - n0[0] * t, w[1] - n0[1] * t, w[2] - n0[2] * t]) > 0;
+      }
+      fitMemo.set(fi, ok);
+      return ok;
+    };
+    for (const fi of W) if (!fits(fi)) return null;
+    // Wand: über gemeinsame Kanten alle passenden Facetten einsammeln
+    const queue = [...W];
+    while (queue.length) {
+      const fd = faceDefs[queue.pop()];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          for (const o of (owners.get(edgeKeyFn(a, b)) || [])) {
+            if (o.fi === fi0 || W.has(o.fi) || taken.has(o.fi) || !fits(o.fi)) continue;
+            W.add(o.fi); queue.push(o.fi);
+            if (W.size > CONE_MAX_WALL) return null;
+          }
+        }
+      }
+    }
+    if (W.size < 3) return null;
+    // Rand der Wand: Kanten genau 1× in der Wand — Gegenüber genau EINE Fläche außerhalb
+    const cnt = new Map();
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          const k = edgeKeyFn(a, b), e = cnt.get(k);
+          if (e) e.n++; else cnt.set(k, { n: 1, v0: a, v1: b });
+        }
+      }
+    }
+    const rimEdges = [], otherOf = new Map();
+    for (const [k, e] of cnt) {
+      if (e.n > 2) return null;
+      if (e.n === 2) continue;
+      const others = (owners.get(k) || []).filter((o) => !W.has(o.fi));
+      if (others.length !== 1 || taken.has(others[0].fi)) return null;
+      rimEdges.push({ v0: e.v0, v1: e.v1 });
+      otherOf.set(k, others[0]);
+    }
+    const rings = chainEdges(rimEdges);
+    if (rings.length < 1 || rings.length > 2) return null;
+    // Jeder Ring = KOMPLETTER Loop (außen oder innen) genau einer Fläche; decks[0] = Saat
+    const decks = [];
+    for (const ring of rings) {
+      let own = null;
+      for (let i = 0; i < ring.length; i++) {
+        const o = otherOf.get(edgeKeyFn(ring[i], ring[(i + 1) % ring.length]));
+        if (!o || (own && (o.fi !== own.fi || o.loop !== own.loop))) return null;
+        own = o;
+      }
+      const fd = faceDefs[own.fi];
+      if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
+      decks.push({ fi: own.fi, fd, loop: own.loop, ring });
+    }
+    if (decks[0].fi !== fi0 || decks[0].loop !== L0) decks.reverse();
+    if (decks[0].fi !== fi0 || decks[0].loop !== L0) return null;
+    const groups = [...new Set([...W].map((fi) => faceDefs[fi].group).filter(Boolean))];
+    // Kegel: Radius ρ(t) = R0 + k·t entlang zAx (t = 0 in der Saat-Ebene); Wand-Punkte und
+    // Facetten-Normalen gegen den Kegel prüfen
+    const R0 = seed.radius, c0 = cs;
+    const wallOnCone = (zAx, H, k, tol) => {
+      const cn = 1 / Math.sqrt(1 + k * k);
+      for (const fi of W) {
+        const fd = faceDefs[fi];
+        for (const L of [fd.outer, ...fd.inner]) {
+          for (const p of L) {
+            const w = _sub3(p, c0), t = _dot3(w, zAx);
+            if (t < -tol || t > H + tol) return false;
+            if (Math.abs(Math.hypot(w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t) - (R0 + k * t)) > tol) return false;
+          }
+        }
+        // Kegel-Normale am Schwerpunkt: (e_r − k·zAx)/√(1+k²) — radial nach außen, zur schmalen Seite gekippt
+        const w = _sub3(faceCentroid(fd), c0), t = _dot3(w, zAx);
+        const er = _norm3([w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t]);
+        const nc = [(er[0] - k * zAx[0]) * cn, (er[1] - k * zAx[1]) * cn, (er[2] - k * zAx[2]) * cn];
+        if (!(_dot3(_norm3(fd.normal), nc) >= CONE_NORMAL_COS)) return false;
+      }
+      return true;
+    };
+    if (decks.length === 2) {
+      // ── Kegelstumpf zwischen zwei parallelen Deckflächen
+      const d1 = decks[1];
+      if (d1.fi === fi0 || Math.abs(_dot3(n0, _norm3(d1.fd.normal))) < 0.9999) return null;
+      const f1 = ringAsCircle(d1.ring, n0);
+      if (!f1) return null;
+      const along = _dot3(_sub3(f1.center, c0), n0);
+      const zAx = along >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
+      const H = Math.abs(along), R1 = f1.radius;
+      const tol = Math.max(0.01, 0.002 * Math.max(R0, R1));
+      if (!(H > tol) || !(Math.abs(R1 - R0) > tol)) return null;          // flach bzw. Zylinder
+      const c1 = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
+      if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return null; // koaxial
+      if (!wallOnCone(zAx, H, (R1 - R0) / H, tol)) return null;
+      if (!circleOnDeck(c0, R0, zAx, decks[0].fd) || !circleOnDeck(c1, R1, zAx, d1.fd)) return null;
+      const rim0 = mkCircleDesc(c0, R0, zAx), rim1 = mkCircleDesc(c1, R1, zAx);
+      if (rim0.rimKey === rim1.rimKey) return null;
+      const grow = R1 > R0;                                   // wächst der Radius entlang zAx?
+      return {
+        plan: {
+          large: grow ? rim1 : rim0, small: grow ? rim0 : rim1, apex: null,
+          coneAxis: grow ? zAx : [-zAx[0], -zAx[1], -zAx[2]],   // Richtung wachsenden Radius
+          semiAngle: Math.atan2(Math.abs(R1 - R0), H), groups,
+          zone: { c0, zAx, H, R0, k: (R1 - R0) / H },
+        },
+        wall: W, decks: [decks[0].loop, d1.loop], rims: [rim0, rim1],
+      };
+    }
+    // ── Kegel mit Spitze: die Wand liegt auf EINER Seite der Saat-Ebene, ihr Punkt mit dem größten
+    // Achsabstand ist die Spitze (auf der Achse)
+    if (!CONE_APEX) return null;
+    let st = 0;
+    for (const fi of W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) st += _dot3(_sub3(p, c0), n0); }
+    const zAx = st >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
+    let H = 0, top = null;
+    for (const fi of W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) { const t = _dot3(_sub3(p, c0), zAx); if (t > H) { H = t; top = p; } } }
+    const tol = Math.max(0.01, 0.002 * R0);
+    if (!top || !(H > tol)) return null;
+    const apex = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
+    if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
+    if (!wallOnCone(zAx, H, -R0 / H, tol)) return null;
+    if (!circleOnDeck(c0, R0, zAx, decks[0].fd)) return null;
+    const rim0 = mkCircleDesc(c0, R0, zAx);
+    return {
+      plan: {
+        large: rim0, small: null, apex, coneAxis: [-zAx[0], -zAx[1], -zAx[2]],
+        semiAngle: Math.atan2(R0, H), groups, zone: { c0, zAx, H, R0, k: -R0 / H },
+      },
+      wall: W, decks: [decks[0].loop], rims: [rim0],
+    };
+  };
+  // Alle passenden konvexen Kegel umwandeln: Wandflächen entfallen, die Deck-Loops werden zur
+  // analytischen Kreis-Kante (loop.circleRim). Scheitert ein Gate → facettiert lassen.
+  const convertMantleCones = () => {
+    // Saat-Loops: Vollkreis-Kandidaten (billiger Vorfilter — ohne Kandidaten kein Kanten-Index)
+    const seeds = [];
+    faceDefs.forEach((fd, fi) => {
+      const n = _norm3(fd.normal);
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim || loopEdgeCount(L) < CONE_MIN_SEG) continue;
+        const f = ringAsCircle(L, n);
+        if (f) seeds.push({ fi, loop: L, center: f.center, radius: f.radius });
+      }
+    });
+    if (!seeds.length) return;
+    const owners = new Map();       // Kante → [{ fi, loop }]
+    faceDefs.forEach((fd, fi) => {
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim) continue;
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          const k = edgeKeyFn(a, b);
+          let o = owners.get(k); if (!o) { o = []; owners.set(k, o); }
+          o.push({ fi, loop: L });
+        }
+      }
+    });
+    const drop = new Set();
+    for (const seed of seeds) {
+      if (seed.loop.circleRim || drop.has(seed.fi)) continue;
+      let res = null;
+      try { res = sharpConePlan(seed, owners, drop); } catch (_) { res = null; }
+      if (!res) continue;
+      for (const fi of res.wall) drop.add(fi);
+      res.decks.forEach((L, i) => { L.circleRim = res.rims[i]; });
+      mantleConePlans.push(res.plan);
+    }
+    if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
+  };
+
   // ---- Ablauf (re-entrant für die Fallback-Stufen) ----
   // withBores=false: ohne Bohrungs-Umwandlung (Defeaturing bleibt). Setzt faceDefs, finalPlans,
   // chamferZones und die Defeaturing-Zähler.
-  // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen UND Kanäle neu bauen.
+  // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen, Mäntel, Kegel UND Kanäle neu bauen.
   const runPipeline = (withBores) => {
-    finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; chamferDroppedGroups = new Set();
+    finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set();
     filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0;
     if (!DEFEATURE) {
       // Toggle AUS — bisheriger Ablauf unverändert: Bohrungs-Pläne aus den Original-Dreiecken,
@@ -2533,7 +2798,7 @@ export function buildVolumeStepBrepV2(analysis) {
       }
       faceDefs = buildFaceDefs(boreSkip);
       matchBorePlans(tentative, (plan) => { for (const g of plan.groups) for (const fd of extractGroupFaces(g)) { fd.group = g; faceDefs.push(fd); } });
-      if (withBores) { planTubes(); convertMantles(); }
+      if (withBores) { planTubes(); convertMantles(); convertMantleCones(); }
       return;
     }
     // Toggle AN — ERST entrunden (v1, v2, v2b), DANN Bohrungen. Die Bohrungs-Gruppen bleiben dafür
@@ -2557,6 +2822,7 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!withBores) return;
     const sharp = convertSharpBores();
     convertMantles();
+    convertMantleCones();
     // Übrige Bohrungen: bisheriger Pfad (direkt oder Fase → Kegel). Bleibt für Mündungen, die v2
     // NICHT schärfen konnte (echte Fase, Mündung auf einer Fläche ohne senkrechte Wand, …).
     // Die Ränder kommen dabei aus den AKTUELLEN Wand-faceDefs (attemptBoreCurrent, Review-Fund a):
@@ -2719,8 +2985,8 @@ export function buildVolumeStepBrepV2(analysis) {
   //   (b) eine Rand-Kurve KONSISTENT verdreht (beide Nutzungen) — die Fläche liegt dann rechts vom
   //       Rand: occt wählt still das Komplementär-Band (+8.8 % Volumen im Synthetik-Test, +400 % am
   //       eBike), strikte Importer (CST/ACIS) verwerfen die Fläche.
-  // Darum prüft der Wächter je analytischer Fläche (Bohrungs-Zylinder, Außenmantel, Fasen-Kegel,
-  // Kanal-Stück):
+  // Darum prüft der Wächter je analytischer Fläche (Bohrungs-Zylinder, Außenmantel, Kegel-Mantel,
+  // Fasen-Kegel, Kanal-Stück):
   //   (a) Normalen-Probe: effektive Normale (Flächennormale × same_sense) an den Schwerpunkten der
   //       ersetzten ORIGINAL-Dreiecke gegen deren Wicklungs-Normalen (zeigen aus dem Material);
   //       flächengewichtetes Mittel < 0 → Widerspruch.
@@ -2809,6 +3075,17 @@ export function buildVolumeStepBrepV2(analysis) {
   // Achse gekippt: radial·cosα − Achse·sinα) × same_sense.
   const coneGuardNormal = (cr, sgn) => {
     const ca = Math.cos(cr.semiAngle), sa = Math.sin(cr.semiAngle), ax = cr.coneAxis, ap = cr.rimDesc.center;
+    return (p) => {
+      const w0 = _sub3(p, ap), al = _dot3(w0, ax);
+      const rad = [w0[0] - ax[0] * al, w0[1] - ax[1] * al, w0[2] - ax[2] * al];
+      const l = Math.hypot(rad[0], rad[1], rad[2]);
+      if (l < 1e-9) return null;
+      return [sgn * (rad[0] / l * ca - ax[0] * sa), sgn * (rad[1] / l * ca - ax[1] * sa), sgn * (rad[2] / l * ca - ax[2] * sa)];
+    };
+  };
+  // Dasselbe für einen Kegel-Mantel (Achse ax durch ap, ax zeigt zum wachsenden Radius).
+  const coneNormalAt = (ap, ax, semiAngle, sgn) => {
+    const ca = Math.cos(semiAngle), sa = Math.sin(semiAngle);
     return (p) => {
       const w0 = _sub3(p, ap), al = _dot3(w0, ax);
       const rad = [w0[0] - ax[0] * al, w0[1] - ax[1] * al, w0[2] - ax[2] * al];
@@ -2955,7 +3232,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
   // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
   const entMark = entities.length, idMark = id;
-  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = []) => {
+  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = [], mantleConesArg = []) => {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
@@ -2969,6 +3246,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const ssBore = testFlip('bore');   // korrekt .F.: Wand-Normale zeigt zur Achse (ins Loch)
     const ssCone = testFlip('cone');   // korrekt .F.: dito für die Fase
     const ssMantle = !testFlip('mantle'); // korrekt .T.: konvexer Mantel, Normale zeigt aus dem Material
+    const ssMantleCone = !testFlip('mantlecone'); // korrekt .T.: konvexer Kegel, dito
 
     // Kreis-Orientierung (ISO 10303-42, von strikten Importern wie CST/ACIS wörtlich genommen —
     // occt/Fusion reparieren still): Ein Loch-Rand läuft IM Uhrzeigersinn um die Flächennormale,
@@ -2982,7 +3260,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const outerLoopForward = (rim, faceNormal) => _dot3(rim.axis, faceNormal) > 0;
 
     // Flachflächen (Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert: Innen-Loops
-    // an Bohrungen/Kanälen, der Außen-Loop an konvexen Mänteln).
+    // an Bohrungen/Kanälen und am Fuß eines Zapfens/einer Wellenstufe, der Außen-Loop an konvexen
+    // Mänteln und Kegeln). Richtung je Loop-Art: Außen-Loop gegen, Innen-Loop im Uhrzeigersinn um
+    // die Flächennormale — die analytische Nachbarfläche nutzt die Kante gegenläufig.
     for (const { outer, inner, normal, centroid, fold } of faceDefsArg) {
       let outerBound;
       if (outer.circleRim) {
@@ -3119,6 +3399,50 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
 
+    // Konvexe Kegel-Mäntel (Kegelstumpf, Kegel mit Spitze; convertMantleCones): CONICAL_SURFACE mit
+    // Lage im Mittelpunkt des GROSSEN Randkreises, Achse coneAxis zur Seite wachsenden Radius (STEP:
+    // Radius R + v·tan α wächst entlang der Achse — zwischen den Rändern ist v ≤ 0), Halbwinkel α.
+    // Die natürliche Kegelnormale (radial nach außen, zur schmalen Seite gekippt) zeigt beim
+    // konvexen Kegel aus dem Material → same_sense .T.. Fläche links vom Rand: der kleine Rand läuft
+    // gegen, der große im Uhrzeigersinn um coneAxis — gegenläufig zur jeweiligen Deckfläche (Außen-
+    // Loop gegen, Innen-Loop im Uhrzeigersinn um deren Normale). Die Spitze wird ein VERTEX_LOOP
+    // (nur ihr Punkt, keine Kante).
+    for (const cp of mantleConesArg) {
+      const lg = cp.large, ax = cp.coneAxis;
+      const surf = addConicalSurface(addAxis2Placement3D(lg.center, ax, lg.refDir), lg.radius, cp.semiAngle);
+      const ceL = getOrCreateCircleEdge(lg.rimKey, lg);
+      const fL = _dot3(lg.axis, ax) < 0;
+      useCircle(lg.rimKey, fL);
+      const bounds = [addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceL.ecId, fL)]))];
+      const rimLoops = [{ geom: lg, fwd: fL, d: _sub3(cp.small ? cp.small.center : cp.apex, lg.center) }];
+      if (cp.small) {
+        const sm = cp.small, ceS = getOrCreateCircleEdge(sm.rimKey, sm);
+        const fS = _dot3(sm.axis, ax) > 0;
+        useCircle(sm.rimKey, fS);
+        bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ceS.ecId, fS)])));
+        rimLoops.push({ geom: sm, fwd: fS, d: _sub3(lg.center, sm.center) });
+      } else {
+        const vl = id++;
+        entities.push(`#${vl}=VERTEX_LOOP('',#${getVertex(cp.apex).vtxId});`);
+        bounds.push(addFaceBound(vl));
+      }
+      emitFace(addAdvancedFace(bounds, surf, ssMantleCone));
+      { // Wächter: (a) Wand-Facetten (nur Dreiecke im Kegel-Bereich) gegen die emittierte Kegel-
+        // Orientierung, (b) Umlaufsinn der Ränder (Fläche = Richtung zum anderen Rand bzw. zur Spitze)
+        const tg = nowMs();
+        const nAt = coneNormalAt(lg.center, ax, cp.semiAngle, ssMantleCone ? 1 : -1);
+        const z = cp.zone;
+        const onCone = (p) => {
+          const w0 = _sub3(p, z.c0), t = _dot3(w0, z.zAx);
+          if (t < -0.15 || t > z.H + 0.15) return false;
+          return Math.abs(Math.hypot(w0[0] - z.zAx[0] * t, w0[1] - z.zAx[1] * t, w0[2] - z.zAx[2] * t) - (z.R0 + z.k * t)) <= 0.15;
+        };
+        const mean = guardScan(cp.groups, onCone, nAt);
+        if ((mean !== null && mean < 0) || !loopSenseOk(rimLoops, nAt)) guardFailures++;
+        guardMs += nowMs() - tg;
+      }
+    }
+
     // Kanal-Flächenketten (tube-sweep.js): Stück k zwischen Kurve k und k+1. Profil ⟂ Bahn (γ=0):
     // Gerade → CYLINDRICAL_SURFACE, Bogen → TOROIDAL_SURFACE. Profil geneigt (γ≠0, Profilkreis auf
     // der Mündungsfläche skizziert): Gerade → SURFACE_OF_LINEAR_EXTRUSION, Bogen →
@@ -3213,6 +3537,7 @@ export function buildVolumeStepBrepV2(analysis) {
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
         mantlesConverted: mantlesArg.length,
+        mantleConesConverted: mantleConesArg.length,
         tubesConverted: tubesArg.length,
         tubePieces: tubesArg.reduce((n, tp) => n + tp.spec.pieces.length, 0),
         // Orientierungs-Wächter: analytische Flächen, deren Orientierung den Original-Dreiecken
@@ -3556,7 +3881,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const pl = enforcePlanarity(faceDefs);
     faceDefs = pl.fds;
     removeCollinearPoints(faceDefs);
-    const a = assemble(faceDefs, finalPlans, tubePlans, mantlePlans);
+    const a = assemble(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
@@ -3566,7 +3891,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // Ein Zusammenbau gilt als gescheitert, wenn die Hülle offen ist ODER der Orientierungs-Wächter
   // eine analytische Fläche verworfen hat (s. assemble) — beides löst dieselben Fallback-Stufen
   // aus. Die Wächter-Befunde aller Stufen werden aufsummiert (Report: orientationGuardFailures,
-  // fallbackStage 0 = keiner, 1 = ohne Bohrungen/Kanäle, 2 = facettiert).
+  // fallbackStage 0 = keiner, 1 = ohne Bohrungen/Mäntel/Kegel/Kanäle, 2 = facettiert).
   let guardTotal = 0, guardMsTotal = 0, fallbackStage = 0;
   const failed = (a) => !a.report.watertight || (GUARD_FALLBACK && a.report.orientationGuardFailures > 0);
   const tracked = (a) => { guardTotal += a.report.orientationGuardFailures; guardMsTotal += a.report.orientationGuardMs; return a; };
@@ -3577,17 +3902,17 @@ export function buildVolumeStepBrepV2(analysis) {
   //   Stufe 2 (global): ALLES facettiert neu bauen (buildFaceDefs(null) erzeugt FRISCHE, unmutierte
   //     Loops) — die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung
   //     läuft auch hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
-  //   Stufe 1 (nur mit Toggle, nur bei Bohrungen/Mänteln/Kanälen): ohne diese neu bauen, Defeaturing
+  //   Stufe 1 (nur mit Toggle, nur bei Bohrungen/Mänteln/Kegeln/Kanälen): ohne diese neu bauen, Defeaturing
   //     bleibt — sonst verwarf der globale Fallback auch korrekte Bänder/Ecken.
   // Die Basislinie wird ZUERST gebaut: ist schon sie nicht wasserdicht (Netz von Haus aus offen, z.B.
   // gelochtes Netz), kann Stufe 1 die Hülle praktisch nie schließen — sie lief früher trotzdem und
   // kostete am gelochten eBike 39–57 % der Exportzeit. Ergebnis: Stufe 1, wenn sie gelingt, sonst
   // die Basislinie (deren Entitäten dafür gesichert und zurückgeschrieben werden).
-  const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.tubesConverted > 0 ||
-    filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0;
+  const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.mantleConesConverted > 0 ||
+    asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0;
   let stage1Tried = false;
   if (converted && failed(asm)) {
-    const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0);
+    const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0 || mantleConePlans.length > 0);
     const pl = enforcePlanarity(buildFaceDefs(null));
     const fallbackDefs = pl.fds;
     removeCollinearPoints(fallbackDefs);
@@ -3611,7 +3936,7 @@ export function buildVolumeStepBrepV2(analysis) {
     }
   }
   // Befund für Tests/Diagnose: fallbackStage 0 = keine Fallback-Stufe, 1 = ohne Bohrungen/Mäntel/
-  // Kanäle neu gebaut, 2 = facettierte Basislinie; stage1Tried = Stufe 1 wurde überhaupt versucht.
+  // Kegel/Kanäle neu gebaut, 2 = facettierte Basislinie; stage1Tried = Stufe 1 wurde überhaupt versucht.
   asm.report.orientationGuardFailures = guardTotal;
   asm.report.orientationGuardMs = Math.round(guardMsTotal * 1000) / 1000;
   asm.report.fallbackStage = fallbackStage;
