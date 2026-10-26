@@ -16,7 +16,8 @@
     "test:collinear": "node tests/collinear-regression.mjs",
     "test:v2": "node tests/fixtures-v2/check.mjs --quick",
     "test:tube": "node tests/tube-regression.mjs",
-    "test:orient": "node tests/orientation-guard.mjs"
+    "test:orient": "node tests/orientation-guard.mjs",
+    "test:strict": "node tests/step-strict.mjs"
   },
   "jest": {
     "testMatch": [

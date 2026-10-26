@@ -7,7 +7,9 @@
 // genau diese Regeln direkt an der STEP-Datei (ohne Heilung):
 //
 //   loop-chain       Ränder geschlossen: Ende einer Kante = Anfang der nächsten
-//   edge-use         jede Kante genau 2× genutzt, einmal in jede Richtung (Bound-Flag beachtet)
+//   edge-use         jede Kante genau 2× genutzt, einmal in jede Richtung (Bound-Flag beachtet);
+//                    bei OPEN_SHELL (offenes/non-manifold Eingabe-Netz, z.B. dino) ist eine
+//                    Kante mit 1 Nutzung ein erlaubter Rand (stats.openEdges)
 //   vertex-curve     Kanten-Endpunkte liegen auf ihrer Kurve
 //   vertex-surface   alle Rand-Punkte einer Fläche liegen auf ihrer Fläche
 //   orient-plane     Ebene: Außenrand gegen den Uhrzeigersinn um die effektive Normale
@@ -69,7 +71,10 @@ export function checkStepStrict(text, opts = {}) {
   const ents = parseStep(text);
   const E = (r) => { const e = ents.get(r && r.ref !== undefined ? r.ref : r); if (!e) throw new Error('fehlende Entität #' + (r?.ref ?? r)); return e; };
   const violations = [];
-  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0 };
+  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0 };
+  // Offene Hülle (der Exporter schreibt OPEN_SHELL, wenn schon das Eingabe-Netz offen bzw.
+  // non-manifold ist): einfach genutzte Kanten sind dort der ehrliche Rand, kein Fehler.
+  for (const e of ents.values()) { if (e.type === 'CLOSED_SHELL') { stats.openShell = false; break; } if (e.type === 'OPEN_SHELL') stats.openShell = true; }
   const flag = (kind, msg, extra = {}) => violations.push({ kind, msg, ...extra });
 
   const P = (r) => { const a = E(r).args; return a[1]; };                    // CARTESIAN_POINT('',(x,y,z))
@@ -279,6 +284,7 @@ export function checkStepStrict(text, opts = {}) {
     } else stats.skippedOrient++;
   }
   for (const [id, uses] of edgeUse) {
+    if (uses.length === 1 && stats.openShell) { stats.openEdges++; continue; }
     if (uses.length !== 2) flag('edge-use', `Kante #${id}: ${uses.length}× genutzt statt 2×`);
     else if (uses[0].fwd === uses[1].fwd) flag('edge-use', `Kante #${id}: beide Nutzungen gleichsinnig (Flächen #${uses[0].face}, #${uses[1].face})`);
   }
@@ -295,7 +301,8 @@ if (isMain) {
   const summarize = (name, { violations, stats }) => {
     const byKind = {}; for (const v of violations) byKind[v.kind] = (byKind[v.kind] || 0) + 1;
     const tag = violations.length ? '❌' : '✅';
-    console.log(`${tag} ${name.padEnd(64)} Flächen ${String(stats.faces).padStart(4)}  ${violations.length ? JSON.stringify(byKind) : 'ok'}  (Rand↔Fläche max ${stats.maxVertexSurface.toExponential(1)} mm)`);
+    const open = stats.openShell ? `, offene Hülle: ${stats.openEdges} Randkanten` : '';
+    console.log(`${tag} ${name.padEnd(64)} Flächen ${String(stats.faces).padStart(4)}  ${violations.length ? JSON.stringify(byKind) : 'ok'}  (Rand↔Fläche max ${stats.maxVertexSurface.toExponential(1)} mm${open})`);
     if (process.env.STRICT_VERBOSE) for (const v of violations.slice(0, +process.env.STRICT_VERBOSE || 10)) console.log('     ', v.kind, v.msg);
     return violations.length;
   };
@@ -320,6 +327,25 @@ if (isMain) {
       const res = { on: buildVolumeStepBrepV2({ normalGroups: g, defeature: true }), off: buildVolumeStepBrepV2({ normalGroups: g, defeature: false }) };
       console.log = log;
       for (const k of ['on', 'off']) if (res[k]) bad += summarize(`${f} [${k === 'on' ? 'AN' : 'AUS'}]`, checkStepStrict(res[k].step));
+    }
+    // Selbsttest OPEN_SHELL-Regel (kein Sample ist offen): Würfel ohne Deckel → offene Hülle mit
+    // 4 erlaubten Randkanten; dieselbe Datei als CLOSED_SHELL deklariert → 4 edge-use-Verstöße.
+    {
+      const P = (x, y, z) => [x, y, z], faces = [];
+      const quad = (a, b, c, d) => { for (const t of [[a, b, c], [a, c, d]]) { const u = t[1].map((x, i) => x - t[0][i]), v = t[2].map((x, i) => x - t[0][i]); const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]; const l = Math.hypot(...n); faces.push({ vertices: t, normal: n.map((x) => x / l) }); } };
+      quad(P(0, 0, 0), P(0, 10, 0), P(10, 10, 0), P(10, 0, 0));      // Boden (−z)
+      quad(P(0, 0, 0), P(10, 0, 0), P(10, 0, 10), P(0, 0, 10));      // y = 0
+      quad(P(10, 0, 0), P(10, 10, 0), P(10, 10, 10), P(10, 0, 10));  // x = 10
+      quad(P(10, 10, 0), P(0, 10, 0), P(0, 10, 10), P(10, 10, 10));  // y = 10
+      quad(P(0, 10, 0), P(0, 0, 0), P(0, 0, 10), P(0, 10, 10));      // x = 0 (Deckel z = 10 fehlt)
+      console.log = () => {};
+      const g = unifyCoplanarGroups(buildNormalGroups({ faces })).unified;
+      const res = buildVolumeStepBrepV2({ normalGroups: g });
+      console.log = log;
+      const open = checkStepStrict(res.step), closed = checkStepStrict(res.step.replace('OPEN_SHELL', 'CLOSED_SHELL'));
+      const ok = open.stats.openShell && open.violations.length === 0 && open.stats.openEdges === 4 && closed.violations.filter((v) => v.kind === 'edge-use').length === 4;
+      console.log(`${ok ? '✅' : '❌'} ${'Selbsttest offene Hülle (Würfel ohne Deckel)'.padEnd(64)} offen: ${open.violations.length} Verstöße/${open.stats.openEdges} Randkanten, als CLOSED_SHELL: ${closed.violations.length} Verstöße`);
+      if (!ok) bad++;
     }
   }
   console.log(bad ? `\n❌ ${bad} Verstöße` : '\n✅ alle STEP-Dateien streng gültig');

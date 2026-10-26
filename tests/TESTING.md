@@ -4,7 +4,7 @@
 
 ```bash
 # ALLE schnellen Regressionen nacheinander (tests/run-all.mjs):
-# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → collinear.
+# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → collinear → strict → orient.
 # Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
 npm test
 
@@ -18,6 +18,12 @@ npm run test:ebike       # Scorecard verrundetes eBike (47 Flächen)
 npm run test:tube        # 6 Synthetik-Kanäle
 npm run test:bore        # Dünnplatten-Bohrungen → CYLINDRICAL_SURFACE
 npm run test:collinear   # kollineare Kantenpunkte
+npm run test:strict      # STEP streng wie strikte Importer (CST CAD Navigator/ACIS): Rand-Ketten,
+                         # Kanten-Nutzung, Punkte auf Kurve/Fläche (1e-4 mm), Umlaufsinn — ohne
+                         # Heilung, alle Samples AN/AUS; einzelne Dateien: node tests/step-strict.mjs a.step
+npm run test:orient      # Orientierungs-Wächter: kein Fehlalarm, verdrehte Flächen (Test-Hook
+                         # STLREV_TEST_FLIP) werden gefangen, Export fällt sauber zurück
+                         # (--stress: Wächter-Laufzeit zusätzlich am 50k-Torus)
 
 # Nur E2E-Tests (Puppeteer; läuft bei npm test bewusst NICHT mit)
 npm run test:e2e
