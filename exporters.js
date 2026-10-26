@@ -210,13 +210,17 @@ export function buildVolumeStepBrepV2(analysis) {
   // OFF = Verrundungen bleiben (facettiert); nur exakte Direkt-Treffer konvertieren weiter.
   const DEFEATURE = analysis?.defeature !== false;
 
-  // ---- Test-Hook (nur Tests/Node): STLREV_TEST_FLIP='bore'|'cone'|'tube'|'plane' dreht den
-  // emittierten same_sense der jeweiligen Flächenart ABSICHTLICH um. Beide Nutzungen jeder
-  // Kreis-Kante drehen dabei mit → die Kanten-Bilanz (fwd/rev) bleibt ausgeglichen und das
-  // Wasserdicht-Verdikt sieht nichts; genau diesen Fall muss der Orientierungs-Wächter
-  // (unten in assemble) fangen. Im Browser-Worker gibt es kein process → immer ''.
-  const TEST_FLIP = (typeof process !== 'undefined' && process.env && process.env.STLREV_TEST_FLIP) || '';
+  // ---- Test-Hooks (nur Tests/Node, tests/orientation-guard.mjs): STLREV_TEST_FLIP='bore'|'cone'|
+  // 'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen ABSICHTLICH um,
+  // 'tubecurve' die mittlere Übergangskurve jedes Kanals (beide Nutzungen). Die Kanten-Bilanz
+  // (fwd/rev) bleibt dabei ausgeglichen, das Wasserdicht-Verdikt sieht nichts — genau diese Fälle
+  // muss der Orientierungs-Wächter (assemble) fangen. STLREV_TEST_GUARD_REPORT_ONLY=1: Wächter
+  // meldet nur (kein Fallback) — damit der Test die fehlerhafte Datei selbst prüfen kann.
+  // Im Browser-Worker gibt es kein process → beide aus.
+  const testEnv = (k) => (typeof process !== 'undefined' && process.env && process.env[k]) || '';
+  const TEST_FLIP = testEnv('STLREV_TEST_FLIP');
   const testFlip = (kind) => TEST_FLIP === kind;
+  const GUARD_FALLBACK = testEnv('STLREV_TEST_GUARD_REPORT_ONLY') !== '1';
 
   const entities = [];
   let id = 1;
@@ -1896,15 +1900,22 @@ export function buildVolumeStepBrepV2(analysis) {
   };
 
   // ---- Orientierungs-Wächter (lokal, billig) ----
-  // Der Wasserdicht-Zähler sieht eine KONSISTENT gedrehte analytische Fläche nicht: dreht sich
-  // same_sense (bzw. BEIDE Nutzungen einer Übergangskurve), bleibt die Kanten-Bilanz ausgeglichen —
-  // occt wählt dann still das Komplementär-Band (+8.8 % Volumen im Synthetik-Test, +400 % am eBike).
-  // Darum vergleicht der Wächter je analytischer Fläche die effektive Außennormale (Flächennormale
-  // × same_sense) an Stützpunkten (Schwerpunkte der ersetzten ORIGINAL-Dreiecke, deren Wicklungs-
-  // Normalen nach außen zeigen). Widerspricht das flächengewichtete Mittel (< 0), gilt die
-  // Umwandlung als fehlgeschlagen → orientationGuardFailures im Report + Fallback wie !watertight.
+  // Der Wasserdicht-Zähler prüft nur die Kanten-Bilanz (je Kante 1× vor, 1× zurück). Zwei Fehler
+  // einer analytischen Fläche lassen diese Bilanz ausgeglichen:
+  //   (a) same_sense verdreht — Innen und Außen der Fläche vertauscht;
+  //   (b) eine Rand-Kurve KONSISTENT verdreht (beide Nutzungen) — die Fläche liegt dann rechts vom
+  //       Rand: occt wählt still das Komplementär-Band (+8.8 % Volumen im Synthetik-Test, +400 % am
+  //       eBike), strikte Importer (CST/ACIS) verwerfen die Fläche.
+  // Darum prüft der Wächter je analytischer Fläche (Bohrungs-Zylinder, Fasen-Kegel, Kanal-Stück):
+  //   (a) Normalen-Probe: effektive Normale (Flächennormale × same_sense) an den Schwerpunkten der
+  //       ersetzten ORIGINAL-Dreiecke gegen deren Wicklungs-Normalen (zeigen aus dem Material);
+  //       flächengewichtetes Mittel < 0 → Widerspruch.
+  //   (b) Umlauf-Probe: je Rand einige Kurvenpunkte — die Fläche muss LINKS vom Rand liegen,
+  //       (n_eff × Laufrichtung) · (Richtung zur Fläche) > 0 (Regel wie tests/step-strict.mjs).
+  // Widerspruch → orientationGuardFailures im Report + Fallback wie bei offener Hülle (unten).
   const GUARD_MAX_TRIS = 400;        // Stützpunkte je Bohrung/Kegel (Stride) — fürs Vorzeichen üppig
   const GUARD_TUBE_MAX_TRIS = 6000;  // je Kanal (alle Stücke teilen sich EINEN Scan)
+  const GUARD_LOOP_SAMPLES = 8;      // Kurvenpunkte je Rand für die Umlauf-Probe
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   // Flächengewichtetes Richtungs-Mittel: Σ(2A·cosθ)/Σ(2A) über die Dreiecke der Gruppen.
   // normalAt(p) = effektive Flächennormale (Einheitsvektor) am Punkt p (null = nicht auswertbar),
@@ -1932,6 +1943,46 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
     return w > 0 ? sum / w : null;
+  };
+  // Punkte + Tangenten einer Rand-Kurve in ihrer NATÜRLICHEN Laufrichtung (wie emittiert):
+  // CIRCLE/ELLIPSE laufen gegen den Uhrzeigersinn um ihre Achse, der B-Spline (schräge Kanal-
+  // Mündung) in der Reihenfolge seiner Stützpunkte (geom.samples liegen auf der Kurve).
+  const curveGuardSamples = (geom) => {
+    const out = [];
+    if (geom.kind === 'bspline') {
+      const S = geom.samples;
+      if (!Array.isArray(S) || S.length < 3) return out;
+      const step = Math.max(1, Math.floor(S.length / GUARD_LOOP_SAMPLES));
+      for (let i = 0; i < S.length; i += step) out.push({ p: S[i], t: _sub3(S[(i + 1) % S.length], S[(i - 1 + S.length) % S.length]) });
+      return out;
+    }
+    const z = _norm3(geom.axis), rd = geom.refDir, rz = _dot3(rd, z);
+    const x = _norm3([rd[0] - z[0] * rz, rd[1] - z[1] * rz, rd[2] - z[2] * rz]), y = _cross3(z, x);
+    const a = geom.radius, b = geom.kind === 'ellipse' && Number.isFinite(geom.semi2) ? geom.semi2 : geom.radius;
+    for (let i = 0; i < GUARD_LOOP_SAMPLES; i++) {
+      const u = ((i + 0.5) / GUARD_LOOP_SAMPLES) * 2 * Math.PI, cu = Math.cos(u), su = Math.sin(u);
+      out.push({
+        p: [geom.center[0] + a * cu * x[0] + b * su * y[0], geom.center[1] + a * cu * x[1] + b * su * y[1], geom.center[2] + a * cu * x[2] + b * su * y[2]],
+        t: [-a * su * x[0] + b * cu * y[0], -a * su * x[1] + b * cu * y[1], -a * su * x[2] + b * cu * y[2]],
+      });
+    }
+    return out;
+  };
+  // Umlauf-Probe (b): loops = [{ geom, fwd, d }] — fwd = emittierte Nutzung (.T./.F.), d = Richtung
+  // vom Rand in die Fläche hinein. Mehrheitsentscheid über die Kurvenpunkte; ohne auswertbare
+  // Punkte kein Urteil (true).
+  const loopSenseOk = (loops, normalAt) => {
+    for (const L of loops) {
+      let vote = 0, cnt = 0;
+      for (const { p, t } of curveGuardSamples(L.geom)) {
+        const n = normalAt(p);
+        if (!n) continue;
+        const left = _cross3(n, L.fwd ? t : [-t[0], -t[1], -t[2]]);   // „links“ vom Rand, in der Fläche
+        vote += Math.sign(_dot3(left, L.d)); cnt++;
+      }
+      if (cnt && vote <= 0) return false;
+    }
+    return true;
   };
   // Effektive Normale eines Zylinder-Mantels am Punkt p: ±radial zur Achse (sgn = same_sense).
   const cylGuardNormal = (ap, axis, sgn) => (p) => {
@@ -1963,15 +2014,14 @@ export function buildVolumeStepBrepV2(analysis) {
     const c = Math.cos(u), s = Math.sin(u), d = _dot3(a, v) * (1 - c), x = _cross3(a, v);
     return [v[0] * c + x[0] * s + a[0] * d, v[1] * c + x[1] * s + a[1] * d, v[2] * c + x[2] * s + a[2] * d];
   };
-  // Kanal-Wächter: EIN Scan über die Original-Dreiecke des Kanals; jedes Dreieck wird dem ersten
-  // geometrisch passenden Stück zugeordnet und gegen DESSEN emittierte Orientierung geprüft
-  // (ssOf(k) = emittierter same_sense von Stück k). Rückgabe: Zahl widersprechender Stücke.
-  const guardTube = (tp, ssOf) => {
+  // Kanal-Wächter, je Stück k: accept(p) (gehört p geometrisch zu Stück k?), normalAt(p) (effektive
+  // Normale mit dem emittierten same_sense ssOf(k)) und die Bahn-Tangenten tA/tB an Anfang/Ende.
+  const tubeGuards = (tp, ssOf) => {
     const sp = tp.spec, r = sp.radius, tilted = Math.abs(sp.gamma) > 1e-9;
     const sinG = Math.abs(Math.sin(sp.gamma)), cosG = Math.cos(sp.gamma);
     const radTol = Math.max(0.15, 0.05 * r) + 0.15;
     const rLo = r * cosG - radTol, rHi = r + radTol;  // geneigtes Profil: Wandabstand ∈ [r·cosγ, r]
-    const pcs = sp.pieces.map((pc, k) => {
+    return sp.pieces.map((pc, k) => {
       const sgn = ssOf(k) ? 1 : -1;
       if (pc.kind === 'line') {
         const lo = -r * sinG - 0.4, hi = pc.len + r * sinG + 0.4;
@@ -1996,9 +2046,10 @@ export function buildVolumeStepBrepV2(analysis) {
             return l > 1e-9 ? [sgn * n0[0] / l, sgn * n0[1] / l, sgn * n0[2] / l] : null;
           };
         }
-        return { accept, normalAt, sum: 0, w: 0 };
+        return { accept, normalAt, tA: pc.dir, tB: pc.dir, sum: 0, w: 0 };
       }
-      // Bogen-Stück: Winkelfenster um die Bogen-Achse (ea/eb) + Abstand zum Seelenkreis
+      // Bogen-Stück (Drehung um pc.axis von ea Richtung eb um sweep): Winkelfenster + Abstand
+      // zum Seelenkreis
       const mrg = (r * sinG + 0.4) / pc.R;
       const accept = (p) => {
         const w0 = _sub3(p, pc.O), al = _dot3(w0, pc.axis);
@@ -2053,11 +2104,17 @@ export function buildVolumeStepBrepV2(analysis) {
           return l > 1e-9 ? [sgn * n0[0] / l, sgn * n0[1] / l, sgn * n0[2] / l] : null;
         };
       }
-      return { accept, normalAt, sum: 0, w: 0 };
+      const cs = Math.cos(pc.sweep), ss = Math.sin(pc.sweep);
+      const tB = [-ss * pc.ea[0] + cs * pc.eb[0], -ss * pc.ea[1] + cs * pc.eb[1], -ss * pc.ea[2] + cs * pc.eb[2]];
+      return { accept, normalAt, tA: pc.eb, tB, sum: 0, w: 0 };
     });
+  };
+  // Normalen-Probe (a) für einen Kanal: EIN Scan über seine Original-Dreiecke; jedes Dreieck zählt
+  // für das erste geometrisch passende Stück. Rückgabe: je Stück true = Widerspruch.
+  const tubeScanFails = (tp, pcs) => {
     let total = 0;
     for (const g of tp.groups) total += Math.floor(g.vertices.length / 3);
-    if (!total) return 0;
+    if (!total) return pcs.map(() => false);
     const stride = Math.max(1, Math.ceil(total / GUARD_TUBE_MAX_TRIS));
     let idx = 0;
     for (const g of tp.groups) {
@@ -2077,9 +2134,7 @@ export function buildVolumeStepBrepV2(analysis) {
         }
       }
     }
-    let fails = 0;
-    for (const rec of pcs) if (rec.w > 0 && rec.sum / rec.w < 0) fails++;
-    return fails;
+    return pcs.map((rec) => rec.w > 0 && rec.sum / rec.w < 0);
   };
 
   // ---- Step 3: Flächen emittieren — re-entrant, damit der globale Fallback alles facettiert
@@ -2094,7 +2149,6 @@ export function buildVolumeStepBrepV2(analysis) {
     let guardFailures = 0, guardMs = 0;
     // Emittierte same_sense-Werte (korrekt bzw. vom Test-Hook gedreht) — der Wächter prüft
     // IMMER den tatsächlich emittierten Wert.
-    const ssPlane = !testFlip('plane');
     const ssBore = testFlip('bore');   // korrekt .F.: Wand-Normale zeigt zur Achse (ins Loch)
     const ssCone = testFlip('cone');   // korrekt .F.: dito für die Fase
 
@@ -2126,10 +2180,7 @@ export function buildVolumeStepBrepV2(analysis) {
         bounds.push(addFaceBound(addEdgeLoop(innerOe)));
       }
       const placId = addAxis2Placement3D(centroid, normal, computeRefDir(normal));
-      faceIds.push(addAdvancedFace(bounds, addPlane(placId), ssPlane));
-      // Wächter (Ebene, praktisch gratis): die Emission nutzt die Gruppen-Normale selbst als
-      // Flächennormale — die effektive Normale (× same_sense) darf ihr nie widersprechen.
-      if (!ssPlane) guardFailures++;
+      faceIds.push(addAdvancedFace(bounds, addPlane(placId), true));
     }
 
     // Zylinder-Mantelflächen (nahtlos: 1 CYLINDRICAL_SURFACE, 2 volle Kreis-Bounds). Die STEP-
@@ -2143,7 +2194,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const cylSurf = addCylindricalSurface(cylPlac, r0.radius);
       const tOf = (rim) => _dot3(_sub3(rim.center, plan.surfCenter), ax);
       const tMid = plan.rims.reduce((s, rim) => s + tOf(rim), 0) / plan.rims.length;
-      const bounds = [];
+      const bounds = [], rimLoops = [];
       for (let r = 0; r < plan.rims.length; r++) {
         const rim = plan.rims[r];
         const ce = getOrCreateCircleEdge(rim.rimKey, rim);
@@ -2152,12 +2203,19 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(rim.rimKey, fwd);
         const loopId = addEdgeLoop([addOrientedEdge(ce.ecId, fwd)]);
         bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
+        rimLoops.push({ geom: rim, fwd });
       }
       faceIds.push(addAdvancedFace(bounds, cylSurf, ssBore));
-      { // Wächter: Wand-Facetten der Bohrung gegen die emittierte Mantel-Orientierung
+      { // Wächter: (a) Wand-Facetten der Bohrung gegen die emittierte Mantel-Orientierung,
+        // (b) Umlaufsinn beider Ränder (Fläche zwischen den Rändern = Richtung zum anderen Rand)
         const tg = nowMs();
-        const mean = guardScan(plan.groups, null, cylGuardNormal(plan.surfCenter, ax, ssBore ? 1 : -1));
-        if (mean !== null && mean < 0) guardFailures++;
+        const nAt = cylGuardNormal(plan.surfCenter, ax, ssBore ? 1 : -1);
+        const mean = guardScan(plan.groups, null, nAt);
+        if (rimLoops.length === 2) {
+          rimLoops[0].d = _sub3(rimLoops[1].geom.center, rimLoops[0].geom.center);
+          rimLoops[1].d = _sub3(rimLoops[0].geom.center, rimLoops[1].geom.center);
+        }
+        if ((mean !== null && mean < 0) || (rimLoops.length === 2 && !loopSenseOk(rimLoops, nAt))) guardFailures++;
         guardMs += nowMs() - tg;
       }
 
@@ -2178,10 +2236,17 @@ export function buildVolumeStepBrepV2(analysis) {
         const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceRim.ecId, fRim)]));
         const ib = addFaceBound(addEdgeLoop([addOrientedEdge(ceFlat.ecId, fFlat)]));
         faceIds.push(addAdvancedFace([ob, ib], coneSurf, ssCone));
-        { // Wächter: die von der Chamfer-Zone verdrängten Original-Facetten gegen den Kegel
+        { // Wächter: (a) die von der Chamfer-Zone verdrängten Original-Facetten gegen den Kegel,
+          // (b) Umlaufsinn von Rand- und Flach-Kreis
           const tg = nowMs();
-          const mean = guardScan(chamferDroppedGroups, cr.zone ? inGuardZone(cr.zone) : null, coneGuardNormal(cr, ssCone ? 1 : -1));
-          if (mean !== null && mean < 0) guardFailures++;
+          const nAt = coneGuardNormal(cr, ssCone ? 1 : -1);
+          const mean = guardScan(chamferDroppedGroups, cr.zone ? inGuardZone(cr.zone) : null, nAt);
+          const dRF = _sub3(cr.flatDesc.center, cr.rimDesc.center);
+          const loopsOk = loopSenseOk([
+            { geom: cr.rimDesc, fwd: fRim, d: dRF },
+            { geom: cr.flatDesc, fwd: fFlat, d: [-dRF[0], -dRF[1], -dRF[2]] },
+          ], nAt);
+          if ((mean !== null && mean < 0) || !loopsOk) guardFailures++;
           guardMs += nowMs() - tg;
         }
       }
@@ -2197,7 +2262,10 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const tp of tubesArg) {
       const sp = tp.spec, r = sp.radius, tilted = Math.abs(sp.gamma) > 1e-9;
       const keyOf = (k) => `tube${sp.id}:${k}`;
-      const ssArr = [];
+      const ssArr = [], fArr = [];
+      // Test-Hook 'tubecurve': die mittlere Übergangskurve KONSISTENT gedreht (beide Nutzungen) —
+      // Kanten-Bilanz bleibt dicht, nur die Umlauf-Probe des Wächters sieht es.
+      const flipCurve = testFlip('tubecurve') && sp.pieces.length >= 2 ? Math.floor(sp.pieces.length / 2) : -1;
       sp.pieces.forEach((pc, k) => {
         let surf, sameSense;
         const profCircle = () => addCircle(addAxis2Placement3D(pc.profC, pc.profM, computeRefDir(pc.profM)), r);
@@ -2221,15 +2289,26 @@ export function buildVolumeStepBrepV2(analysis) {
         ssArr[k] = sameSense;
         const c0 = sp.curves[k], c1 = sp.curves[k + 1];
         const e0 = getOrCreateCircleEdge(keyOf(k), c0), e1 = getOrCreateCircleEdge(keyOf(k + 1), c1);
-        const f0 = c0.sense < 0, f1 = c1.sense > 0;
+        const f0 = (c0.sense < 0) !== (k === flipCurve), f1 = (c1.sense > 0) !== (k + 1 === flipCurve);
+        fArr[k] = [f0, f1];
         useCircle(keyOf(k), f0); useCircle(keyOf(k + 1), f1);
         const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(e0.ecId, f0)]));
         const ib = addFaceBound(addEdgeLoop([addOrientedEdge(e1.ecId, f1)]));
         faceIds.push(addAdvancedFace([ob, ib], surf, sameSense));
       });
-      { // Wächter: Kanal-Facetten je Stück gegen die emittierte Flächen-Orientierung
+      { // Wächter je Stück: (a) Kanal-Facetten gegen die emittierte Flächen-Orientierung,
+        // (b) Umlaufsinn beider Ränder (Fläche liegt vom Anfangsrand aus in Bahnrichtung, vom
+        // Endrand aus entgegen)
         const tg = nowMs();
-        guardFailures += guardTube(tp, (k) => ssArr[k]);
+        const pcs = tubeGuards(tp, (k) => ssArr[k]);
+        const scanFail = tubeScanFails(tp, pcs);
+        pcs.forEach((g, k) => {
+          const loopsOk = loopSenseOk([
+            { geom: sp.curves[k], fwd: fArr[k][0], d: g.tA },
+            { geom: sp.curves[k + 1], fwd: fArr[k][1], d: [-g.tB[0], -g.tB[1], -g.tB[2]] },
+          ], g.normalAt);
+          if (scanFail[k] || !loopsOk) guardFailures++;
+        });
         guardMs += nowMs() - tg;
       }
     }
@@ -2255,8 +2334,9 @@ export function buildVolumeStepBrepV2(analysis) {
         boresConverted: plans.length,
         tubesConverted: tubesArg.length,
         tubePieces: tubesArg.reduce((n, tp) => n + tp.spec.pieces.length, 0),
-        // Orientierungs-Wächter: Flächen, deren effektive Normale den Original-Dreiecken
-        // widerspricht (in DIESEM Zusammenbau; nach einem Fallback normalerweise 0).
+        // Orientierungs-Wächter: analytische Flächen, deren Orientierung den Original-Dreiecken
+        // bzw. ihren Rändern widerspricht (in DIESEM Zusammenbau; der Endbericht summiert alle
+        // Fallback-Stufen auf).
         orientationGuardFailures: guardFailures,
         orientationGuardMs: Math.round(guardMs * 1000) / 1000,
       },
@@ -2390,26 +2470,38 @@ export function buildVolumeStepBrepV2(analysis) {
     a.report.cornersDefeatured = cornersDefeatured;
     return a;
   };
+  // Ein Zusammenbau gilt als gescheitert, wenn die Hülle offen ist ODER der Orientierungs-Wächter
+  // eine analytische Fläche verworfen hat (s. assemble) — beides löst dieselben Fallback-Stufen
+  // aus. Die Wächter-Befunde aller Stufen werden aufsummiert (Report: orientationGuardFailures,
+  // fallbackStage 0 = keiner, 1 = ohne Bohrungen/Kanäle, 2 = facettiert).
+  let guardTotal = 0, guardMsTotal = 0, fallbackStage = 0;
+  const failed = (a) => !a.report.watertight || (GUARD_FALLBACK && a.report.orientationGuardFailures > 0);
+  const tracked = (a) => { guardTotal += a.report.orientationGuardFailures; guardMsTotal += a.report.orientationGuardMs; return a; };
   runPipeline(true);
-  let asm = assembleCurrent();
-  // Fallback-Stufe 1 (nur mit Toggle): öffnet eine Bohrungs- oder Kanal-Umwandlung die Hülle, ohne
+  let asm = tracked(assembleCurrent());
+  // Fallback-Stufe 1 (nur mit Toggle): scheitert eine Bohrungs- oder Kanal-Umwandlung, ohne
   // sie neu bauen (Defeaturing bleibt) — sonst verwarf der globale Fallback auch korrekte Bänder/Ecken.
-  if (DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0) && !asm.report.watertight) {
+  if (DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0) && failed(asm)) {
     runPipeline(false);
-    asm = assembleCurrent();
+    asm = tracked(assembleCurrent());
+    fallbackStage = 1;
   }
-  // Fallback-Stufe 2 (global): öffnet die analytische Umwandlung ODER das Defeaturing die Hülle, wird
+  // Fallback-Stufe 2 (global): scheitert die analytische Umwandlung ODER das Defeaturing, wird
   // ALLES facettiert neu gebaut (buildFaceDefs(null) erzeugt FRISCHE, unmutierte Loops) —
   // die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung läuft auch
   // hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
-  if ((asm.report.boresConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && !asm.report.watertight) {
+  if ((asm.report.boresConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && failed(asm)) {
     const fallbackDefs = buildFaceDefs(null);
     removeCollinearPoints(fallbackDefs);
-    asm = assemble(fallbackDefs, []);
+    asm = tracked(assemble(fallbackDefs, []));
     asm.report.filletsDefeatured = 0;
     asm.report.bandsDefeatured = 0;
     asm.report.cornersDefeatured = 0;
+    fallbackStage = 2;
   }
+  asm.report.orientationGuardFailures = guardTotal;
+  asm.report.orientationGuardMs = Math.round(guardMsTotal * 1000) / 1000;
+  asm.report.fallbackStage = fallbackStage;
   const allFaceIds = asm.faceIds;
   const report = asm.report;
   if (allFaceIds.length < 2) return null;
