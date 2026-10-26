@@ -183,6 +183,10 @@ self.addEventListener('message', (event) => {
     // Kanal-Erkennung (tube-sweep.js): gebogene Rohre (Kreisprofil entlang Biarc-Bahn) → group.tube.
     // Wie die Primitiv-Erkennung rein additiv (Tags), gekapselt: ein Fehler lässt Kanäle facettiert.
     try {
+      self.postMessage({
+        id,
+        progress: { step: 'worker', detail: 'Kanal-Erkennung: suche gebogene Kanäle …', ratio: 0.96 }
+      });
       const { tubes, stats } = detectTubes(analysis.normalGroups);
       analysis.tubeStats = { candidates: stats.candidates, tubes: tubes.length };
       if (tubes.length) {

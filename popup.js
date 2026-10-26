@@ -1,8 +1,8 @@
 import { formatBytes, describeDetailLevel } from './utils.js';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=32';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=33';
 
-import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=27';
-import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=18';
+import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=28';
+import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=19';
 import {
   setStatus, setExportEnabled,
   setProgress, progressStep, startIndeterminateProgress, stopIndeterminateProgress,
@@ -61,7 +61,7 @@ const analysisWorker = _createAnalysisWorker();
 function _createAnalysisWorker() {
   const workerUrl = extensionApi?.runtime?.getURL
     ? extensionApi.runtime.getURL('analysis-worker.js')
-    : 'analysis-worker.js?v=17';
+    : 'analysis-worker.js?v=18';
   const worker = new Worker(workerUrl, { type: 'module' });
 
   worker.onmessage = (event) => {
@@ -433,12 +433,17 @@ function setStepWatertightStatus(report) {
     const n = (v) => (Number.isFinite(v) ? v : 0);
     const done = [];
     if (n(report.boresConverted)) done.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
+    if (n(report.mantlesConverted)) done.push(`${report.mantlesConverted} ${report.mantlesConverted === 1 ? 'Außenmantel' : 'Außenmäntel'} als echter Zylinder`);
     if (n(report.tubesConverted)) done.push(`${report.tubesConverted} gebogene${report.tubesConverted === 1 ? 'r Kanal' : ' Kanäle'} als exakte Fläche (${report.tubePieces} Stück)`);
     const rounds = [];
     if (n(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
     if (n(report.cornersDefeatured)) rounds.push(`${report.cornersDefeatured} gerundete Profilecke${report.cornersDefeatured === 1 ? '' : 'n'}`);
     if (n(report.filletsDefeatured)) rounds.push(`${report.filletsDefeatured} Kanten-Verrundung${report.filletsDefeatured === 1 ? '' : 'en'}`);
     if (rounds.length) done.push(`scharf gemacht: ${rounds.join(', ')}`);
+    // Sicherheits-Rückfall (Hülle offen oder Orientierung einer CAD-Fläche unstimmig): sagen, warum
+    // weniger umgewandelt wurde als erkannt
+    if (report.fallbackStage === 1) done.push('Sicherheits-Rückfall: Bohrungen, Mäntel und Kanäle facettiert gelassen');
+    else if (report.fallbackStage === 2) done.push('Sicherheits-Rückfall: komplett facettiert');
     if (done.length) {
       const detail = document.createElement('span');
       detail.className = 'watertight-detail';

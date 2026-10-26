@@ -1,10 +1,29 @@
 import * as THREE from './libs/three.module.js';
 
-// Farbton für normale (nicht erkannte) Regionen in Panel 2/3: Rot/Orange sind für erkannte
-// Bohrungen bzw. Verrundungen reserviert. Der Regenbogen läuft deshalb nur über Gelbgrün → Blau →
-// Violett (61°…299°). Vorher bekam die größte Region (Index 0) Farbton 0 = Rot und sah aus wie
-// eine erkannte Bohrung (z.B. Zylinder-Deckel).
+// Farbton für normale (nicht erkannte) Regionen in Panel 2/3: Rot/Orange/Pink sind für erkannte
+// Bohrungen, Verrundungen bzw. Außenmäntel reserviert. Der Regenbogen läuft deshalb nur über
+// Gelbgrün → Blau → Violett (61°…299°). Vorher bekam die größte Region (Index 0) Farbton 0 = Rot
+// und sah aus wie eine erkannte Bohrung (z.B. Zylinder-Deckel).
 const regionHue = (idx, n) => 0.17 + 0.66 * (idx / Math.max(1, n));
+const MANTLE_COLOR = 0xff2d92;
+// Voller Zylinder als konvexer Außenmantel (Welle, Zapfen, Scheiben-Außenwand) statt Bohrung: die
+// Erkennung nennt jeden vollen Zylinder kind 'bore'; wie in exporters.js (radialScore) entscheidet
+// die Richtung der Wand-Normalen — von der Achse weg = Mantel.
+const isConvexMantle = (group) => {
+  const pr = group.primitive;
+  if (!pr || pr.type !== 'cylinder' || !pr.full || !pr.axis || !pr.axisPoint) return false;
+  const ax = pr.axis, ap = pr.axisPoint, vs = group.vertices;
+  let s = 0;
+  for (let t = 0; t + 2 < vs.length; t += 3) {
+    const a = vs[t], b = vs[t + 1], c = vs[t + 2];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const wx = (a[0] + b[0] + c[0]) / 3 - ap[0], wy = (a[1] + b[1] + c[1]) / 3 - ap[1], wz = (a[2] + b[2] + c[2]) / 3 - ap[2];
+    const al = wx * ax[0] + wy * ax[1] + wz * ax[2];
+    s += nx * (wx - ax[0] * al) + ny * (wy - ax[1] * al) + nz * (wz - ax[2] * al);
+  }
+  return s > 0;
+};
 import { OrbitControls } from './libs/OrbitControls.js';
 
 // ── Module-level state ──────────────────────────────────────────────────────
@@ -276,12 +295,13 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
     normalGroups.forEach((group, idx) => {
       const verts = group.vertices; // Array von [x,y,z]
       const triCount = Math.floor(verts.length / 3); // 3 Vertices pro Dreieck
-      // Erkannte Primitive hervorheben: gebogene Kanäle violett, Bohrungen rot, Verrundungen orange
-      // (statt Regenbogen-HSL). Kanäle zuerst: ihre Streifen tragen oft zusätzlich ein Zylinder-Tag.
+      // Erkannte Primitive hervorheben: gebogene Kanäle violett, Bohrungen rot, Außenmäntel pink,
+      // Verrundungen orange (statt Regenbogen-HSL). Kanäle zuerst: ihre Streifen tragen oft
+      // zusätzlich ein Zylinder-Tag.
       const col = group.tube
         ? new THREE.Color(0xaf52de)
         : group.primitive?.type === 'cylinder'
-        ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff9500 : 0xff3b30)
+        ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff9500 : isConvexMantle(group) ? MANTLE_COLOR : 0xff3b30)
         : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.75, 0.55);
       for (let i = 0; i < triCount; i++) {
         const v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
@@ -460,7 +480,7 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     const col = group.tube
       ? new THREE.Color(0xaf52de)                                                 // Kanal: violett
       : isCyl
-      ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : 0xff1744) // kräftiges Rot / Orange
+      ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : isConvexMantle(group) ? MANTLE_COLOR : 0xff1744) // Rot / Orange / Pink
       : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.30, 0.72);
     const a = isCyl ? 0.96 : 0.26; // erkannte Features fast deckend, Rest stark durchscheinend
     for (let i = 0; i < triCount; i++) {
@@ -510,12 +530,13 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
   if (prims?.length) {
     // Zylinder-Streifen gebogener Kanäle bekommen kein eigenes Overlay (der Kanal ist violett gefärbt)
     const tubePrimIds = new Set(normalGroups.filter((g) => g.tube && g.primitive).map((g) => g.primitive.id));
+    const mantlePrimIds = new Set(normalGroups.filter((g) => !g.tube && isConvexMantle(g)).map((g) => g.primitive.id));
     for (const p of prims) {
-      if (p.type !== 'cylinder' || !p.full) continue; // Overlay nur für volle Bohrungen (Teil-Zylinder/Fillets nur farbig)
+      if (p.type !== 'cylinder' || !p.full) continue; // Overlay nur für volle Bohrungen/Mäntel (Teil-Zylinder/Fillets nur farbig)
       if (tubePrimIds.has(p.id)) continue;
       const cylGeo = new THREE.CylinderGeometry(p.radius, p.radius, p.height, 32, 1, true);
       const cyl = new THREE.Mesh(cylGeo, new THREE.MeshStandardMaterial({
-        color: 0xff1744, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
+        color: mantlePrimIds.has(p.id) ? MANTLE_COLOR : 0xff1744, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
         transparent: true, opacity: 0.45
       }));
       const mid = [
