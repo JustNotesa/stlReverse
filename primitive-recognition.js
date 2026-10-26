@@ -101,10 +101,10 @@ function pcaAxis(normals) {
   return { axis: norm(e.vectors[0]), values: e.values };
 }
 
-// Kåsa-Kreis-Fit in der Ebene ⊥ axis → { center3d, radius, meanDev, maxDev }.
+// Kåsa-Kern in der Ebene ⊥ axis → { center3d, radius } OHNE Abweichungs-Statistik.
 // Heiße Schleifen skalar ausgerollt (identische Operations-Reihenfolge wie die frühere
 // Vektor-Helfer-Fassung, nur ohne Array-Allokationen pro Punkt — Ergebnisse bit-identisch).
-function fitCircleInPlane(points, axis) {
+function fitCircleCore(points, axis) {
   // centroid3 inline (gleiche Summen-Reihenfolge)
   let sx = 0, sy = 0, sz0 = 0;
   for (const p of points) { sx += p[0]; sy += p[1]; sz0 += p[2]; }
@@ -129,8 +129,15 @@ function fitCircleInPlane(points, axis) {
   if (r2 <= 0) return null;
   const radius = Math.sqrt(r2);
   // add(c0, add(scale(u, cu), scale(v, cv))) inline
-  const ctx = c0x + (ux*cu + vx*cv), cty = c0y + (uy*cu + vy*cv), ctz = c0z + (uz*cu + vz*cv);
-  const center = [ctx, cty, ctz];
+  return { center: [c0x + (ux*cu + vx*cv), c0y + (uy*cu + vy*cv), c0z + (uz*cu + vz*cv)], radius };
+}
+
+// Kåsa-Kreis-Fit in der Ebene ⊥ axis → { center3d, radius, meanDev, maxDev }.
+function fitCircleInPlane(points, axis) {
+  const f = fitCircleCore(points, axis);
+  if (!f) return null;
+  const center = f.center, radius = f.radius;
+  const ctx = center[0], cty = center[1], ctz = center[2];
   const ax0 = axis[0], ax1 = axis[1], ax2 = axis[2];
   let sum = 0, mx = 0;
   for (const p of points) {
@@ -140,7 +147,31 @@ function fitCircleInPlane(points, axis) {
     const d = Math.abs(Math.hypot(wx - ax0*along, wy - ax1*along, wz - ax2*along) - radius);
     sum += d; if (d > mx) mx = d;
   }
-  return { center, radius, meanDev: sum / N, maxDev: mx };
+  return { center, radius, meanDev: sum / points.length, maxDev: mx };
+}
+
+// Stabiler LSD-Radix-Sort: Indizes 0..n-1 aufsteigend nach NICHT-NEGATIVEN double-Schlüsseln.
+// IEEE-754-Bitmuster nicht-negativer Doubles sind ordnungs-monoton und wert-eindeutig
+// (kein −0, kein NaN im Einsatz hier) → exakt dieselbe Permutation wie ein stabiler
+// Vergleichs-Sort (a,b)=>k[a]-k[b], nur ohne JS-Comparator-Aufrufe. (Little-Endian-Layout,
+// wie auf allen unterstützten Plattformen.)
+function sortIdxByNonNeg(keys, n) {
+  const kb = new Uint32Array(keys.buffer, 0, n * 2); // [lo,hi] je Double
+  let a = new Uint32Array(n), b = new Uint32Array(n);
+  for (let i = 0; i < n; i++) a[i] = i;
+  const count = new Uint32Array(257);
+  for (let pass = 0; pass < 8; pass++) {
+    const w = pass < 4 ? 0 : 1, shift = (pass & 3) * 8;
+    count.fill(0);
+    for (let i = 0; i < n; i++) count[((kb[2 * a[i] + w] >>> shift) & 0xff) + 1]++;
+    let single = false;
+    for (let k = 1; k <= 256; k++) if (count[k] === n) { single = true; break; }
+    if (single) continue; // alle im selben Eimer → Pass ist ein No-op
+    for (let k = 0; k < 256; k++) count[k + 1] += count[k];
+    for (let i = 0; i < n; i++) { const j = a[i]; b[count[(kb[2 * j + w] >>> shift) & 0xff]++] = j; }
+    const t = a; a = b; b = t;
+  }
+  return a;
 }
 
 // Robuster Kreis-Fit: getrimmte Kåsa-Iteration — verwirft Ausreißer (z. B. tangentiale
