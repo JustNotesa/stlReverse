@@ -986,6 +986,55 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     return true;
   };
+  // Freigang der Kreis-Umwandlung (Review-Fund): der Kreis durch die Polygon-Ecken ragt um die
+  // Pfeilhöhe R·(1−cos(π/n)) über das Netz-Polygon (bei 42°-Segmenten bis 0.066·R). Bei dünnem Steg
+  // schnitt er so einen Nachbar-Loop der Deckfläche (zweite Bohrung, Plattenkante, Außenmantel) —
+  // Loops und Zylinder durchdrangen sich, die Datei blieb aber wasserdicht (Wächter 0, occt −33 %).
+  // Der Kreis (center, R, ⟂ axis, in der Ebene von fd), der `loop` von fd ersetzen soll, muss darum zu
+  // allen ANDEREN Loops der Fläche mindestens CIRCLE_CLEAR_TOL Abstand halten und richtig liegen: ein
+  // Loch-Kreis im Außen-Loop und außerhalb der übrigen Löcher, ein Außenkreis (Mantel) um alle Löcher
+  // herum. Bereits gesetzte Kreise (circleRim) zählen exakt als Kreis. Scheitert es → facettiert lassen.
+  const CIRCLE_CLEAR_TOL = 0.01; // mm (= distance_accuracy_value der STEP-Datei)
+  const circleClear = (center, R, axis, fd, loop) => {
+    if (!fd || !(R > 0)) return false;
+    const to2 = projector2d(_norm3(fd.normal), center);      // Kreismittelpunkt → Ursprung
+    const isOuter = loop === fd.outer, tol = CIRCLE_CLEAR_TOL;
+    // Abstand der Kreislinie (Ursprung, R) zur Strecke a–b: die Abstände der Streckenpunkte zum
+    // Ursprung bilden das Intervall [dmin, dmax]
+    const segDist = (a, b) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / l2)) : 0;
+      const dmin = Math.hypot(a[0] + t * dx, a[1] + t * dy), dmax = Math.max(Math.hypot(a[0], a[1]), Math.hypot(b[0], b[1]));
+      return R < dmin ? dmin - R : (R > dmax ? R - dmax : 0);
+    };
+    for (const L of [fd.outer, ...fd.inner]) {
+      if (L === loop) continue;
+      const otherOuter = L === fd.outer;
+      let P2;
+      if (L.circleRim) {
+        const g = L.circleRim;
+        if (!g.kind || g.kind === 'circle') {
+          const c2 = to2(g.center), d = Math.hypot(c2[0], c2[1]), Rg = g.radius;
+          if (isOuter) { if (!(d + Rg <= R - tol)) return false; }        // Loch-Kreis im Außenkreis
+          else if (otherOuter) { if (!(d + R <= Rg - tol)) return false; } // im Außenkreis (Mantel)
+          else if (!(d >= R + Rg + tol)) return false;                     // zwei Löcher disjunkt
+          continue;
+        }
+        P2 = rimPoints(g).map(to2);                                         // Kanal-Mündung (Ellipse/B-Spline)
+      } else P2 = L.map(to2);
+      if (P2.length < 3) continue;
+      for (let i = 0; i < P2.length; i++) if (segDist(P2[i], P2[(i + 1) % P2.length]) < tol) return false;
+      if (isOuter) { if (!P2.every((p) => Math.hypot(p[0], p[1]) < R)) return false; }       // Loch im Kreis
+      else if (otherOuter) { if (!pointInPoly2d([0, 0], P2)) return false; }                 // Kreis im Außen-Loop
+      else if (Math.hypot(P2[0][0], P2[0][1]) < R || pointInPoly2d([0, 0], P2)) return false; // Löcher disjunkt
+    }
+    return true;
+  };
+  // Freigang beider Rand-Kreise eines Plans an seinen Deck-Loops (scharfe Bohrung, Außenmantel)
+  const rimsClear = (rims, decks) => rims.every((rim, r) => {
+    const fd = faceDefs.find((f) => f.outer === decks[r] || f.inner.includes(decks[r]));
+    return circleClear(rim.center, rim.radius, rim.axis, fd, decks[r]);
+  });
   const innerMatchesRim = (loop, normal, rim) => {
     if (Math.abs(_dot3(normal, rim.axis)) < 0.985) return false; // Wand ~⟂ zur Achse (≤10°)
     let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
@@ -1065,7 +1114,7 @@ export function buildVolumeStepBrepV2(analysis) {
         // Kreis-Achse ist hier die des Primitiv-Fits; ein leicht gekippter Fit stünde sonst neben
         // der Deckfläche → strikte Importer verwerfen die Fläche)
         let hit = null;
-        for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd)) { hit = inner; break; } } if (hit) break; }
+        for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd) && circleClear(rim.center, rim.radius, rim.axis, fd, inner)) { hit = inner; break; } } if (hit) break; }
         if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
         // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX) — nur mit Defeaturing-Toggle
         let cham = null;
@@ -1083,6 +1132,7 @@ export function buildVolumeStepBrepV2(analysis) {
             const dz = circ.meanT;
             if (Math.abs(dz) < CHAMFER_MIN || Math.abs(dz) > CHAMFER_MAX) continue;
             if (!circleOnDeck(circ.center, circ.radius, rim.axis, fd)) continue; // Flach-Kreis in der Deckebene
+            if (!circleClear(circ.center, circ.radius, rim.axis, fd, inner)) continue; // … und mit Freigang
             cham = { inner, circ, dz }; break;
           }
           if (cham) break;
@@ -2329,7 +2379,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const entry of boreById.values()) {
       let res = null;
       try { res = sharpBorePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
-      if (!res) continue;
+      if (!res || !rimsClear(res.plan.rims, res.decks)) continue;
       for (const fi of res.wall) drop.add(fi);
       res.decks[0].circleRim = res.plan.rims[0];
       res.decks[1].circleRim = res.plan.rims[1];
@@ -2502,7 +2552,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const entry of mantleById.values()) {
       let res = null;
       try { res = sharpMantlePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
-      if (!res) continue;
+      if (!res || !rimsClear(res.plan.rims, res.decks)) continue;
       for (const fi of res.wall) drop.add(fi);
       res.decks[0].circleRim = res.plan.rims[0];
       res.decks[1].circleRim = res.plan.rims[1];
