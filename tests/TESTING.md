@@ -17,8 +17,10 @@ npm run test:v2          # Härtetest kurz (voll: node tests/fixtures-v2/check.m
 npm run test:ebike       # Scorecard verrundetes eBike (47 Flächen)
 npm run test:tube        # 6 Synthetik-Kanäle
 npm run test:bore        # Dünnplatten-Bohrungen → CYLINDRICAL_SURFACE
-npm run test:mantel      # Außenmäntel (Welle/Scheibe/Rohr) + Bohrungs-Gates (D-Loch, schräg,
+npm run test:mantel      # Außenmäntel (Welle/Scheibe/Rohr, Zapfen auf Platte, Stufenwelle), konvexe
+                         # Kegel (Stumpf/Spitze), Mantel-Fasen + Bohrungs-Gates (D-Loch, schräg,
                          # gemischte Mündungen) + Fallback-Stufen; je Fall step-strict + occt-Volumen
+                         # (neue Fälle rel. ≤ 1e-5, Richardson-extrapoliert)
 npm run test:collinear   # kollineare Kantenpunkte
 npm run test:strict      # STEP streng wie strikte Importer (CST CAD Navigator/ACIS): Rand-Ketten,
                          # Kanten-Nutzung, Punkte auf Kurve/Fläche (1e-4 mm), Umlaufsinn — ohne
