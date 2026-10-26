@@ -5,12 +5,14 @@
 // analytische Fläche mit verdrehtem same_sense oder eine KONSISTENT verdrehte Rand-Kurve (beide
 // Nutzungen) lässt diese Bilanz ausgeglichen — occt/Fusion reparieren still, strikte Importer
 // (CST CAD Navigator, ACIS) verlieren Flächen. Der Wächter prüft je Bohrungs-Zylinder, Außenmantel,
-// Fasen-Kegel und Kanal-Stück (a) die effektive Normale gegen die Wicklungs-Normalen der ersetzten
-// Original-Dreiecke und (b) den Umlaufsinn der Ränder; Widerspruch → report.orientationGuardFailures +
-// Fallback (Stufe 1: ohne Bohrungen/Mäntel/Kanäle, Defeaturing bleibt; Stufe 2: facettiert).
+// Kegel-Mantel, Fasen-Kegel und Kanal-Stück (a) die effektive Normale gegen die Wicklungs-Normalen der
+// ersetzten Original-Dreiecke und (b) den Umlaufsinn der Ränder; Widerspruch →
+// report.orientationGuardFailures + Fallback (Stufe 1: ohne Bohrungen/Mäntel/Kegel/Kanäle, Defeaturing
+// bleibt; Stufe 2: facettiert).
 //
 //   Positiv:  alle Samples (AN/AUS) + Synthetik-Kanäle A–C aus tube-regression → kein Fehlalarm
-//   Negativ:  Test-Hook STLREV_TEST_FLIP = bore | mantle | cone | tube | tubecurve verdreht die Flächen
+//   Negativ:  Test-Hook STLREV_TEST_FLIP = bore | mantle | mantlecone | cone | tube | tubecurve verdreht
+//             die Flächen ('mantlecone' = konvexe Kegel-Mäntel inkl. Kegel mit Spitze)
 //     (1) nur melden (STLREV_TEST_GUARD_REPORT_ONLY=1): Wächter schlägt an, das Wasserdicht-
 //         Verdikt NICHT — und tests/step-strict.mjs findet den Fehler unabhängig (orient-curved)
 //     (2) mit Fallback: Export fällt sauber zurück — wasserdicht, streng ohne Orientierungs-
@@ -107,9 +109,9 @@ for (const f of readdirSync(SAMPLES).filter((x) => x.toLowerCase().endsWith('.st
     const { res } = exportWith(g, on);
     const r = res.report;
     guardMsMax = Math.max(guardMsMax, r.orientationGuardMs);
-    const analytic = r.boresConverted + r.mantlesConverted + r.tubesConverted;
+    const analytic = r.boresConverted + r.mantlesConverted + r.mantleConesConverted + r.tubesConverted;
     check(r.orientationGuardFailures === 0 && r.fallbackStage === 0,
-      `${f.slice(0, 48).padEnd(48)} ${on ? 'AN ' : 'AUS'}  Wächter 0 (analytisch: ${r.boresConverted} Bohrungen, ${r.mantlesConverted} Mäntel, ${r.tubesConverted} Kanäle, Fallback-Stufe ${r.fallbackStage})${analytic ? '' : ' — nichts zu prüfen'}`);
+      `${f.slice(0, 48).padEnd(48)} ${on ? 'AN ' : 'AUS'}  Wächter 0 (analytisch: ${r.boresConverted} Bohrungen, ${r.mantlesConverted} Mäntel, ${r.mantleConesConverted} Kegel, ${r.tubesConverted} Kanäle, Fallback-Stufe ${r.fallbackStage})${analytic ? '' : ' — nichts zu prüfen'}`);
   }
 }
 for (const letter of ['A', 'B', 'C']) {
@@ -129,6 +131,10 @@ const NEG = [
   { flip: 'mantle', on: false, src: () => sampleGroups('washer_thin.stl'), name: 'washer_thin', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted (Mantel + Bohrung + Kegel)', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: true, src: () => fixtureGroups('v2_h_rohr.stl'), name: 'Härtetest h (Rohr, Deck-Rundungen)', gone: (r) => r.mantlesConverted === 0, keepsDefeature: true },
+  { flip: 'mantle', on: true, src: () => fixtureGroups('v2_x_zapfen_rund.stl'), name: 'Härtetest j2 (Zapfen auf Platte: Rand = Innen-Loop)', gone: (r) => r.mantlesConverted === 0, keepsDefeature: true },
+  { flip: 'mantlecone', on: true, src: () => sampleGroups('cone_frustum.stl'), name: 'cone_frustum (Kegelstumpf)', gone: (r, s) => r.mantleConesConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
+  { flip: 'mantlecone', on: false, src: () => sampleGroups('cone_flat.stl'), name: 'cone_flat (flacher Kegelstumpf)', gone: (r, s) => r.mantleConesConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
+  { flip: 'mantlecone', on: true, src: () => sampleGroups('cone_pointed.stl'), name: 'cone_pointed (Kegel mit Spitze, VERTEX_LOOP)', gone: (r, s) => r.mantleConesConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'cone', on: true, src: () => sampleGroups('washer_chamfered.stl'), name: 'washer_chamfered', gone: (r, s) => count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'cone', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted', gone: (r, s) => count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'tube', on: true, src: () => sampleGroups(EBIKE_PLAIN), name: 'eBike ohne Rundungen', gone: (r) => r.tubesConverted === 0 },
