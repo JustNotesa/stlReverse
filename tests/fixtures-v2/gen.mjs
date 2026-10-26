@@ -75,7 +75,8 @@ export function offsetRing(pts, off) {
 }
 
 // ── Deck-Übergänge als Schichtfolgen [{z, s}] (z aufsteigend) ───────────────
-// kind: 'sharp' | 'round' (konvex) | 'concave' (Hohlkehle) | 'chamfer' (45°-Fase, Breite r)
+// kind: 'sharp' | 'round' (konvex) | 'concave' (Hohlkehle) | 'chamfer' (45°-Fase, Breite r) |
+//       'countersink' (Senkung: Kegel mit Tiefe depth, Spitzenwinkel angleDeg; Kanten-Rundungen r/rw)
 // draftDeg: Wand-Neigung (Formschräge; Wand bei Höhe z um z·tan α ins Material versetzt) —
 // die Rundung bleibt dann tangential an Wand UND Deckfläche (Mittelpunkt im Abstand r zu beiden).
 function capSeq(spec, end, z0, z1, draftDeg = 0) {
@@ -84,6 +85,32 @@ function capSeq(spec, end, z0, z1, draftDeg = 0) {
   const wallS = (z) => (z - z0) * ta;
   if (kind === 'sharp') return [end === 'bottom' ? { z: z0, s: wallS(z0) } : { z: z1, s: wallS(z1) }];
   const r = spec.r, N = spec.N ?? 8;
+  if (kind === 'countersink') {
+    // Senkung (Kegel, Spitzenwinkel angleDeg, Default 90°) mit Tiefe `depth` an der Mündung. Die
+    // Kante Senkung → Deckfläche ist mit r verrundet, die Kante Wand → Senkung mit rw (0 = scharf).
+    // Lokale Koordinate u = Abstand zur Deckfläche: Wand-Ende → (Bogen rw) → Kegel → (Bogen r) →
+    // Deckfläche (u=0). Beim Schärfen (sharpen) bleibt der Kegel erhalten, nur r, rw → 0.
+    if (draftDeg) throw new Error('Senkung + Formschräge nicht vorgesehen');
+    const D = spec.depth, beta = ((spec.angleDeg ?? 90) / 2) * PI / 180, rf = r || 0, rw = spec.rw || 0;
+    const sEdge = D * Math.tan(beta);                     // scharfe Senkungskante (Versatz an der Deckfläche)
+    const tlen = rf * Math.tan((PI / 2 - beta) / 2);      // Tangentenlänge der Deck-Verrundung
+    const tw = rw * Math.tan(beta / 2);                   // Tangentenlänge der Wand-Verrundung
+    if (tlen + tw > D / Math.cos(beta) - 1e-9) throw new Error('Senkungs-Verrundungen zu groß');
+    const us = [];
+    if (rw > 0) {
+      for (let k = 0; k <= N; k++) { const a = PI + beta * k / N; us.push({ u: D + tw + rw * Math.sin(a), s: rw + rw * Math.cos(a) }); }
+      us[0].s = 0;                                        // exakt auf der Wand
+    } else us.push({ u: D, s: 0 });
+    if (rf > 0) {
+      for (let k = 0; k <= N; k++) {
+        const a = -(PI - beta) + (PI / 2 - beta) * k / N;
+        us.push({ u: rf + rf * Math.sin(a), s: sEdge + tlen + rf * Math.cos(a) });
+      }
+      us[us.length - 1].u = 0;                            // exakt in der Deckebene
+    } else us.push({ u: 0, s: sEdge });
+    const seq = us.map(({ u, s }) => ({ z: end === 'bottom' ? z0 + u : z1 - u, s }));
+    return end === 'bottom' ? seq.reverse() : seq;
+  }
   if (kind === 'chamfer') {
     if (draftDeg) throw new Error('Fase + Formschräge nicht vorgesehen');
     return end === 'bottom' ? [{ z: z0, s: r }, { z: z0 + r, s: 0 }] : [{ z: z1 - r, s: 0 }, { z: z1, s: r }];
@@ -294,13 +321,15 @@ export function toBinaryStl(tris, name = 'fixture') {
 }
 
 // Körper ohne Rundungen (scharfe Kanten) — `which(colIndex, end)` wählt aus, was scharf wird.
+// Senkungen bleiben dabei Senkungen: scharf wird nur ihre Kanten-Verrundung (r → 0).
 export function sharpen(body, which = () => true) {
+  const sharpOf = (spec) => (spec?.kind === 'countersink' ? { ...spec, r: 0, rw: 0 } : { kind: 'sharp' });
   return {
     ...body,
     columns: body.columns.map((col, i) => ({
       ...col,
-      bottom: which(i, 'bottom') ? { kind: 'sharp' } : col.bottom,
-      top: which(i, 'top') ? { kind: 'sharp' } : col.top,
+      bottom: which(i, 'bottom') ? sharpOf(col.bottom) : col.bottom,
+      top: which(i, 'top') ? sharpOf(col.top) : col.top,
     })),
   };
 }
@@ -455,7 +484,7 @@ export const BODIES = [
   },
   {
     id: 'l', extra: true, file: 'v2_x_rippe',
-    desc: 'Rippe 40×4×10, r=1.5 — Deckfläche schmal (Band > 3× Deckfläche)',
+    desc: 'Rippe 40×4×10, r=1.5 — Deckfläche schmal (Band 5× so groß wie die Deckfläche; frühere Schranke 3×)',
     columns: [plate(rectProfile(0, 0, 40, 4), 10, R(1.5))],
     expect: { mode: 'sharp', bands: 2 },
   },
@@ -537,19 +566,19 @@ export const BODIES = [
   },
   {
     id: 's', extra: true, file: 'v2_x_grosser_radius',
-    desc: 'Block 60×40×20, Rundung r=5.5 (> RMAX 5 mm)',
+    desc: 'Block 60×40×20, Rundung r=5.5 (über der früheren Schranke RMAX 5 mm)',
     columns: [plate(rectProfile(0, 0, 60, 40), 20, R(5.5))],
     expect: { mode: 'sharp', bands: 2 },
   },
   {
     id: 't1', extra: true, file: 'v2_x_duenn_r1',
-    desc: 'dünne Platte 40×30×2.5, r=1 (RMAX = 0.45·2.5 = 1.125)',
+    desc: 'dünne Platte 40×30×2.5, r=1 (frühere Schranke RMAX = 0.45·2.5 = 1.125)',
     columns: [plate(rectProfile(0, 0, 40, 30), 2.5, R(1))],
     expect: { mode: 'sharp', bands: 2 },
   },
   {
     id: 't2', extra: true, file: 'v2_x_duenn_r1.2',
-    desc: 'dünne Platte 40×30×2.5, r=1.2 (> RMAX 1.125)',
+    desc: 'dünne Platte 40×30×2.5, r=1.2 (über der früheren Schranke RMAX 1.125; Wand 0.1 mm)',
     columns: [plate(rectProfile(0, 0, 40, 30), 2.5, R(1.2))],
     expect: { mode: 'sharp', bands: 2 },
   },
@@ -590,6 +619,78 @@ export const BODIES = [
     ],
     expect: { mode: 'sharp', bands: 4 },
     boreChamfer: [{ col: 1, R: 10, seg: 96, r: 0.5, H: 8 }],
+  },
+  // ── Senkungen: Kegel + Kanten-Rundung dürfen NIE als ein Verrundungsband gelten (Review-Fund:
+  // v2 schärfte Senkung samt Rundung weg → glatte Bohrung, wasserdicht, ΔV +55 mm³). Soll: Senkung
+  // bleibt (Ziel: nur die Rundung scharf, Kegel bleibt — zulässig: Kegel durch die Rundung).
+  {
+    id: 'x1', extra: true, file: 'v2_x_senkung',
+    desc: 'Platte 40×30×10 (scharf), Bohrung R4 (32 Seg.) mit 90°-Senkung oben (Tiefe 2), Senkungskante r=0.5',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, N: 8 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 90, r: 0.5, rw: 0 }],
+  },
+  {
+    id: 'x2', extra: true, file: 'v2_x_senkung_platte_r1',
+    desc: 'wie (x1), Platte außen mit Deck-Rundung r=1 (v2 schärft außen, die Senkung muss bleiben)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, R(1)),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, N: 8 } },
+    ],
+    expect: { mode: 'sharp', bands: 2 },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 90, r: 0.5, rw: 0 }],
+  },
+  {
+    id: 'x3', extra: true, file: 'v2_x_senkung_wandrundung',
+    desc: 'Senkung (90°, Tiefe 2) mit Rundung r=0.5 an der Kante Bohrung → Kegel, Senkungskante oben scharf',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0, rw: 0.5, N: 8 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 90, r: 0, rw: 0.5 }],
+  },
+  {
+    id: 'x4', extra: true, file: 'v2_x_senkung60',
+    desc: 'wie (x1), 60°-Senkung (Kegel 30° zur Achse → Knick 30° zur Bohrungswand, knapp über der Tangential-Grenze 25°)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, N: 8, angleDeg: 60 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 60, r: 0.5, rw: 0 }],
+  },
+  {
+    id: 'x5', extra: true, file: 'v2_x_senkung_beidseitig',
+    desc: 'Senkung (90°, Tiefe 2), BEIDE Kanten verrundet (Deck r=0.5, Bohrung rw=0.5) — tangential an Deckfläche und Bohrung, Kegel dazwischen flach',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, rw: 0.5, N: 8 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 90, r: 0.5, rw: 0.5 }],
+  },
+  {
+    id: 'x6', extra: true, file: 'v2_x_fase_verrundet',
+    desc: 'Rechteck 40×30×10, oben 45°-Fase (Tiefe 1.5) mit verrundeten Kanten r=0.5 (Senkungs-Profil an der Außenkontur) — die Fase muss bleiben',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, rw: 0.5, N: 8 } })],
+    expect: { mode: 'sharp' },
+  },
+  // ── Bandform (ersetzt die Schranken RMAX/Bandfläche ≤ 3× Deckfläche): Kuppe ≠ Verrundung ──
+  {
+    id: 'y1', extra: true, file: 'v2_x_kuppe',
+    desc: 'Zapfen R5 (48 Seg.) ×12, oben Rundung r=4.5 → Kuppe über Restfläche R0.5 (Kugelkappe, muss bleiben)',
+    columns: [plate(circleProfile(0, 0, 5, 48), 12, null, { bottom: { kind: 'sharp' }, top: R(4.5) })],
+    expect: { mode: 'skip' },
+  },
+  {
+    id: 'y2', extra: true, file: 'v2_x_zapfen_r2.5',
+    desc: 'Zapfen R5 (48 Seg.) ×12, oben Rundung r=2.5 (Deckfläche R2.5 — Band 4× so groß wie die Deckfläche)',
+    columns: [plate(circleProfile(0, 0, 5, 48), 12, null, { bottom: { kind: 'sharp' }, top: R(2.5) })],
+    expect: { mode: 'sharp', bands: 1 },
   },
 ];
 
