@@ -372,6 +372,12 @@ export function buildVolumeStepBrepV2(analysis) {
     const ka = vtxKey(a), kb = vtxKey(b);
     return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
   };
+  // Punkt-Nummern (gleicher vtxKey = gleiche Nummer) für Kanten-Schlüssel als ZAHL — die
+  // Zeichenketten-Schlüssel kosteten bei der Ebenheits-Zerlegung am 50k-Stressnetz spürbar Zeit.
+  const VID_M = 67108864;                                    // 2^26 Punkte → Schlüssel < 2^52
+  const vidOf = new Map(), vidKeys = [];
+  const vid = (p) => { const k = vtxKey(p); let i = vidOf.get(k); if (i === undefined) { i = vidKeys.length; vidOf.set(k, i); vidKeys.push(k); } return i; };
+  const edgeNum = (a, b) => { const ia = vid(a), ib = vid(b); return ia < ib ? ia * VID_M + ib : ib * VID_M + ia; };
 
   // Chain boundary edges into closed loops (ordered 3D point lists).
   const chainEdges = (edges) => {
@@ -465,6 +471,251 @@ export function buildVolumeStepBrepV2(analysis) {
   const MIN_FACE_AREA = 1e-6; // mm²
   const MIN_HOLE_AREA = 1e-6;
 
+  // Rand-Kanten (genau 1× genutzt) einer Dreiecksmenge, gerichtet wie in ihrem Dreieck (Wicklung).
+  const boundaryEdgesOf = (verts, tris) => {
+    const cnt = new Map(), first = new Map();
+    for (const t of tris) {
+      const tri = [verts[t * 3], verts[t * 3 + 1], verts[t * 3 + 2]];
+      for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
+        const k = edgeNum(a, b);
+        cnt.set(k, (cnt.get(k) || 0) + 1);
+        if (!first.has(k)) first.set(k, { v0: a, v1: b });
+      }
+    }
+    const out = [];
+    for (const [k, c] of cnt) if (c === 1) out.push(first.get(k));
+    return out;
+  };
+  // Berührt sich der Rand selbst (Ecke mit > 2 Rand-Kanten)? Dann verkettet chainEdges (richtungs-
+  // blind) dort beliebig weiter — der Loop läuft danach stückweise verkehrt herum, die Nachbarn
+  // nutzen die Kanten gleichsinnig (dino: 44 Orientierungsfehler an 3 solchen Flächen).
+  const hasPinch = (edges) => {
+    const deg = new Map();
+    for (const { v0, v1 } of edges) {
+      for (const v of [v0, v1]) { const k = vtxKey(v), d = (deg.get(k) || 0) + 1; if (d > 2) return true; deg.set(k, d); }
+    }
+    return false;
+  };
+  // Gerichtete Rand-Kanten zu Loops verketten und an Mehrfach-Ecken auftrennen. Jede Kante folgt der
+  // Dreieckswicklung → Außenränder laufen gegen den Uhrzeigersinn um die Normale, Löcher im
+  // Uhrzeigersinn — egal, wie die Kette an einer Mehrfach-Ecke weiterläuft. null = Rand nicht in
+  // geschlossene gerichtete Loops zerlegbar (uneinheitliche Wicklung) → richtungsblinder Weg.
+  const chainDirected = (edges) => {
+    const outs = new Map();
+    edges.forEach((e, i) => { const k = vtxKey(e.v0), a = outs.get(k); if (a) a.push(i); else outs.set(k, [i]); });
+    const used = new Uint8Array(edges.length);
+    const loops = [];
+    for (let s = 0; s < edges.length; s++) {
+      if (used[s]) continue;
+      const startKey = vtxKey(edges[s].v0);
+      const pts = [], keys = [];
+      let i = s, closed = false;
+      for (let guard = 0; guard <= edges.length; guard++) {
+        used[i] = 1; pts.push(edges[i].v0); keys.push(vtxKey(edges[i].v0));
+        const kEnd = vtxKey(edges[i].v1);
+        if (kEnd === startKey) { closed = true; break; }
+        const cand = outs.get(kEnd);
+        let next = -1;
+        if (cand) for (const j of cand) if (!used[j]) { next = j; break; }
+        if (next < 0) break;
+        i = next;
+      }
+      if (!closed) return null;
+      // Taucht ein Punkt erneut auf, ist das Stück seit seinem ersten Auftreten ein eigener
+      // geschlossener Loop (gleichsinnig, da jede Kante der Wicklung folgt).
+      const stP = [], stK = [], pos = new Map();
+      for (let j = 0; j < pts.length; j++) {
+        const k = keys[j], at = pos.get(k);
+        if (at !== undefined) {
+          const subP = stP.splice(at), subK = stK.splice(at);
+          for (const kk of subK) pos.delete(kk);
+          if (subP.length >= 3) loops.push(subP);
+        }
+        pos.set(k, stP.length); stP.push(pts[j]); stK.push(k);
+      }
+      if (stP.length >= 3) loops.push(stP);
+    }
+    return loops;
+  };
+  const loopCentroid = (loops) => {
+    let cx = 0, cy = 0, cz = 0, ntot = 0;
+    for (const loop of loops) for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; ntot++; }
+    return ntot ? [cx / ntot, cy / ntot, cz / ntot] : null;
+  };
+  const projector2d = (normal, centroid) => {
+    const uDir = computeRefDir(normal);
+    const vDir = _norm3(_cross3(normal, uDir));
+    return (p) => { const dp = _sub3(p, centroid); return [_dot3(dp, uDir), _dot3(dp, vDir)]; };
+  };
+  const signedArea2d = (pts) => {
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) { const j = (i + 1) % pts.length; a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1]; }
+    return a * 0.5;
+  };
+  const centroid2d = (pts) => { let x = 0, y = 0; for (const p of pts) { x += p[0]; y += p[1]; } return [x / pts.length, y / pts.length]; };
+
+  // Gerichtete Loops → Flächen: positive Fläche (um die Normale) = Außenrand, negative = Loch;
+  // jedes Loch gehört zum kleinsten Außenrand, der es enthält. null, wenn ein Loch keinen hat.
+  const facesFromDirectedLoops = (loops, normal, minFace, minHole) => {
+    const centroid = loopCentroid(loops);
+    if (!centroid) return [];
+    const to2 = projector2d(normal, centroid);
+    const l2 = loops.map((L) => L.map(to2));
+    const areas = l2.map(signedArea2d), cents = l2.map(centroid2d);
+    const outerIdx = [], holeIdx = [];
+    areas.forEach((a, i) => { if (a > 0) outerIdx.push(i); else if (a < 0) holeIdx.push(i); });
+    const holesOf = new Map(outerIdx.map((o) => [o, []]));
+    for (const h of holeIdx) {
+      let best = -1, bestA = Infinity;
+      for (const o of outerIdx) if (areas[o] < bestA && areas[o] > -areas[h] && pointInPoly2d(cents[h], l2[o])) { best = o; bestA = areas[o]; }
+      if (best < 0) return null;
+      holesOf.get(best).push(h);
+    }
+    const faces = [];
+    for (const o of outerIdx) {
+      if (areas[o] < minFace) continue;
+      const inner = holesOf.get(o).filter((h) => -areas[h] >= minHole).map((h) => loops[h]);
+      faces.push({ outer: loops[o], inner, normal, centroid });
+    }
+    return faces;
+  };
+
+  // Richtungsblinder Weg (bisheriger Stand, für alle Ränder ohne Mehrfach-Ecke unverändert).
+  const facesFromUndirected = (boundaryEdges, normal) => {
+    const rawLoops = chainEdges(boundaryEdges);
+    if (!rawLoops.length) return [];
+    // Centroid for 2D projection.
+    const centroid = loopCentroid(rawLoops);
+    if (!centroid) return [];
+    const project2d = projector2d(normal, centroid);
+    const loops2d = rawLoops.map(loop => loop.map(project2d));
+    const signedAreas = loops2d.map(signedArea2d);
+    const centroids2d = loops2d.map(centroid2d);
+
+    // Nesting: each loop's parent = smallest *larger* containing loop.
+    // Der `areaJ > areaI`-Test ist essenziell: bei einem zentrierten Loch (z.B.
+    // block_with_hole) liegt der Schwerpunkt der äußeren Rechteck-Kontur GENAU im
+    // kleinen Bohrungs-Ring. Ohne Größen-Check würde pointInPoly2d das Rechteck
+    // fälschlich als "im Ring enthalten" einstufen → Außen/Innen vertauscht →
+    // Ring wird als FACE_OUTER_BOUND emittiert (362 Kanten 3× genutzt → 732
+    // non-manifold). Ein Container muss IMMER flächengrößer sein als sein Kind.
+    const parent = new Array(rawLoops.length).fill(-1);
+    for (let i = 0; i < rawLoops.length; i++) {
+      let bestJ = -1, bestArea = Infinity;
+      const areaI = Math.abs(signedAreas[i]);
+      for (let j = 0; j < rawLoops.length; j++) {
+        if (i === j) continue;
+        const areaJ = Math.abs(signedAreas[j]);
+        if (areaJ <= areaI) continue;                       // Eltern müssen größer sein
+        if (pointInPoly2d(centroids2d[i], loops2d[j])) {
+          if (areaJ < bestArea) { bestArea = areaJ; bestJ = j; }
+        }
+      }
+      parent[i] = bestJ;
+    }
+    const depth = new Array(rawLoops.length).fill(0);
+    for (let i = 0; i < rawLoops.length; i++) {
+      let d = 0, p = parent[i];
+      while (p !== -1 && d < 20) { d++; p = parent[p]; }
+      depth[i] = d;
+    }
+
+    // WICHTIG für Wasserdichtigkeit: die ROHEN Loop-Vertices (= echte Mesh-Vertices) verwenden,
+    // NICHT pro-Fläche projizieren oder vereinfachen. Sonst wandern gemeinsame Vertices
+    // benachbarter Flächen unterschiedlich (projectOntoPlane: je eigene Ebene) bzw. eine Fläche
+    // entfernt einen Punkt, den die Nachbarfläche behält (simplifyLoop → T-Junction) → Risse.
+    // Mit Roh-Vertices teilen sich Nachbarflächen exakt dieselben Kanten → Edge-Registry dedupliziert
+    // sie → jede Kante genau 2× → geschlossene Hülle. (Tradeoff: mehr Kanten, leicht facettiert.)
+    const faces = [];
+    for (let i = 0; i < rawLoops.length; i++) {
+      if ((depth[i] % 2) !== 0) continue;
+      if (Math.abs(signedAreas[i]) < MIN_FACE_AREA) continue;
+      const outer = signedAreas[i] >= 0 ? rawLoops[i] : rawLoops[i].slice().reverse();
+      const inner = [];
+      for (let j = 0; j < rawLoops.length; j++) {
+        if (parent[j] === i && Math.abs(signedAreas[j]) >= MIN_HOLE_AREA) {
+          inner.push(signedAreas[j] <= 0 ? rawLoops[j] : rawLoops[j].slice().reverse());
+        }
+      }
+      faces.push({ outer, inner, normal, centroid });
+    }
+    return faces;
+  };
+
+  // Berühren sich zwei Ränder einer Fläche in einer Ecke (Loch an Loch, Loch am Außenrand)?
+  const loopsTouch = (fd) => {
+    const seen = new Map();
+    const loops = [fd.outer, ...fd.inner];
+    for (let li = 0; li < loops.length; li++) {
+      for (const p of loops[li]) { const k = vtxKey(p), o = seen.get(k); if (o !== undefined && o !== li) return true; seen.set(k, li); }
+    }
+    return false;
+  };
+  // Kanten-Valenz über ALLE Dreiecke des Netzes (lazy): > 2 = im Netz non-manifold. Liegt so eine
+  // Kante INNERHALB einer Fläche (Faltung: zwei Dreiecke der Fläche + ein fremdes Blatt), bleibt sie
+  // unsichtbar; wird die Fläche zerlegt, wäre sie 4× genutzt → die Teilflächen bekommen dafür eine
+  // eigene Kanten-Instanz (fold, s. buildLoopEdges).
+  let meshEdgeCount = null;
+  const meshEdgeValence = (k) => {
+    if (!meshEdgeCount) {
+      meshEdgeCount = new Map();
+      for (const g of normalGroups) {
+        const vs = g.vertices;
+        for (let t = 0; t + 2 < vs.length; t += 3) {
+          for (const [a, b] of [[vs[t], vs[t + 1]], [vs[t + 1], vs[t + 2]], [vs[t + 2], vs[t]]]) { const e = edgeKeyFn(a, b); meshEdgeCount.set(e, (meshEdgeCount.get(e) || 0) + 1); }
+        }
+      }
+    }
+    return meshEdgeCount.get(k) || 0;
+  };
+  let foldSeq = 0;
+  // Jedes Dreieck eine eigene (exakt ebene) Fläche, Rand in Wicklungsrichtung.
+  const trianglesAsFaces = (verts, tris, normal) => {
+    const faces = [], inner = new Map();
+    for (const t of tris) {
+      const a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+      const ka = vtxKey(a), kb = vtxKey(b), kc = vtxKey(c);
+      if (ka === kb || kb === kc || ka === kc) continue;              // entartet: keine Fläche
+      const wn = _cross3(_sub3(b, a), _sub3(c, a)), l = Math.hypot(wn[0], wn[1], wn[2]);
+      faces.push({ outer: [a, b, c], inner: [], normal: l > 0 ? [wn[0] / l, wn[1] / l, wn[2] / l] : normal,
+        centroid: [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3] });
+      for (const [p, q] of [[a, b], [b, c], [c, a]]) { const e = edgeKeyFn(p, q); inner.set(e, (inner.get(e) || 0) + 1); }
+    }
+    const foldKeys = new Set();
+    for (const [e, c] of inner) if (c === 2 && meshEdgeValence(e) > 2) foldKeys.add(e.replace('|', '||'));   // = edgeCanonKey
+    if (foldKeys.size) { const fold = { id: ++foldSeq, keys: foldKeys }; for (const f of faces) f.fold = fold; }
+    return faces;
+  };
+
+  // Flächen einer (kanten-zusammenhängenden) Dreiecksmenge. Jede Fläche merkt sich ihre Herkunft
+  // (Dreiecke + Loop-Schnappschuss): enforcePlanarity zerlegt nur Flächen, deren Loops seither
+  // unverändert sind. directed=true: immer gerichtet verketten (Teilflächen der Ebenheits-Zerlegung;
+  // die brauchen keine Herkunft: keepSrc=false).
+  const facesFromTris = (verts, tris, normal, { directed = false, minFace = MIN_FACE_AREA, minHole = MIN_HOLE_AREA, keepSrc = true } = {}) => {
+    if (directed && tris.length === 1) {                      // Schnellweg: ein Dreieck = ein Loop
+      const t = tris[0], a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+      if (vtxKey(a) === vtxKey(b) || vtxKey(b) === vtxKey(c) || vtxKey(a) === vtxKey(c)) return [];
+      return [{ outer: [a, b, c], inner: [], normal, centroid: [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3] }];
+    }
+    const boundaryEdges = boundaryEdgesOf(verts, tris);
+    if (boundaryEdges.length < 3) return [];
+    let faces = null;
+    if (directed || hasPinch(boundaryEdges)) {
+      const loops = chainDirected(boundaryEdges);
+      if (loops && loops.length) faces = facesFromDirectedLoops(loops, normal, minFace, minHole);
+      // Ränder, die sich in einer Ecke berühren, sind gültige STEP-Topologie — occt (Panel 4,
+      // FreeCAD) trianguliert solche Flächen aber nicht (dino: eine 91-mm²-Fläche fehlte). Darum
+      // diese (seltenen) Dreiecksmengen als Einzeldreiecke ausgeben.
+      if (faces && faces.some(loopsTouch)) faces = trianglesAsFaces(verts, tris, normal);
+    }
+    if (!faces || !faces.length) faces = facesFromUndirected(boundaryEdges, normal);
+    if (keepSrc) {
+      const single = faces.length === 1;
+      for (const fd of faces) fd.src = { verts, tris, single, outer: fd.outer.slice(), inner: fd.inner.map((L) => L.slice()) };
+    }
+    return faces;
+  };
+
   const extractGroupFaces = (group) => {
     const verts = group.vertices;
     const normal = group.normal;
@@ -513,102 +764,7 @@ export function buildVolumeStepBrepV2(analysis) {
 
     // Process each connected component independently.
     const allFaces = [];
-    for (const comp of components) {
-      const compEdgeCount = new Map();
-      const compEdgeEntries = new Map();
-      for (const t of comp) {
-        const tri = [verts[t * 3], verts[t * 3 + 1], verts[t * 3 + 2]];
-        for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
-          const k = edgeKeyFn(a, b);
-          compEdgeCount.set(k, (compEdgeCount.get(k) || 0) + 1);
-          if (!compEdgeEntries.has(k)) compEdgeEntries.set(k, { v0: a, v1: b });
-        }
-      }
-      const boundaryEdges = [];
-      for (const [k, count] of compEdgeCount) {
-        if (count === 1) boundaryEdges.push(compEdgeEntries.get(k));
-      }
-      if (boundaryEdges.length < 3) continue;
-
-      const rawLoops = chainEdges(boundaryEdges);
-      if (!rawLoops.length) continue;
-
-      // Centroid for 2D projection.
-      let cx = 0, cy = 0, cz = 0, ntot = 0;
-      for (const loop of rawLoops) {
-        for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; ntot++; }
-      }
-      if (ntot === 0) continue;
-      const centroid = [cx / ntot, cy / ntot, cz / ntot];
-
-      const uDir = computeRefDir(normal);
-      const vDir = _norm3(_cross3(normal, uDir));
-      const project2d = (p) => {
-        const dp = _sub3(p, centroid);
-        return [_dot3(dp, uDir), _dot3(dp, vDir)];
-      };
-      const loops2d = rawLoops.map(loop => loop.map(project2d));
-      const signedAreas = loops2d.map(pts => {
-        let a = 0;
-        for (let i = 0; i < pts.length; i++) {
-          const j = (i + 1) % pts.length;
-          a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
-        }
-        return a * 0.5;
-      });
-      const centroids2d = loops2d.map(pts => {
-        let x = 0, y = 0;
-        for (const p of pts) { x += p[0]; y += p[1]; }
-        return [x / pts.length, y / pts.length];
-      });
-
-      // Nesting: each loop's parent = smallest *larger* containing loop.
-      // Der `areaJ > areaI`-Test ist essenziell: bei einem zentrierten Loch (z.B.
-      // block_with_hole) liegt der Schwerpunkt der äußeren Rechteck-Kontur GENAU im
-      // kleinen Bohrungs-Ring. Ohne Größen-Check würde pointInPoly2d das Rechteck
-      // fälschlich als "im Ring enthalten" einstufen → Außen/Innen vertauscht →
-      // Ring wird als FACE_OUTER_BOUND emittiert (362 Kanten 3× genutzt → 732
-      // non-manifold). Ein Container muss IMMER flächengrößer sein als sein Kind.
-      const parent = new Array(rawLoops.length).fill(-1);
-      for (let i = 0; i < rawLoops.length; i++) {
-        let bestJ = -1, bestArea = Infinity;
-        const areaI = Math.abs(signedAreas[i]);
-        for (let j = 0; j < rawLoops.length; j++) {
-          if (i === j) continue;
-          const areaJ = Math.abs(signedAreas[j]);
-          if (areaJ <= areaI) continue;                       // Eltern müssen größer sein
-          if (pointInPoly2d(centroids2d[i], loops2d[j])) {
-            if (areaJ < bestArea) { bestArea = areaJ; bestJ = j; }
-          }
-        }
-        parent[i] = bestJ;
-      }
-      const depth = new Array(rawLoops.length).fill(0);
-      for (let i = 0; i < rawLoops.length; i++) {
-        let d = 0, p = parent[i];
-        while (p !== -1 && d < 20) { d++; p = parent[p]; }
-        depth[i] = d;
-      }
-
-      // WICHTIG für Wasserdichtigkeit: die ROHEN Loop-Vertices (= echte Mesh-Vertices) verwenden,
-      // NICHT pro-Fläche projizieren oder vereinfachen. Sonst wandern gemeinsame Vertices
-      // benachbarter Flächen unterschiedlich (projectOntoPlane: je eigene Ebene) bzw. eine Fläche
-      // entfernt einen Punkt, den die Nachbarfläche behält (simplifyLoop → T-Junction) → Risse.
-      // Mit Roh-Vertices teilen sich Nachbarflächen exakt dieselben Kanten → Edge-Registry dedupliziert
-      // sie → jede Kante genau 2× → geschlossene Hülle. (Tradeoff: mehr Kanten, leicht facettiert.)
-      for (let i = 0; i < rawLoops.length; i++) {
-        if ((depth[i] % 2) !== 0) continue;
-        if (Math.abs(signedAreas[i]) < MIN_FACE_AREA) continue;
-        const outer = signedAreas[i] >= 0 ? rawLoops[i] : rawLoops[i].slice().reverse();
-        const inner = [];
-        for (let j = 0; j < rawLoops.length; j++) {
-          if (parent[j] === i && Math.abs(signedAreas[j]) >= MIN_HOLE_AREA) {
-            inner.push(signedAreas[j] <= 0 ? rawLoops[j] : rawLoops[j].slice().reverse());
-          }
-        }
-        allFaces.push({ outer, inner, normal, centroid });
-      }
-    }
+    for (const comp of components) for (const fd of facesFromTris(verts, comp, normal)) allFaces.push(fd);
     return allFaces;
   };
 
@@ -1787,8 +1943,10 @@ export function buildVolumeStepBrepV2(analysis) {
   // ---- Step 2: Shared vertex + edge registry ----
   const ptRegistry = new Map(); // key → { ptId, vtxId }
   // Gleiche Naht-Normalisierung wie vtxKey (siehe oben): -0.0/+0.0 vereinheitlichen,
-  // damit Naht-Vertices in der STEP-Topologie denselben CARTESIAN_POINT teilen.
-  const ptKey = (p) => p.map((v) => fixZero(v, 4)).join(',');
+  // damit Naht-Vertices in der STEP-Topologie denselben CARTESIAN_POINT teilen. Identische
+  // Zeichenkette wie vtxKey (4 Nachkommastellen) — daher dessen Cache je Punkt nutzen (assemble
+  // fragt jeden Punkt mehrfach ab; nach der Ebenheits-Zerlegung sind es deutlich mehr Kanten).
+  const ptKey = (p) => vtxKey(p);
 
   const getVertex = (pt) => {
     const key = ptKey(pt);
@@ -1817,8 +1975,9 @@ export function buildVolumeStepBrepV2(analysis) {
   //  fehlorientierte/offene Hülle fälschlich als geschlossen melden.)
   const edgeUse = new Map(); // canonKey → { fwd, rev }
 
-  const getOrCreateEdge = (p1, p2) => {
-    const key = edgeCanonKey(p1, p2);
+  // key: kanonischer Kanten-Schlüssel; eine Falt-Kante (enforcePlanarity) bekommt einen eigenen
+  // Schlüssel und damit eine eigene EDGE_CURVE zwischen denselben Ecken.
+  const getOrCreateEdge = (p1, p2, key = edgeCanonKey(p1, p2)) => {
     if (!edgeRegistry.has(key)) {
       const { vtxId: sv } = getVertex(p1);
       const { ptId: startPtId } = ptRegistry.get(ptKey(p1));
@@ -1882,14 +2041,17 @@ export function buildVolumeStepBrepV2(analysis) {
   };
 
   // ---- Step 3: Build ADVANCED_FACEs ----
-  const buildLoopEdges = (points) => {
+  // fold (optional, aus enforcePlanarity): { id, keys } — Kanten zwischen Teilflächen einer
+  // zerlegten Fläche, die im Netz non-manifold sind, laufen über eine eigene Kanten-Instanz.
+  const buildLoopEdges = (points, fold) => {
     const oeIds = [];
     const n = points.length;
     for (let i = 0; i < n; i++) {
       const p1 = points[i], p2 = points[(i + 1) % n];
       if (ptKey(p1) === ptKey(p2)) continue; // skip degenerate
-      const edge = getOrCreateEdge(p1, p2);
-      const ck = edgeCanonKey(p1, p2);
+      let ck = edgeCanonKey(p1, p2);
+      if (fold && fold.keys.has(ck)) ck += `#fold${fold.id}`;
+      const edge = getOrCreateEdge(p1, p2, ck);
       const forward = ptKey(p1) === edge.startKey;
       const u = edgeUse.get(ck) || { fwd: 0, rev: 0 };
       if (forward) u.fwd++; else u.rev++;
@@ -2162,8 +2324,8 @@ export function buildVolumeStepBrepV2(analysis) {
     const holeLoopForward = (rim, faceNormal) => isTubeRim(rim) || _dot3(rim.axis, faceNormal) < 0;
 
     // Flachflächen (Innen-Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert).
-    for (const { outer, inner, normal, centroid } of faceDefsArg) {
-      const outerOe = buildLoopEdges(outer);
+    for (const { outer, inner, normal, centroid, fold } of faceDefsArg) {
+      const outerOe = buildLoopEdges(outer, fold);
       if (outerOe.length < 3) continue;
       const bounds = [addFaceOuterBound(addEdgeLoop(outerOe))];
       for (const innerLoop of inner) {
@@ -2175,7 +2337,7 @@ export function buildVolumeStepBrepV2(analysis) {
           bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)])));
           continue;
         }
-        const innerOe = buildLoopEdges(innerLoop);
+        const innerOe = buildLoopEdges(innerLoop, fold);
         if (innerOe.length < 3) continue;
         bounds.push(addFaceBound(addEdgeLoop(innerOe)));
       }
@@ -2462,12 +2624,222 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     return removedCount;
   };
+  // ---- Ebenheit der emittierten PLANEs (strikte Importer) ----
+  // Das Region-Growing fasst Facetten bis 2°/0.05 mm zu EINER Gruppe zusammen. Bei facettierten
+  // Freiformen (Kugel, Verrundungen mit „Verrundungen entfernen“ AUS, organische Netze) lagen die
+  // Rand-Punkte so bis 0.06 mm neben der emittierten Ebene — occt/Fusion tolerieren das, strikte
+  // Kerne (ACIS/CST CAD Navigator rechnen mit ~1e-6 mm) nicht. Vor dem Zusammenbau wird darum JEDE
+  // Fläche geprüft (Rand-Punkte ≤ PLANAR_TOL neben der Ebene centroid/normal); sonst
+  //   (1) Ausgleichsebene durch die Rand-Punkte — reicht sie, wird nur die Ebene getauscht;
+  //   (2) Zerlegung in exakt ebene Teilflächen: Region-Growing über die Original-Dreiecke der
+  //       Fläche mit FESTER Saat-Ebene (größtes Dreieck zuerst, jede Ecke ≤ PLANAR_TOL), Ränder
+  //       gerichtet nach der Dreieckswicklung. Für Flächen, deren Loops seit der Extraktion gleich
+  //       geblieben sind oder nur einzelne Punkte ersetzt bekamen (v2 verlängert so die Wände bis
+  //       zur Deckfläche — bei fein facettierten Rundungen oder Zylindern liegt die Wand-Gruppe dann
+  //       bis 0.015 mm neben ihrer Ebene, Härtetest u/m32/m64); neu aufgebaute Loops (v1, v2-Deck,
+  //       v2b, Kreis-Ränder) bleiben. Gegenprobe: die äußeren Kanten der Teilflächen müssen GENAU die
+  //       Kanten der alten Fläche sein (gleiche Richtung) — sonst bleibt die alte Fläche.
+  // CAD-Flächen liegen ohnehin exakt (≤ 7e-6 mm) und bleiben unberührt.
+  const PLANAR_TOL = 5e-5;   // mm — Prüfer (tests/step-strict.mjs) erlaubt 1e-4; Rest für die Rundung
+  const planeDev = (fd, n, c) => {
+    let m = 0;
+    for (const L of [fd.outer, ...fd.inner]) {
+      if (L.circleRim) continue;
+      for (const p of L) { const d = Math.abs(n[0] * (p[0] - c[0]) + n[1] * (p[1] - c[1]) + n[2] * (p[2] - c[2])); if (d > m) m = d; }
+    }
+    return m;
+  };
+  // Ausgleichsebene (Höhenfeld w = a·u + b·v über dem Rahmen der bisherigen Normale n0)
+  const fitPlaneLsq = (fd, n0) => {
+    const u = computeRefDir(n0), v = _norm3(_cross3(n0, u));
+    const pts = [];
+    for (const L of [fd.outer, ...fd.inner]) if (!L.circleRim) for (const p of L) pts.push(p);
+    if (pts.length < 3) return null;
+    const c = [0, 0, 0];
+    for (const p of pts) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
+    c[0] /= pts.length; c[1] /= pts.length; c[2] /= pts.length;
+    let suu = 0, suv = 0, svv = 0, suw = 0, svw = 0;
+    for (const p of pts) {
+      const d = _sub3(p, c), pu = _dot3(d, u), pv = _dot3(d, v), pw = _dot3(d, n0);
+      suu += pu * pu; suv += pu * pv; svv += pv * pv; suw += pu * pw; svw += pv * pw;
+    }
+    const det = suu * svv - suv * suv;
+    if (!(Math.abs(det) > 1e-18)) return null;
+    const a = (suw * svv - svw * suv) / det, b = (svw * suu - suw * suv) / det;
+    return { n: _norm3([n0[0] - a * u[0] - b * v[0], n0[1] - a * u[1] - b * v[1], n0[2] - a * u[2] - b * v[2]]), c };
+  };
+  // Wie hat sich die Fläche seit der Extraktion verändert? Map(alter Punkt-Schlüssel → neuer Punkt):
+  // leer = unverändert; Einträge = einzelne Rand-Punkte ERSETZT, Loops sonst gleich (so verlängert v2
+  // die Wände bis zur Deckfläche: Lw[i] = q). null = anders verändert (Loop neu aufgebaut, Kreis-
+  // Rand, mehrere Flächen aus einer Komponente) → nicht zerlegbar.
+  const movesSinceExtraction = (fd) => {
+    const s = fd.src;
+    if (!s || !s.single || fd.outer.length !== s.outer.length || fd.inner.length !== s.inner.length) return null;
+    const mv = new Map();
+    const same = (L, S) => {
+      if (L.circleRim || L.length !== S.length) return false;
+      for (let i = 0; i < L.length; i++) {
+        if (L[i] === S[i]) continue;
+        const k = vtxKey(S[i]), q = mv.get(k);
+        if (q && vtxKey(q) !== vtxKey(L[i])) return false;
+        mv.set(k, L[i]);
+      }
+      return true;
+    };
+    if (!same(fd.outer, s.outer)) return null;
+    for (let j = 0; j < fd.inner.length; j++) if (!same(fd.inner[j], s.inner[j])) return null;
+    return mv;
+  };
+  // Gerichtete Kanten der Linien-Loops einer Fläche zählen (s = ±1), Schlüssel a·VID_M + b.
+  const addLoopEdges = (m, f, s) => {
+    for (const L of [f.outer, ...f.inner]) {
+      if (L.circleRim) continue;
+      for (let i = 0; i < L.length; i++) {
+        const a = vid(L[i]), b = vid(L[(i + 1) % L.length]);
+        if (a !== b) { const k = a * VID_M + b; m.set(k, (m.get(k) || 0) + s); }
+      }
+    }
+  };
+  const revKey = (k) => (k % VID_M) * VID_M + Math.floor(k / VID_M);
+  // index = gerichtete Kanten ALLER aktuellen Flächen (inkl. fd) — für die Gegenprobe.
+  // moves (aus movesSinceExtraction): ersetzte Rand-Punkte. Die Teilflächen entstehen aus den
+  // Original-Dreiecken, übernehmen danach die ersetzten Punkte und bekommen ihre Ebene neu
+  // eingepasst — jede muss danach weiterhin exakt eben und gleich orientiert sein.
+  const splitPlanar = (fd, index, moves) => {
+    const { verts, tris } = fd.src;
+    const T = tris.map((t) => {
+      const a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+      const wn = _cross3(_sub3(b, a), _sub3(c, a)), area2 = Math.hypot(wn[0], wn[1], wn[2]);
+      return { t, a, b, c, area2, n: area2 > 0 ? [wn[0] / area2, wn[1] / area2, wn[2] / area2] : null };
+    });
+    const byEdge = new Map();
+    T.forEach((x, i) => {
+      for (const [p, q] of [[x.a, x.b], [x.b, x.c], [x.c, x.a]]) { const k = edgeNum(p, q), l = byEdge.get(k); if (l) l.push(i); else byEdge.set(k, [i]); }
+    });
+    const order = T.map((_, i) => i).filter((i) => T[i].n).sort((i, j) => T[j].area2 - T[i].area2);
+    const patchOf = new Int32Array(T.length).fill(-1);
+    const patches = [];
+    for (const s of order) {
+      if (patchOf[s] >= 0) continue;
+      const n = T[s].n, p0 = T[s].a;
+      const on = (v) => Math.abs(n[0] * (v[0] - p0[0]) + n[1] * (v[1] - p0[1]) + n[2] * (v[2] - p0[2])) <= PLANAR_TOL;
+      const members = [s];
+      patchOf[s] = patches.length;
+      for (let qi = 0; qi < members.length; qi++) {
+        const x = T[members[qi]];
+        for (const [p, q] of [[x.a, x.b], [x.b, x.c], [x.c, x.a]]) {
+          for (const j of byEdge.get(edgeNum(p, q))) {
+            const y = T[j];
+            if (patchOf[j] >= 0 || !y.n || _dot3(y.n, n) <= 0 || !on(y.a) || !on(y.b) || !on(y.c)) continue;
+            patchOf[j] = patches.length; members.push(j);
+          }
+        }
+      }
+      patches.push({ n, p0, tris: members.map((i) => T[i].t) });
+    }
+    if (!patches.length) return null;
+    const parts = [];
+    const moved = (L) => {                                   // ersetzte Punkte übernehmen
+      const out = [];
+      for (const p of L) { const q = moves.get(vtxKey(p)) || p; if (!out.length || vtxKey(out[out.length - 1]) !== vtxKey(q)) out.push(q); }
+      while (out.length > 1 && vtxKey(out[0]) === vtxKey(out[out.length - 1])) out.pop();
+      return out;
+    };
+    for (const P of patches) {
+      for (const f of facesFromTris(verts, P.tris, P.n, { directed: true, minFace: 0, minHole: 0, keepSrc: false })) {
+        if (moves && moves.size) {
+          f.outer = moved(f.outer); f.inner = f.inner.map(moved);
+          if (f.outer.length < 3 || f.inner.some((L) => L.length < 3)) return null;
+          const fit = fitPlaneLsq(f, P.n);
+          if (!fit || _dot3(fit.n, P.n) < 0.96 || planeDev(f, fit.n, fit.c) > PLANAR_TOL) return null;
+          const to2 = projector2d(fit.n, fit.c);
+          if (signedArea2d(f.outer.map(to2)) <= 0 || f.inner.some((L) => signedArea2d(L.map(to2)) >= 0)) return null;
+          f.normal = fit.n; f.centroid = fit.c;
+        } else {
+          const h = _dot3(P.n, _sub3(f.centroid, P.p0));    // Ebene exakt durch die Saat
+          f.centroid = [f.centroid[0] - P.n[0] * h, f.centroid[1] - P.n[1] * h, f.centroid[2] - P.n[2] * h];
+          f.normal = P.n;
+        }
+        f.group = fd.group;
+        parts.push(f);
+      }
+    }
+    // Gegenprobe gegen die alte Fläche (own) und die übrigen Flächen (other = index − own):
+    const own = new Map(), raw = new Map();
+    addLoopEdges(own, fd, 1);
+    for (const p of parts) addLoopEdges(raw, p, 1);
+    const innerPairs = [];                                   // Kanten zwischen zwei Teilflächen
+    for (const k of [...raw.keys()]) {
+      const c = raw.get(k), r = revKey(k), cr = raw.get(r) || 0, x = Math.min(c, cr);
+      if (x > 0) { raw.set(k, c - x); raw.set(r, cr - x); innerPairs.push(k); }
+    }
+    const other = (k) => (index.get(k) || 0) - (own.get(k) || 0);
+    // (1) jede Kante der alten Fläche bleibt erhalten, gleichsinnig
+    for (const [k, c] of own) if (c > 0 && (raw.get(k) || 0) !== c) return null;
+    // (2) zusätzliche Rand-Kanten (Mini-Loops, die die alte Extraktion unter MIN_*_AREA verwarf)
+    //     nur, wenn sie eine bisher OFFENE Gegen-Nutzung einer anderen Fläche schließen
+    for (const [k, c] of raw) {
+      const extra = c - (own.get(k) || 0);
+      if (extra > 0 && other(revKey(k)) - other(k) < extra) return null;
+    }
+    // (3) innere Kanten, die schon andere Flächen nutzen: eine im Netz non-manifolde Kante, die
+    //     bisher INNERHALB der Fläche lag (Faltung). Als gemeinsame Kante wäre sie 4× genutzt →
+    //     die Teilflächen bekommen dafür eine eigene Kanten-Instanz (assemble: fold).
+    const foldKeys = new Set();
+    for (const k of innerPairs) {
+      if (other(k) + other(revKey(k)) > 0) {
+        const a = vidKeys[Math.floor(k / VID_M)], b = vidKeys[k % VID_M];
+        foldKeys.add(a < b ? `${a}||${b}` : `${b}||${a}`);   // = edgeCanonKey (ptKey ≡ vtxKey)
+      }
+    }
+    if (foldKeys.size) { const fold = { id: ++foldSeq, keys: foldKeys }; for (const p of parts) p.fold = fold; }
+    return parts;
+  };
+  const enforcePlanarity = (fds) => {
+    const out = [];
+    const st = { refits: 0, splits: 0, parts: 0, rest: 0, restMax: 0 };
+    let index = null;                                        // erst bei der ersten Zerlegung
+    for (const fd of fds) {
+      const n = _norm3(fd.normal);
+      if (planeDev(fd, n, fd.centroid) <= PLANAR_TOL) { out.push(fd); continue; }
+      if (!fd.inner.some((L) => L.circleRim)) {
+        const fit = fitPlaneLsq(fd, n);
+        if (fit && planeDev(fd, fit.n, fit.c) <= PLANAR_TOL) { fd.normal = fit.n; fd.centroid = fit.c; st.refits++; out.push(fd); continue; }
+        let parts = null;
+        const moves = movesSinceExtraction(fd);
+        if (moves) {
+          if (!index) { index = new Map(); for (const f of fds) addLoopEdges(index, f, 1); }
+          try { parts = splitPlanar(fd, index, moves); } catch (_) { parts = null; }
+        }
+        if (parts) {
+          addLoopEdges(index, fd, -1);
+          for (const f of parts) { addLoopEdges(index, f, 1); out.push(f); }
+          st.splits++; st.parts += parts.length;
+          continue;
+        }
+      }
+      st.rest++; st.restMax = Math.max(st.restMax, planeDev(fd, n, fd.centroid));
+      out.push(fd);
+    }
+    return { fds: out, st };
+  };
+  const planarReport = (report, st) => {
+    report.planarRefits = st.refits;          // Ebene durch Ausgleich ersetzt
+    report.planarSplits = st.splits;          // Flächen in ebene Teilflächen zerlegt …
+    report.planarParts = st.parts;            // … zu so vielen Teilflächen
+    report.nonPlanarFaces = st.rest;          // nicht behebbar (verändert/Kreis-Rand) — bleiben
+    report.nonPlanarMaxDev = Math.round(st.restMax * 1e7) / 1e7;
+  };
+
   const assembleCurrent = () => {
+    const pl = enforcePlanarity(faceDefs);
+    faceDefs = pl.fds;
     removeCollinearPoints(faceDefs);
     const a = assemble(faceDefs, finalPlans, tubePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
+    planarReport(a.report, pl.st);
     return a;
   };
   // Ein Zusammenbau gilt als gescheitert, wenn die Hülle offen ist ODER der Orientierungs-Wächter
@@ -2491,12 +2863,14 @@ export function buildVolumeStepBrepV2(analysis) {
   // die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung läuft auch
   // hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
   if ((asm.report.boresConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0) && failed(asm)) {
-    const fallbackDefs = buildFaceDefs(null);
+    const pl = enforcePlanarity(buildFaceDefs(null));
+    const fallbackDefs = pl.fds;
     removeCollinearPoints(fallbackDefs);
     asm = tracked(assemble(fallbackDefs, []));
     asm.report.filletsDefeatured = 0;
     asm.report.bandsDefeatured = 0;
     asm.report.cornersDefeatured = 0;
+    planarReport(asm.report, pl.st);
     fallbackStage = 2;
   }
   asm.report.orientationGuardFailures = guardTotal;
