@@ -12,3 +12,6 @@ playwright-report/
 
 # Hinweis: tests/screenshots/ wird bewusst versioniert (visueller Verifikations-Nachweis).
 .claude/worktrees/
+
+# Lokale Claude-Code-Einstellungen (enthalten lokale Pfade)
+.claude/settings.json
