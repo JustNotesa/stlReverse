@@ -228,7 +228,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 65,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -236,13 +236,13 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 65,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -250,7 +250,7 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     }
@@ -260,7 +260,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 50,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -268,13 +268,13 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 50,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -282,7 +282,7 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     }
@@ -292,7 +292,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 34,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -300,13 +300,13 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 34,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -314,7 +314,7 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     }
@@ -324,8 +324,8 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 2990,
-      "watertight": false,
+      "faces": 3917,
+      "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
       "bandsDefeatured": 0,
@@ -338,8 +338,8 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 2990,
-      "watertight": false,
+      "faces": 3917,
+      "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
       "bandsDefeatured": 0,
@@ -402,7 +402,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 2288,
+      "faces": 2997,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -420,7 +420,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 1266,
+      "faces": 1631,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -434,7 +434,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 1266,
+      "faces": 1631,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -516,7 +516,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 2537,
+      "faces": 3127,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -530,7 +530,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 2537,
+      "faces": 3127,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -548,7 +548,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 77,
+      "faces": 6,
       "watertight": true,
       "boresConverted": 1,
       "filletsDefeatured": 0,
@@ -556,13 +556,13 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 1,
+      "cylindrical": 2,
       "conical": 2,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 290,
+      "faces": 219,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -570,7 +570,7 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     }
@@ -580,7 +580,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 77,
+      "faces": 6,
       "watertight": true,
       "boresConverted": 1,
       "filletsDefeatured": 0,
@@ -588,13 +588,13 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 1,
+      "cylindrical": 2,
       "conical": 2,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 760,
+      "faces": 867,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -602,7 +602,7 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 0,
+      "cylindrical": 1,
       "conical": 0,
       "occt": true
     }
@@ -612,7 +612,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 67,
+      "faces": 4,
       "watertight": true,
       "boresConverted": 1,
       "filletsDefeatured": 0,
@@ -620,13 +620,13 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 1,
+      "cylindrical": 2,
       "conical": 0,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 67,
+      "faces": 4,
       "watertight": true,
       "boresConverted": 1,
       "filletsDefeatured": 0,
@@ -634,7 +634,7 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 1,
+      "cylindrical": 2,
       "conical": 0,
       "occt": true
     }
