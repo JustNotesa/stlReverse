@@ -30,6 +30,9 @@ const dot   = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
 const len   = (a) => Math.hypot(a[0], a[1], a[2]);
 const norm  = (a) => { const l = len(a) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+// centroid3 und perpDist (unten) sind die REFERENZ-Formeln der heißen Schleifen: dort skalar
+// „inline“ ausgerollt (gleiche Operations-Reihenfolge → bit-gleiche Ergebnisse), hier nur noch
+// als Definition dessen, was die Kommentare „centroid3/perpDist inline“ meinen.
 const centroid3 = (vs) => { let c = [0,0,0]; for (const v of vs) c = add(c, v); return scale(c, 1 / (vs.length || 1)); };
 
 const triNormal = (v0, v1, v2) => {
