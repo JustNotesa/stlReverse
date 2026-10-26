@@ -360,6 +360,24 @@ function boreSharpVariant(body, bores, step, sharpCount) {
   };
 }
 
+// Außenmantel ohne Bohrung (z. B. Zapfen y2): alles scharf, das Profil-Polygon der kreisrunden Säule
+// durch den Mantel-Kreis Rm ersetzt (mantleInfo). Nur, wenn die STEP einen Mantel-Zylinder trägt.
+function mantleSharpVariant(body, step) {
+  const ent = new Map();
+  for (const line of step.split('\n')) { const m = line.match(/^#(\d+)=(.*);$/); if (m) ent.set(+m[1], m[2]); }
+  const pt = (i) => ent.get(i).match(/,\(([^()]*)\)\)$/)[1].split(',').map(Number);
+  const plac = (ref) => { const m = ent.get(+ref.slice(1)).match(/AXIS2_PLACEMENT_3D\('',(#\d+),(#\d+),(#\d+)\)/); return { loc: pt(+m[1].slice(1)), axis: pt(+m[2].slice(1)) }; };
+  const mi = mantleInfo(body, ent, plac);
+  if (!mi.parts.length) return null;
+  const pairs = roundedPairs(body);
+  return {
+    label: `alle Rundungen scharf + ${mi.parts.join(', ')}${mi.plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    sharpCount: pairs.length, sharpMax: pairs.reduce((s, p) => s + p.runs, 0), bores: 0, cones: 0, planar: false,
+    volume: mi.plaus ? meshVolume(buildMesh(sharpen(body))) + mi.dv : NaN,
+    tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * mi.aLat, target: body.expect.mode === 'sharp',
+  };
+}
+
 // Senkung (body.countersink): die Bohrung wird Zylinder Rc (z0 … Rand) + EIN Kegel vom Rand auf den
 // Mündungskreis R2 in der Deckebene. Ziel: Senkung scharf (Rand am Kegelfuß, R2 = scharfe Senkungs-
 // kante — v2 schärft nur die Rundung, der Kegel bleibt); zulässig: Bohrungs-Chamfer-Pfad durch die
@@ -522,6 +540,7 @@ async function checkBody(body, occt) {
       vs.push(boreSharpVariant(body, body.boreChamfer, r.step, roundedPairs(body).length));
       for (const b of body.boreChamfer) vs.push(boreVariant(body, b, r.step, roundedPairs(body).filter((p) => p.c !== b.col).length));
     }
+    if (tag === 'AN' && !body.boreChamfer) { const mv = mantleSharpVariant(body, r.step); if (mv) vs.push(mv); }
     if (tag === 'AN' && body.countersink) {
       for (const c of body.countersink) { const cv = cskVariant(body, c, r.step, roundedPairs(body).filter((p) => p.c !== c.col).length); if (cv) vs.push(cv); }
     }

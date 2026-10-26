@@ -57,6 +57,15 @@ function sampleGroups(file) {
   }
   return sampleCache.get(file);
 }
+const FIXTURES = join(__dirname, 'fixtures-v2', 'stl');
+const fixtureCache = new Map();
+function fixtureGroups(file) {
+  if (!fixtureCache.has(file)) {
+    const buf = readFileSync(join(FIXTURES, file));
+    fixtureCache.set(file, quiet(() => groupsOf(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {}))));
+  }
+  return fixtureCache.get(file);
+}
 const synthCache = new Map();
 function synthGroups(letter) {
   if (!synthCache.has(letter)) {
@@ -118,7 +127,8 @@ const NEG = [
   { flip: 'bore', on: true, src: () => sampleGroups(EBIKE), name: 'eBike verrundet', gone: (r) => r.boresConverted === 0, keepsDefeature: true },
   { flip: 'mantle', on: true, src: () => sampleGroups('cylinder.stl'), name: 'cylinder', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: false, src: () => sampleGroups('washer_thin.stl'), name: 'washer_thin', gone: (r) => r.mantlesConverted === 0 },
-  { flip: 'mantle', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted', gone: (r) => r.mantlesConverted === 0, keepsDefeature: true },
+  { flip: 'mantle', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted (Mantel + Bohrung + Kegel)', gone: (r) => r.mantlesConverted === 0 },
+  { flip: 'mantle', on: true, src: () => fixtureGroups('v2_h_rohr.stl'), name: 'Härtetest h (Rohr, Deck-Rundungen)', gone: (r) => r.mantlesConverted === 0, keepsDefeature: true },
   { flip: 'cone', on: true, src: () => sampleGroups('washer_chamfered.stl'), name: 'washer_chamfered', gone: (r, s) => count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'cone', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted', gone: (r, s) => count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'tube', on: true, src: () => sampleGroups(EBIKE_PLAIN), name: 'eBike ohne Rundungen', gone: (r) => r.tubesConverted === 0 },
