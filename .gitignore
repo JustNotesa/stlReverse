@@ -15,3 +15,6 @@ playwright-report/
 
 # Lokale Claude-Code-Einstellungen (enthalten lokale Pfade)
 .claude/settings.json
+
+# Build-Artefakte (web-ext build)
+web-ext-artifacts/
