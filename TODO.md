@@ -1,11 +1,12 @@
 # TODO - STL Reverse Add-on
 
-*Stand: 2026-10-23 — Zuverlässigkeits-Etappe: Laufzeit-Fix Erkennung, Region-Growing als gemeinsames
-Modul (kein Verketten mehr bei feiner Tessellierung), Golden-Regressionstest. Testen im eingebauten
-Browser + Node-Harness (Firefox erst beim Packaging).*
+*Stand: 2026-10-26 — STEP für strikte Importer (CST CAD Navigator/ACIS): Kanten-Richtungen, Kreis-Orientierung,
+ebene Flächen, Schalen je Körper, Orientierungs-Wächter; Außenmäntel als echte Zylinder; Senkungen geschützt;
+Erkennung 2–4× schneller. Testen im eingebauten Browser + Node-Harness (Firefox erst beim Packaging).*
 
-**Tests (vor jedem Commit):** `npm run test:golden` (alle Samples gegen `tests/golden.json` + 50k-Stressnetze,
-Laufzeitgrenzen) und `npm run test:bore`. Gewollte Änderungen: `npm run test:golden -- --update`, Diff prüfen, committen.
+**Tests (vor jedem Commit):** `npm test` (10 Suiten: unit, golden, v2 quick, ebike, tube, bore, mantel, collinear,
+strict, orient). Jede Export-Änderung muss `npm run test:strict` bestehen (STEP ohne Heilung — occt/Fusion
+reparieren still, CST nicht). Gewollte Golden-Änderungen: `npm run test:golden -- --update`, Diff prüfen, committen.
 
 ---
 
@@ -60,8 +61,9 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
   - **Geneigte/verrundete Loch-Mündungen** — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
     (fischerEbike id=1/id=5: ~10–20° schräg) findet das Rand-Matching keinen Innen-Loop → Fallback.
     Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
-  - **Außen-Zylinder** (Vollzylinder, nicht Loch): Rand sitzt am AUSSEN-Loop der Deckel, nicht am Innen-Loop —
-    Matching müsste auch Outer-Loops prüfen.
+  - **Außen-Zylinder — Restfälle** (Grundfall erledigt 2026-10-26, s. Erledigt „Außenmäntel“): Zapfen auf einer
+    Platte und Stufenwelle (ein Rand ist Innen-Loop einer Fläche), gefaste/verrundete Außenkante ohne Defeaturing
+    (Kegel-Pfad wie bei Bohrungen), konvexe Kegel (`cone_*`-Samples) bleiben facettiert.
   - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
     für Bögen erweiterbar (Naht-Form aus dem Design-Plan).
 
@@ -130,21 +132,33 @@ Kreis-Kanten teilen.
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher: seit 2026-10-24 exakt (tube-sweep.js, s. Erledigt).
-- [ ] **v2: verpasste Fälle aus dem Härtetest (sicher übersprungen, aber nicht entrundet)** — schmale Deckfläche
-  (Rippe 40×4: Band > 3× Deckfläche), großer Radius r > 5 mm (RMAX = 5), dünne Platte (RMAX = 0,45·Höhe < r),
-  dünne Rohre/Ringe. `node tests/fixtures-v2/check.mjs --only l,s,t2`. Schranken sind Laufzeit-/Sicherheitsnetze;
-  feiner begründen (z.B. Band-Breite statt Fläche).
-- [ ] **v2: feine Rundungen (N ≥ 32) versetzen Deckebene um µm** — Region-Growing schlägt die flachste Bandschicht
-  der Deckfläche zu; Ebene aus dem Mittel der Loop-Punkte. ≤ r·(1−cos 2°), unter STEP-Unsicherheit. Abhilfe:
-  exakte Ebene aus der ursprünglichen Deckflächen-Gruppe. `check.mjs --only m32,m64`.
+- [ ] **v2: Restfälle Senkung/Fase** — x3 (Rundung an der Kante Bohrung → Kegel) und x5 (beide Senkungskanten
+  verrundet) laufen über den Fasen-Pfad mit einem Kegel durch die Rundung (Mündung R6.010 bzw. 6.218 statt 6.0);
+  x6 (Außenfase mit beidseitig verrundeten Kanten) bleibt gerundet. Braucht „Kegel zwischen zwei Rundungen“
+  bzw. ein Band, das an einem Kegel beginnt. Offene Bänder: mehrere getrennte verrundete Abschnitte je Loop.
+  `node tests/fixtures-v2/check.mjs --only x3,x5,x6`.
+- [ ] **Ebenheit nur am Rand geprüft (AUS-Modus, feine Rundungen)** — m32/m64 AUS: eine Fläche ist randeben, ihr
+  Inneres leicht gewölbt (flachste Bandschicht in der Deckgruppe) → B-Rep-Volumen weicht 3,6/0,9 mm³ vom Netz ab.
+  Abhilfe: auch innere Dreiecksecken unveränderter Flächen prüfen.
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
+- [ ] **Gebogene Kanäle — bestätigte Review-Funde (2026-10-26)**:
+  - HOCH: **U-Bogen-Knick** — `simplifyChain` übernimmt im Rückfall `if (l === k + 1)` das Original-Stück ohne
+    Knick-Prüfung → Knick bis 4,2° (MAX_KINK 0,1°); `fitAnchorChain` teilt Stationen per Projektion und scheitert
+    bei ≥ 180°-Bögen. Folge: Übergangskreise bis 0,022 mm neben den TOROIDAL/CYLINDRICAL-Flächen (strikte
+    Importer!), wasserdicht + occt-Volumen normal. Repro im Review-Scratch (`repro-2-ubend.mjs 4.2 7 12`).
+  - MITTEL: **D-Profil-Kanal wird rund exportiert** — ebene Abflachung (Sehne, α ≤ 25°) fällt in den Querschnitten
+    als Ausreißer raus, Vertex-Prüfung sieht nur Ecken → Abflachung fehlt im STEP, ΔV −0,14 %, step-strict ok.
+    Abhilfe: Facetten-Inneres (Schwerpunkte/Kantenmitten) gegen das Modell prüfen; D-Profil als Negativ-Test.
 - [ ] **Gebogene Kanäle — Rest-Fälle** (Basis erledigt, s. Erledigt 2026-10-24 „tube-sweep.js“):
-  - Panel 2/3: Kanal-Gruppen (`group.tube`) farbig markieren (aktuell nur im Export sichtbar).
   - Nicht-ebene Bahnen (3D-Biarcs), Sackkanäle (1 Mündung), Mündung auf gekrümmter Fläche/Verrundung,
     Kanäle in Gruppen, die sich mit anderen Flächen eine Region teilen → bleiben derzeit facettiert.
   - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
   - eBike rechts: Modell-Restfehler im Bogen bis 0.037 mm (Profil-Neigung dort ~1° anders) — prüfen.
-  - Cache-Buster: `tube-sweep.js?v=1` im Worker neu; `analysis-worker.js`/`exporters.js` beim Merge hochzählen.
+  - Restlaufzeit detectTubes auf großen Freiform-Kanälen ~2–3 s (score/marchNormal, linear).
+- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten.
+- [ ] **Add-on signieren (AMO, unlisted)** — wartet auf Bestätigung der Add-on-ID (Vorschlag
+  `stl-reverse@ava-innovation.com`, heute Platzhalter `stlreverse@example.com`) und JWT-Schlüssel in
+  `~/.config/amo.env`. Release v0.2.0 enthält noch den alten STEP-Kantenfehler → v0.2.1 (nur mit Zustimmung).
 - [ ] **Review der Etappen 05fb3c3…6d67e62 abschließen** — Workflow-Lauf `wf_a998fde1-33d` wurde durch einen
   Absturz unterbrochen (Bereiche: Erkennung, Fasen-Export, Defeaturing, STEP-Gültigkeit, Integration).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
@@ -162,6 +176,37 @@ Kreis-Kanten teilen.
 ---
 
 ## Erledigt
+
+- [x] **STEP für strikte Importer — CST CAD Navigator/ACIS (2026-10-26)** — User-Befund: Fusion 360 ok, CST verliert
+  Flächen. occt und Fusion heilen beim Lesen still, CST nimmt die Datei wörtlich. Neuer Prüfer ohne Heilung
+  `tests/step-strict.mjs` (`npm run test:strict`, Teil von `npm test`): Rand-Ketten, Kanten-Nutzung, Punkte auf
+  Kurve/Fläche ≤ 1e-4 mm, Umlaufsinn eben/gekrümmt, Außenrand, Schalen-Zusammenhang. Behoben: (1) ORIENTED_EDGE-
+  Flags bezogen sich auf den kleineren Punkt-Schlüssel statt auf den EDGE_CURVE-Start → Ränder in praktisch jeder
+  Datei unterbrochen (4da905c); (2) Kreis-Orientierung an Bohrungen/Fasen aus der Geometrie (Lochrand im
+  Uhrzeigersinn um die Flächennormale, Mantel same_sense passend zur Außennormale); (3) Ebenheit: jede PLANE trägt
+  ihre Rand-Punkte ≤ 5e-5 mm (Ausgleichsebene oder Zerlegung in exakt ebene Teilflächen) — Freiformen bis 0,061 mm
+  daneben; (4) Richtungen mit 12 Nachkommastellen; (5) je zusammenhängendem Körper eine eigene Schale (dino jetzt
+  wasserdicht, 9 Schalen); (6) **Orientierungs-Wächter** je analytischer Fläche (Normalen-Probe gegen die ersetzten
+  Dreiecke + Umlauf-Probe), Widerspruch → Fallback; Negativtests per `STLREV_TEST_FLIP` (`npm run test:orient`).
+  Ergebnis: 59 177 → 0 Verstöße über alle Samples AN/AUS und alle Härtetest-Körper. Flächenzahl der Freiformen
+  steigt (Kugel 2537 → 3127, eBike AUS 2288 → 2997), CAD-Teile unverändert.
+- [x] **Konvexe Außenmäntel als echte Zylinder + 4 Bohrungs-Funde (Agent H, 2026-10-26)** — Mantel-Pfad
+  (`sharpMantlePlan`/`convertMantles`): beide Ränder = komplette Außen-Loops ebener Deckflächen, harte Gates wie bei
+  Bohrungen (+ Kreis liegt in der Deckebene). cylinder 65 → 3 Flächen, washer_thin 67 → 4, washer_chamfered/_filleted
+  AN 77 → 6, Volumen gegen den exakten Zylinder rel. −4e-6. Funde: gemischte Mündungen (Ränder aus den aktuellen
+  Wandflächen), D-Löcher bleiben D (gleichmäßige Segmentwinkel, 42°-Deckel), geneigte Deckflächen (jeder Loop-Punkt
+  axial geprüft), Fallback baut die facettierte Basislinie zuerst (gelochtes eBike 0,7–1,2 s → 0,3–0,4 s).
+  `npm run test:mantel`. Ergebnis-Zeile im Popup nennt Mäntel und Sicherheits-Rückfälle.
+- [x] **v2: Senkungen geschützt, Bandform statt grober Schranken (Agent F, 2026-10-26)** — Review-Fund HOCH:
+  verrundete Senkung wurde komplett weggeschärft (ΔV +55 mm³). Jetzt: Band nur bei tangentialem Anschluss (≤ 25°)
+  und Kreisbogen-Profil; Kegel zwischen Rundung und Bohrung wird schräge Wand (nur die Rundung fällt, Senkung bleibt,
+  exakt 45°). Schranken „Band ≤ 3× Deckfläche“/RMAX durch Bandform |L| ≥ π·Tiefe ersetzt → Rippe, r=5,5, dünne
+  Platte exakt; m32/m64 exakt auf die echten Ebenen gesetzt; offenes Band (nur ein Abschnitt verrundet). 13 neue
+  Härtetest-Körper (x1–x7, d2–d5, y1, y2).
+- [x] **Erkennung 2–4× schneller, Ergebnis identisch (Agent G2, 2026-10-26)** — recognizePrimitives: flache Fit-
+  Puffer, Radix-Index-Sort, Fixpunkt-Abbruch (sphere50k 10,8 s → 2,6 s); tube-sweep simplifyChain ohne
+  superquadratischen Aufwand (Freiform-Kanal 50k: 23 s → 2 s) mit Unmöglichkeits-Beweis und Arbeitsbudget.
+  Byte-identische STEP-Ausgabe (72/72), Golden-Stress sphere50k ~4 s.
 
 - [x] **Gebogene Kanäle exakt (tube-sweep.js, 2026-10-24)** — neues Modul, läuft nach `recognizePrimitives`
   (Worker + Test-Pipelines), taggt `group.tube`. Erkennung: konkav gekrümmte Komponenten mit genau 2 ebenen
