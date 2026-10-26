@@ -4,7 +4,7 @@
 
 ```bash
 # ALLE schnellen Regressionen nacheinander (tests/run-all.mjs):
-# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → collinear.
+# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → mantel → collinear.
 # Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
 npm test
 
@@ -17,6 +17,8 @@ npm run test:v2          # Härtetest kurz (voll: node tests/fixtures-v2/check.m
 npm run test:ebike       # Scorecard verrundetes eBike (47 Flächen)
 npm run test:tube        # 6 Synthetik-Kanäle
 npm run test:bore        # Dünnplatten-Bohrungen → CYLINDRICAL_SURFACE
+npm run test:mantel      # Außenmäntel (Welle/Scheibe/Rohr) + Bohrungs-Gates (D-Loch, schräg,
+                         # gemischte Mündungen) + Fallback-Stufen; je Fall step-strict + occt-Volumen
 npm run test:collinear   # kollineare Kantenpunkte
 
 # Nur E2E-Tests (Puppeteer; läuft bei npm test bewusst NICHT mit)

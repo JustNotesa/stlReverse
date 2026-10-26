@@ -8,6 +8,7 @@
 //   ebike        ebike-scorecard.mjs        — verrundetes eBike, 47 Flächen
 //   tube         tube-regression.mjs        — 6 Synthetik-Kanäle
 //   bore         bore-analytic-regression.mjs — Dünnplatten-Bohrungen
+//   mantel       mantle-regression.mjs      — Außenmäntel, Bohrungs-Funde, Fallback
 //   collinear    collinear-regression.mjs   — kollineare Kantenpunkte
 //
 // Jede Suite läuft als eigener Prozess (Ausgabe durchgereicht); es laufen ALLE,
@@ -28,6 +29,7 @@ const SUITES = [
   { name: 'ebike',       args: ['tests/ebike-scorecard.mjs'] },
   { name: 'tube',        args: ['tests/tube-regression.mjs'] },
   { name: 'bore',        args: ['tests/bore-analytic-regression.mjs'] },
+  { name: 'mantel',      args: ['tests/mantle-regression.mjs'] },
   { name: 'collinear',   args: ['tests/collinear-regression.mjs'] },
 ];
 
