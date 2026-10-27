@@ -1590,6 +1590,10 @@ export function buildVolumeStepBrepV2(analysis) {
         // winziger Polfläche auf einem Zylinder (Tiefe = Kugelradius), Flächenstück einer Kugel/
         // eines Torus — die Tiefensuche bricht ab, sobald ein Punkt tiefer liegt (früh, billig).
         const H_MAX = lenL / Math.PI;
+        // Offenes Band: tiefer als Fläche(P)/Abschnittslänge darf es nach der Ausdehnungs-Schranke in
+        // (5) ohnehin nicht werden — so bricht die Suche an Bogen-Facetten (Bohrung mit abwechselnd
+        // langen/kurzen Facetten: Saat-Vorstufe greift nicht) nach wenigen Facetten ab.
+        const H_GROW = open ? Math.min(H_MAX, fdArea(pi) / (OPEN_MIN_DECK * lenL)) : H_MAX;
         // (2) Band wachsen: Nachbarn sind Band (schräg + nah an P), Wand (⊥ P) oder P (nur über L)
         let band = new Set(seeds);
         const queue = [...seeds];
@@ -1598,7 +1602,7 @@ export function buildVolumeStepBrepV2(analysis) {
         while (queue.length && ok) {
           const fi = queue.pop();
           const fd = fds[fi];
-          for (const p of fd.outer) if (Math.abs(_dot3(d, p) - off) > H_MAX) { ok = false; break; }
+          for (const p of fd.outer) if (Math.abs(_dot3(d, p) - off) > H_GROW) { ok = false; break; }
           if (!ok) break;
           for (const Lb of loopsOf(fd)) {
             for (let i = 0; i < Lb.length && ok; i++) {
