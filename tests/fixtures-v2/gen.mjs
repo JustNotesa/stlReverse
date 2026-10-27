@@ -47,6 +47,21 @@ export const roundedRectProfile = (w, h, Rc, seg) => {
 };
 // L-Profil (Schenkel a×t und t×b) mit einspringender (konkaver) senkrechter Ecke, CCW
 export const lProfile = (a, b, t) => [[0, 0], [a, 0], [a, t], [t, t], [t, b], [0, b]];
+// Rechteck w×h, Unter- und Oberkante als flacher Kreisbogen (Stich f nach außen, seg Segmente); die
+// Ecken bleiben echte Knicke. Kanten 0…seg−1 unten, seg rechts, seg+1…2·seg oben, 2·seg+1 links. CCW
+export const bulgeProfile = (w, h, f, seg) => {
+  const R = ((w / 2) ** 2 + f * f) / (2 * f), cy = R - f, pm = Math.asin(w / 2 / R), pts = [];
+  for (let k = 0; k <= seg; k++) { const ph = -pm + 2 * pm * k / seg; pts.push([w / 2 + R * Math.sin(ph), cy - R * Math.cos(ph)]); }
+  for (let k = 0; k <= seg; k++) { const ph = -pm + 2 * pm * k / seg; pts.push([w / 2 - R * Math.sin(ph), h - cy + R * Math.cos(ph)]); }
+  return pts;
+};
+// Langloch-Profil (Stadion): Geraden der Länge len, Halbkreise R (seg Segmente je Halbkreis), CCW
+export const slotProfile = (len, R, seg) => {
+  const pts = [];
+  for (let k = 0; k <= seg; k++) { const a = -PI / 2 + PI * k / seg; pts.push([R + len + R * Math.cos(a), R + R * Math.sin(a)]); }
+  for (let k = 0; k <= seg; k++) { const a = PI / 2 + PI * k / seg; pts.push([R + R * Math.cos(a), R + R * Math.sin(a)]); }
+  return pts;
+};
 
 export const polyArea = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; s += p[0] * q[1] - q[0] * p[1]; } return s / 2; };
 
@@ -76,7 +91,8 @@ export function offsetRing(pts, off) {
 
 // ── Deck-Übergänge als Schichtfolgen [{z, s}] (z aufsteigend) ───────────────
 // kind: 'sharp' | 'round' (konvex) | 'concave' (Hohlkehle) | 'chamfer' (45°-Fase, Breite r) |
-//       'countersink' (Senkung: Kegel mit Tiefe depth, Spitzenwinkel angleDeg; Kanten-Rundungen r/rw)
+//       'countersink' (Senkung: Kegel mit Tiefe depth, Spitzenwinkel angleDeg; Kanten-Rundungen r/rw) |
+//       'ellipse' (konvexe Ellipsen-Rundung, Halbachsen a entlang der Deckfläche, b entlang der Wand)
 // draftDeg: Wand-Neigung (Formschräge; Wand bei Höhe z um z·tan α ins Material versetzt) —
 // die Rundung bleibt dann tangential an Wand UND Deckfläche (Mittelpunkt im Abstand r zu beiden).
 function capSeq(spec, end, z0, z1, draftDeg = 0) {
@@ -108,6 +124,21 @@ function capSeq(spec, end, z0, z1, draftDeg = 0) {
       }
       us[us.length - 1].u = 0;                            // exakt in der Deckebene
     } else us.push({ u: 0, s: sEdge });
+    const seq = us.map(({ u, s }) => ({ z: end === 'bottom' ? z0 + u : z1 - u, s }));
+    return end === 'bottom' ? seq.reverse() : seq;
+  }
+  if (kind === 'ellipse') {
+    // Nicht kreisförmige Kanten-Rundung (Viertel-Ellipse, tangential an Wand UND Deckfläche) mit
+    // gleichmäßigen Normalenwinkel-Schritten — v2 kennt nur Kreisbogen-Rundungen (Rundungsprofil) und
+    // darf hier NIE eine Schicht als „Fase zwischen zwei Rundungen“ deuten. Normalenwinkel α (0 = Wand,
+    // 90° = Deckfläche) ↔ Ellipsen-Parameter θ mit tan θ = (b/a)·tan α; u = Abstand zur Deckfläche.
+    if (draftDeg) throw new Error('Ellipsen-Rundung + Formschräge nicht vorgesehen');
+    const a = spec.a, b = spec.b, us = [];
+    for (let k = 0; k <= N; k++) {
+      const alpha = (PI / 2) * k / N, th = Math.atan2(b * Math.sin(alpha), a * Math.cos(alpha));
+      us.push({ u: b - b * Math.sin(th), s: a - a * Math.cos(th) });
+    }
+    us[0].s = 0; us[N].u = 0;                             // exakt auf der Wand / in der Deckebene
     const seq = us.map(({ u, s }) => ({ z: end === 'bottom' ? z0 + u : z1 - u, s }));
     return end === 'bottom' ? seq.reverse() : seq;
   }
@@ -685,6 +716,53 @@ export const BODIES = [
     columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, N: 8 } })],
     expect: { mode: 'sharp', bands: 1 },
   },
+  // ── Kegel/Fase ZWISCHEN zwei Rundungen bzw. Rundung nur zur Wand (exporters.js splitMiddleLayer): die
+  // Rundungen werden scharf, Kegel/Fase bleibt exakt (bis Deckfläche und Wand verlängert) ──
+  {
+    id: 'x8', extra: true, file: 'v2_x_senkung60_beidseitig',
+    desc: 'wie (x5), 60°-Senkung (Kegel 60° gegen die Deckfläche): Rundung zur Bohrung nur 30° — ihre tangentialen Schichten liegen < 2° neben Kegel und Wand (Region-Growing schlägt sie diesen zu)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, rw: 0.5, N: 8, angleDeg: 60 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 60, r: 0.5, rw: 0.5 }],
+  },
+  {
+    id: 'x9', extra: true, file: 'v2_x_senkung_beidseitig_N16',
+    desc: 'wie (x5), feine Rundungen N=16 (2.8°-Schichten: die tangentialen Streifen liegen in Deckfläche, Kegel-Facetten und Bohrungswand)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 10, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 4, 32, true), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 2, r: 0.5, rw: 0.5, N: 16 } },
+    ],
+    expect: { mode: 'sharp' },
+    countersink: [{ col: 1, R: 4, seg: 32, depth: 2, ang: 90, r: 0.5, rw: 0.5 }],
+  },
+  {
+    id: 'x10', extra: true, file: 'v2_x_fase_verrundet_rundrechteck',
+    desc: 'wie (x6) am Rundrechteck 40×30 (senkrechte Eckradien R5, 8 Seg.): Fase und beide Rundungen laufen um die Eckbögen',
+    columns: [plate(roundedRectProfile(40, 30, 5, 8), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, rw: 0.5, N: 8 } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'x11', extra: true, file: 'v2_x_fase_wandrundung',
+    desc: 'Rechteck 40×30×10, oben 45°-Fase (Tiefe 1.5), nur die Kante Wand → Fase verrundet (rw=0.5), Fasenkante zur Deckfläche scharf',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0, rw: 0.5, N: 8 } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'x12', extra: true, file: 'v2_x_fase_verrundet_gedreht',
+    desc: 'wie (x6), gedreht (17°/31°/47°) und weit vom Ursprung (x=1000, y=2000, z=500)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'countersink', depth: 1.5, r: 0.5, rw: 0.5, N: 8 } })],
+    transform: { rot: [17, 31, 47], t: [1000, 2000, 500] },
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'x13', extra: true, file: 'v2_x_ellipsen_rundung',
+    desc: 'Rechteck 40×30×10, oben Ellipsen-Rundung (Halbachsen 2 entlang der Deckfläche, 1 entlang der Wand, N=8) — kein Kreisbogen, keine Fase: bleibt; v2 darf NIE eine ihrer Schichten als Fase zwischen zwei Rundungen deuten (r = b nur für die Schnitthöhen in check.mjs)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'ellipse', a: 2, b: 1, r: 1, N: 8 } })],
+    expect: { mode: 'skip' },
+  },
   // ── Offene Bänder: nur ein zusammenhängender Teil der Deck-Kontur verrundet (wie d) ──
   {
     id: 'd2', extra: true, file: 'v2_x_drei_kanten',
@@ -711,6 +789,55 @@ export const BODIES = [
     desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben nur an den zwei Kanten der einspringenden Ecke',
     columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [2, 3] } })],
     expect: { mode: 'sharp', bands: 1 },
+  },
+  // ── Offene Bänder mit MEHREREN getrennten verrundeten Abschnitten in einem Loop (je Abschnitt ein Band) ──
+  {
+    id: 'd6', extra: true, file: 'v2_x_offen_zwei_trapez',
+    desc: 'Trapez (0,0)-(40,0)-(30,30)-(0,30) ×10, Verrundung r=1.5 oben an Unter- UND Oberkante (zwei Abschnitte, gemeinsame schräge Stirnwand) — v1 kollabierte die Rundung früher auf der schrägen Stirnwand (ΔV +25 mm³, wasserdicht)',
+    columns: [plate([[0, 0], [40, 0], [30, 30], [0, 30]], 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 2] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd7', extra: true, file: 'v2_x_offen_zwei_l',
+    desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben an zwei getrennten Abschnitten (Unterkante + rechte Kante, Innenkanten der Ecke)',
+    columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [0, 1, 3, 4] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd8', extra: true, file: 'v2_x_offen_zwei_boegen',
+    desc: 'Block 40×30 mit flach gebogener Unter-/Oberkante (Stich 3, 8 Seg.) ×10, Verrundung r=1 oben entlang beider Bögen (zwei Abschnitte, Bogen-Wände), Seiten scharf',
+    columns: [plate(bulgeProfile(40, 30, 3, 8), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd9', extra: true, file: 'v2_x_offen_vier_achteck',
+    desc: 'Achteck (Umkreis R15) ×10, Verrundung r=1 oben an jeder zweiten Kante (vier Abschnitte, Stirnwände unter 45°)',
+    columns: [plate(Array.from({ length: 8 }, (_, i) => { const a = (2 * PI * i) / 8 + PI / 8; return [20 + 15 * Math.cos(a), 15 + 15 * Math.sin(a)]; }), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1, N: 8, edges: [0, 2, 4, 6] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd11', extra: true, file: 'v2_x_offen_einspringend',
+    desc: 'L-Profil 40×30 (Schenkel 10) ×10, Verrundung r=1.5 oben ab der EINSPRINGENDEN Ecke (Innenkante senkrecht + obere Kante): die Stirnwand läuft dort über die Ecke hinaus — der geschärfte Rand darf nicht auf derselben Geraden zurücklaufen (Spitze der Breite 0, step-strict loop-fold)',
+    columns: [plate(lProfile(40, 30, 10), 10, null, { bottom: { kind: 'sharp' }, top: { kind: 'round', r: 1.5, N: 8, edges: [3, 4] } })],
+    expect: { mode: 'sharp', bands: 1 },
+  },
+  {
+    id: 'd12', extra: true, file: 'v2_x_halbkreis_hoch',
+    desc: 'Profil Rechteck 20×20 mit Halbkreis R10 oben (15 Seg., Facette genau bei 90°), 40 hoch, OHNE Rundung — von der Seitenwand aus sah der Viertelbogen bis zur 90°-Facette wie eine Rundung aus (Basis 69260ed: eckig, ΔV +1719 mm³ bei dichter Hülle)',
+    columns: [plate([[0, 0], [20, 0], ...Array.from({ length: 16 }, (_, k) => { const a = PI * k / 15; return [10 + 10 * Math.cos(a), 20 + 10 * Math.sin(a)]; })], 40, { kind: 'sharp' })],
+    expect: { mode: 'skip' },
+  },
+  {
+    id: 'd13', extra: true, file: 'v2_x_offen_duenn',
+    desc: 'dünne Platte 40×30×2.6, Verrundung r=1 oben UND unten an zwei Kanten (offene Bänder, Steg 0.6 mm = 0.6·r — knapp über der Seitenwand-Schranke 0.5)',
+    columns: [plate(rectProfile(0, 0, 40, 30), 2.6, null, { bottom: { kind: 'round', r: 1, N: 8, edges: [0, 1] }, top: { kind: 'round', r: 1, N: 8, edges: [0, 1] } })],
+    expect: { mode: 'sharp' },
+  },
+  {
+    id: 'd10', extra: true, file: 'v2_x_langloch_hoch',
+    desc: 'Langloch-Zapfen (Geraden 20, Halbkreise R5 mit 16 Seg.) 40 hoch, OHNE Rundung — eine Halbkreis-Facette hat links und rechts tangentiale Nachbarn (zwei „Abschnitte“), ein Viertelkreis bis zur 90°-Facette sähe aus wie eine Rundung: die Enden müssen rund bleiben',
+    columns: [plate(slotProfile(20, 5, 16), 40, { kind: 'sharp' })],
+    expect: { mode: 'skip' },
   },
   // ── Bandform (ersetzt die Schranken RMAX/Bandfläche ≤ 3× Deckfläche): Kuppe ≠ Verrundung ──
   {
