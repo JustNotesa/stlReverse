@@ -1,0 +1,12 @@
+{
+  "addons": {
+    "{0f69a2ea-bf50-42ba-8055-dba7d55e509f}": {
+      "updates": [
+        {
+          "version": "0.2.1",
+          "update_link": "https://github.com/JustNotesa/stlReverse/releases/download/v0.2.1/stl-reverse-0.2.1.xpi"
+        }
+      ]
+    }
+  }
+}

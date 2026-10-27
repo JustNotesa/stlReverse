@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "STL Reverse Parametric Sketch",
-  "version": "0.2.0",
-  "description": "Wandelt STL-Meshes heuristisch in eine parametrische Zeichnung um und liefert ortho-Projektionen.",
+  "version": "0.2.1",
+  "description": "Wandelt STL-Dreiecksnetze in STEP-Volumenkörper um: Verrundungen entfernen, Bohrungen und Mäntel als echte Zylinder, gebogene Kanäle als exakte Flächen.",
   "browser_action": {
     "default_title": "STL Reverse",
     "default_icon": {
@@ -19,8 +19,9 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "stlreverse@example.com",
+      "id": "{0f69a2ea-bf50-42ba-8055-dba7d55e509f}",
       "strict_min_version": "140.0",
+      "update_url": "https://raw.githubusercontent.com/JustNotesa/stlReverse/main/updates.json",
       "data_collection_permissions": {
         "required": [
           "none"
