@@ -1209,3 +1209,369 @@ export function applyArcBands(fds, det, opts) {
   });
   return { fds: out, removed };
 }
+
+// ── Exakte Geometrie (Abschnitt 3) ─────────────────────────────────────────
+
+/**
+ * Exakte Bogen-Geometrie aus den GESCHRIEBENEN Endpunkt-Koordinaten.
+ *
+ * Aw/Bw = geschriebene Koordinaten von arc.pts[0] bzw. des letzten Punktes.
+ * Die Sehne w = Bw − Aw; die Kreis-Ebene steht ⊥ z, wobei
+ *   z = normiert(d − (w·d / w·w)·w)   (bei gleicher Höhe der Endpunkte: z = d)
+ * Die Mitte liegt auf der Mittelsenkrechten der Sehre; ihre Lage längs u = norm(z × w)
+ * folgt aus dem gefitteten Kreis-C0 (arc.level):  center = M + ((C0 − M)·u)·u.
+ * Der Umlaufsinn kommt aus dem Polygonzug (Vorzeichen von Σ (p_k − c) × (p_{k+1} − c) · z).
+ *
+ * Prüfungen (sonst null): Radius = level.r (Toleranz), alle Polygonzug-Punkte auf der
+ * Kreislinie, Summe der Segmentwinkel = sweep.
+ *
+ * → { key, A, B, Aw, Bw, center, axis, refDir, radius, sweep } | null
+ */
+export function arcGeometry(arc, Aw, Bw, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  if (!arc || !Array.isArray(Aw) || !Array.isArray(Bw)) return null;
+  const pts = arc.pts || [];
+  if (pts.length < 2) return null;
+  const w = sub(Bw, Aw);
+  const ww = dot(w, w);
+  if (!(ww > 1e-18)) return null;                     // |w| > 1e-9
+  const d = arc.d;
+  if (!d || !(len(d) > 0)) return null;
+  let z = sub(d, mul(w, dot(w, d) / ww));
+  if (!(len(z) > 1e-12)) return null;
+  z = norm(z);
+  const M = mul(add(Aw, Bw), 0.5);
+  let u = cross(z, w);
+  if (!(len(u) > 1e-12)) return null;
+  u = norm(u);
+  const frame = arc.frame, level = arc.level;
+  if (!frame || !frame.e1 || !frame.e2 || !level || !level.c2) return null;
+  const C0 = add(add(mul(frame.e1, level.c2[0]), mul(frame.e2, level.c2[1])), mul(d, level.t));
+  const s = dot(sub(C0, M), u);
+  const center = add(M, mul(u, s));
+  const vA = sub(Aw, center);
+  const radius = len(vA);
+  if (!(radius > 1e-9)) return null;
+
+  // Umlaufsinn aus dem Polygonzug (Rohpunkte)
+  let S = 0;
+  for (let k = 0; k + 1 < pts.length; k++) {
+    S += dot(cross(sub(pts[k], center), sub(pts[k + 1], center)), z);
+  }
+  if (S < 0) z = mul(z, -1);
+  const refDir = norm(sub(vA, mul(z, dot(vA, z))));
+  if (!(len(refDir) > 1e-12)) return null;
+  const e2 = cross(z, refDir);
+  const ang = (p) => {
+    const v = sub(p, center);
+    return Math.atan2(dot(v, e2), dot(v, refDir));
+  };
+
+  // Sweep: Winkel A → B gegen den Uhrzeigersinn um z, in (0, 2π)
+  let sweep = ang(Bw) - ang(Aw);
+  while (sweep < 0) sweep += 2 * Math.PI;
+  if (!(sweep > 1e-9) || sweep > 2 * Math.PI - 1e-9) return null;
+
+  const tol = Math.max(o.tolFitAbs, o.tolFitRel * radius);
+  if (!(Math.abs(radius - level.r) <= tol)) return null;
+  // Abstand jedes Polygonzug-Punktes zur Kreislinie (3D)
+  for (const p of pts) {
+    const v = sub(p, center);
+    const hh = dot(v, z);
+    const rho = len(sub(v, mul(z, hh)));
+    const dr = rho - radius;
+    if (!(Math.sqrt(hh * hh + dr * dr) <= tol)) return null;
+  }
+  // Summe der Segmentwinkel des Polygonzugs ≈ sweep
+  let sum = 0, prev = ang(pts[0]);
+  for (let k = 1; k < pts.length; k++) {
+    const a = ang(pts[k]);
+    let dd = a - prev;
+    while (dd > Math.PI) dd -= 2 * Math.PI;
+    while (dd < -Math.PI) dd += 2 * Math.PI;
+    sum += dd;
+    prev = a;
+  }
+  if (!(Math.abs(sum - sweep) <= 1e-3)) return null;
+
+  return {
+    key: arc.key,
+    A: pts[0], B: pts[pts.length - 1],
+    Aw: Aw.slice(), Bw: Bw.slice(),
+    center, axis: z, refDir, radius, sweep,
+  };
+}
+
+/**
+ * n+1 Punkte auf dem Bogen: Parameter 0 → sweep.
+ * Der erste Punkt ist Aw, der letzte Bw (exakt, nicht neu berechnet).
+ */
+export function arcSamples(geom, n) {
+  if (!geom) return [];
+  const N = Math.max(1, Math.floor(n) || 1);
+  const e2 = cross(geom.axis, geom.refDir);
+  const out = [];
+  for (let k = 0; k <= N; k++) {
+    if (k === 0) { out.push(geom.Aw.slice()); continue; }
+    if (k === N) { out.push(geom.Bw.slice()); continue; }
+    const t = geom.sweep * k / N;
+    const c = Math.cos(t), s = Math.sin(t);
+    out.push(add(geom.center, add(mul(geom.refDir, geom.radius * c), mul(e2, geom.radius * s))));
+  }
+  return out;
+}
+
+/** Abstand eines Punktes zur Zylinderfläche (Achse loc/axis, Radius r) */
+const cylDist = (surf, p) => {
+  const x = sub(p, surf.loc);
+  const perp = sub(x, mul(surf.axis, dot(x, surf.axis)));
+  return Math.abs(len(perp) - surf.radius);
+};
+
+/** Abstand eines Punktes zur Kegelfläche (loc = Mitte des großen Kreises) */
+const coneDist = (surf, p) => {
+  const x = sub(p, surf.loc);
+  const hh = dot(x, surf.axis);
+  const perp = sub(x, mul(surf.axis, hh));
+  const R = surf.radius + hh * Math.tan(surf.semiAngle);
+  return Math.abs(len(perp) - R) * Math.cos(surf.semiAngle);
+};
+
+/**
+ * Bandfläche aus den beiden Bogen-Geometrien:
+ *   Zylinder  — Achse = band.d, Radius = Mittel der beiden Radien
+ *   Kegel     — Lage im großen Kreis, Achse zum wachsenden Radius,
+ *               semiAngle = atan2(R_groß − R_klein, Höhenabstand)
+ * Beide Bögen müssen auf der Fläche liegen (opts.surfTol) → sonst null.
+ */
+export function bandSurface(band, gLo, gHi, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  if (!band || !gLo || !gHi) return null;
+  const d = band.d;
+  if (!d || !(len(d) > 0)) return null;
+  let surf = null;
+  if (band.kind === 'cone') {
+    const L = gLo.radius >= gHi.radius ? gLo : gHi;
+    const K = L === gLo ? gHi : gLo;
+    const dv = sub(L.center, K.center);
+    const hd = dot(dv, d);
+    const h = Math.abs(hd);
+    if (!(h > 1e-12)) return null;
+    const axis = norm(mul(d, hd >= 0 ? 1 : -1));         // zeigt zum wachsenden Radius
+    let rd = sub(L.refDir, mul(axis, dot(L.refDir, axis)));
+    if (!(len(rd) > 1e-12)) return null;
+    surf = {
+      kind: 'cone', loc: L.center, axis, refDir: norm(rd),
+      radius: L.radius, semiAngle: Math.atan2(L.radius - K.radius, h),
+    };
+  } else {
+    let rd = sub(gLo.refDir, mul(d, dot(gLo.refDir, d)));
+    if (!(len(rd) > 1e-12)) return null;
+    surf = {
+      kind: 'cyl', loc: gLo.center, axis: d, refDir: norm(rd),
+      radius: (gLo.radius + gHi.radius) / 2,
+    };
+  }
+  for (const g of [gLo, gHi]) {
+    for (const p of arcSamples(g, o.samples)) {
+      const dist = surf.kind === 'cone' ? coneDist(surf, p) : cylDist(surf, p);
+      if (!(dist <= o.surfTol)) return null;
+    }
+  }
+  return surf;
+}
+
+// ── Pläne (Abschnitt 4) ────────────────────────────────────────────────────
+
+/** Eigentümer-Bänder eines Bogens als failed markieren */
+function failOwners(rec, failed) {
+  for (const ow of (rec && rec.owners) || []) failed.add(ow.band);
+}
+
+/**
+ * Deckfläche zu einem capEdit: der Klon (mit arcEdges, aus applyArcBands) oder —
+ * falls die Liste keine Bogen-Kanten enthält — das Original über den Index.
+ */
+function findCapFace(list, ce, vkey) {
+  const key = edgeCanonKey(vkey, ce.a, ce.b);
+  const has = (fd) => {
+    const ae = fd && fd.arcEdges;
+    if (!ae) return false;
+    if (ae instanceof Map) return ae.get(key) === ce.arcKey;
+    if (typeof ae === 'object') return ae[key] === ce.arcKey;
+    return false;
+  };
+  for (const fd of list) if (has(fd)) return fd;
+  return list[ce.fi] || null;
+}
+
+/** Segmentwinkel (Betrag) eines Polygonzugs um einen Bogen */
+function chainAngles(pts, g) {
+  const e2 = cross(g.axis, g.refDir);
+  const out = [];
+  if (!pts || pts.length < 2) return out;
+  const ang = (p) => {
+    const v = sub(p, g.center);
+    return Math.atan2(dot(v, e2), dot(v, g.refDir));
+  };
+  let prev = ang(pts[0]);
+  for (let k = 1; k < pts.length; k++) {
+    const a = ang(pts[k]);
+    let dd = a - prev;
+    while (dd > Math.PI) dd -= 2 * Math.PI;
+    while (dd < -Math.PI) dd += 2 * Math.PI;
+    out.push(Math.abs(dd));
+    prev = a;
+  }
+  return out;
+}
+
+/**
+ * Pläne je gültigem Band bauen.
+ *
+ * fds2   — Flächenliste: die Deckflächen werden über ihre Bogen-Kante gefunden
+ *          (Klon aus applyArcBands) oder sonst über den Index; die Normalen der
+ *          Band-Facetten kommen aus band.facets — das sind Indizes der ORIGINAL-
+ *          Liste (die auch validateArcBands gesehen hat).
+ * det    — Ergebnis von validateArcBands.
+ * written(p) → [x,y,z] — die geschriebenen Koordinaten eines Punkt-Objekts.
+ *
+ * → { plans, geoms, failed }   failed = Set der band.id
+ */
+export function buildArcPlans(fds2, det, written, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  const vkey = vtxKeyOf(o);
+  const list = fds2 || [];
+  const arcs = det && det.arcs instanceof Map ? det.arcs : new Map();
+  const wr = (p) => (typeof written === 'function' ? written(p) : [p[0], p[1], p[2]]);
+  const failed = new Set();
+  const geoms = new Map();
+
+  // 1. Exakte Geometrie je Bogen (aus den geschriebenen Endpunkten)
+  for (const [key, rec] of arcs) {
+    const raw = (rec && rec.pts) || [];
+    if (raw.length < 2) { geoms.set(key, null); failOwners(rec, failed); continue; }
+    const Aw = wr(raw[0]);
+    const Bw = wr(raw[raw.length - 1]);
+    const g = (Array.isArray(Aw) && Array.isArray(Bw)) ? arcGeometry(rec, Aw, Bw, o) : null;
+    geoms.set(key, g);
+    if (!g) failOwners(rec, failed);
+  }
+
+  // 2. Deckflächen: jede Probe des Bogens muss in der Flächenebene liegen
+  for (const ce of (det && det.capEdits) || []) {
+    const g = geoms.get(ce.arcKey);
+    if (!g) continue;                                   // Eigentümer sind schon failed
+    const fd = findCapFace(list, ce, vkey);
+    let bad = !fd;
+    if (!bad) {
+      const nn = fd.normal ? norm(fd.normal) : null;
+      const c = fd.centroid || centroidOf(fd.outer);
+      if (!nn || !(len(nn) > 0) || !c) bad = true;
+      else {
+        for (const p of arcSamples(g, o.samples)) {
+          if (!(Math.abs(dot(nn, sub(p, c))) <= o.surfTol)) { bad = true; break; }
+        }
+      }
+    }
+    if (bad) failOwners(arcs.get(ce.arcKey), failed);
+  }
+
+  // 3. Bandflächen + Pläne
+  const plans = [];
+  for (const band of (det && det.bands) || []) {
+    if (failed.has(band.id)) continue;
+    const segs = band.segs || [];
+    const loSeg = segs.find((s) => s.type === 'arc' && s.level === 'lo');
+    const hiSeg = segs.find((s) => s.type === 'arc' && s.level === 'hi');
+    if (!loSeg || !hiSeg) { failed.add(band.id); continue; }
+    const gLo = geoms.get(loSeg.arcKey);
+    const gHi = geoms.get(hiSeg.arcKey);
+    const surf = bandSurface(band, gLo, gHi, o);
+    if (!surf) { failed.add(band.id); continue; }
+
+    // Proben: lo entlang segs[0], hi entlang segs[2] UMGEDREHT (Hk über Lk)
+    const K = Math.max(8, 2 * (band.nSegs || 0));
+    const L = arcSamples(gLo, K);
+    if (vkey(loSeg.pts[0]) !== vkey(gLo.A)) L.reverse();
+    const H = arcSamples(gHi, K);
+    if (vkey(hiSeg.pts[hiSeg.pts.length - 1]) !== vkey(gHi.A)) H.reverse();
+
+    const tris = [];
+    for (let k = 0; k < K; k++) {
+      tris.push([L[k], L[k + 1], H[k + 1]]);
+      tris.push([L[k], H[k + 1], H[k]]);
+    }
+    // Orientierung: Normale des ersten Dreiecks gegen Σ Facetten-Normalen
+    if (tris.length) {
+      let ref = [0, 0, 0];
+      for (const fi of band.facets || []) {
+        const fd = list[fi];
+        if (fd && fd.normal) ref = add(ref, fd.normal);
+      }
+      if (!(len(ref) > 1e-12)) {                        // Rückfall: radial nach außen
+        const x = sub(tris[0][0], surf.loc);
+        ref = sub(x, mul(surf.axis, dot(x, surf.axis)));
+      }
+      const n0 = cross(sub(tris[0][1], tris[0][0]), sub(tris[0][2], tris[0][0]));
+      if (dot(n0, ref) < 0) {
+        for (const t of tris) { const tmp = t[1]; t[1] = t[2]; t[2] = tmp; }
+      }
+    }
+    let area = 0;
+    for (const t of tris) {
+      area += 0.5 * len(cross(sub(t[1], t[0]), sub(t[2], t[0])));
+    }
+
+    // Pfeilhöhe (beide Polygonzüge) und Volumen-Differenz Zylinder/Kegel
+    let sag = 0;
+    for (const [chain, g] of [[loSeg.pts, gLo], [hiSeg.pts, gHi]]) {
+      for (const phi of chainAngles(chain, g)) {
+        sag = Math.max(sag, g.radius * (1 - Math.cos(phi / 2)));
+      }
+    }
+    const hBand = Math.abs((band.levels.hi.t) - (band.levels.lo.t));
+    const rMean = band.kind === 'cone' ? (gLo.radius + gHi.radius) / 2 : gLo.radius;
+    let dV = 0;
+    for (const phi of chainAngles(loSeg.pts, gLo)) {
+      dV += rMean * rMean / 2 * (phi - Math.sin(phi)) * hBand;
+    }
+
+    plans.push({
+      id: band.id, band, kind: band.kind, surf, sense: band.sense,
+      segs: band.segs, tris, area, sig: band.sig, dV, sag,
+    });
+  }
+  return { plans, geoms, failed };
+}
+
+/**
+ * Loop mit Bogen-Kanten auf die exakten Bogen-Punkte aufweiten:
+ * für jede Kante mit arcEdges-Eintrag werden die inneren arcSamples-Punkte
+ * (n Segmente) in Richtung L[i] → L[i+1] eingefügt.
+ * → neue Punktliste (Original unverändert)
+ */
+export function expandArcLoop(L, arcEdges, geoms, vtxKey, n = 16) {
+  if (!L || !L.length) return [];
+  const vkey = typeof vtxKey === 'function' ? vtxKey : vtxKeyOf({});
+  const N = Math.max(1, Math.floor(n) || 1);
+  const out = [];
+  const len = L.length;
+  for (let i = 0; i < len; i++) {
+    out.push(L[i]);
+    if (!arcEdges) continue;
+    const a = L[i], b = L[(i + 1) % len];
+    const key = edgeCanonKey(vkey, a, b);
+    const arcKey = arcEdges instanceof Map ? arcEdges.get(key)
+      : (typeof arcEdges === 'object' ? arcEdges[key] : null);
+    if (!arcKey) continue;
+    const g = geoms && typeof geoms.get === 'function' ? geoms.get(arcKey) : null;
+    if (!g) continue;
+    let pts = arcSamples(g, N);
+    const ka = vkey(a), kb = vkey(b);
+    const gA = vkey(g.A), gB = vkey(g.B);
+    if (ka === gB && kb === gA) pts = pts.slice().reverse();
+    for (let k = 1; k < N; k++) out.push(pts[k]);
+  }
+  return out;
+}
