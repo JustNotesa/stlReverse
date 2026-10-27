@@ -1,5 +1,5 @@
 import { formatBytes, describeDetailLevel } from './utils.js';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=33';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=34';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=28';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=19';
@@ -61,7 +61,7 @@ const analysisWorker = _createAnalysisWorker();
 function _createAnalysisWorker() {
   const workerUrl = extensionApi?.runtime?.getURL
     ? extensionApi.runtime.getURL('analysis-worker.js')
-    : 'analysis-worker.js?v=18';
+    : 'analysis-worker.js?v=19';
   const worker = new Worker(workerUrl, { type: 'module' });
 
   worker.onmessage = (event) => {
@@ -434,6 +434,8 @@ function setStepWatertightStatus(report) {
     const done = [];
     if (n(report.boresConverted)) done.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
     if (n(report.mantlesConverted)) done.push(`${report.mantlesConverted} ${report.mantlesConverted === 1 ? 'Außenmantel' : 'Außenmäntel'} als echter Zylinder`);
+    if (n(report.mantleConesConverted)) done.push(`${report.mantleConesConverted} ${report.mantleConesConverted === 1 ? 'Kegelmantel' : 'Kegelmäntel'} als echter Kegel`);
+    if (n(report.mantleChamfersConverted)) done.push(`${report.mantleChamfersConverted} ${report.mantleChamfersConverted === 1 ? 'Fase/Spitze' : 'Fasen/Spitzen'} am Außenmantel als echter Kegel`);
     if (n(report.tubesConverted)) done.push(`${report.tubesConverted} gebogene${report.tubesConverted === 1 ? 'r Kanal' : ' Kanäle'} als exakte Fläche (${report.tubePieces} Stück)`);
     const rounds = [];
     if (n(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
@@ -442,7 +444,7 @@ function setStepWatertightStatus(report) {
     if (rounds.length) done.push(`scharf gemacht: ${rounds.join(', ')}`);
     // Sicherheits-Rückfall (Hülle offen oder Orientierung einer CAD-Fläche unstimmig): sagen, warum
     // weniger umgewandelt wurde als erkannt
-    if (report.fallbackStage === 1) done.push('Sicherheits-Rückfall: Bohrungen, Mäntel und Kanäle facettiert gelassen');
+    if (report.fallbackStage === 1) done.push('Sicherheits-Rückfall: Bohrungen, Mäntel, Kegel und Kanäle facettiert gelassen');
     else if (report.fallbackStage === 2) done.push('Sicherheits-Rückfall: komplett facettiert');
     if (done.length) {
       const detail = document.createElement('span');
