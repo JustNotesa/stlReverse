@@ -54,6 +54,13 @@ const withDefeature = (a) => (a ? { ...a, defeature: _defeatureOn() } : a);
 
 const WORKER_TIMEOUT_MS = 60000;
 
+// Kleinste Detailgröße (mesh-clean.js im Worker): Kanten darunter werden vor der Analyse
+// kollabiert. 0 = aus. Standard 0,02 mm (Begründung in mesh-clean.js, Auswahl in popup.html).
+const _minDetailMm = () => {
+  const v = Number(document.getElementById('min-detail-select')?.value);
+  return Number.isFinite(v) && v >= 0 ? v : 0.02;
+};
+
 // ── Worker setup ─────────────────────────────────────────────────────────────
 
 const analysisWorker = _createAnalysisWorker();
@@ -102,7 +109,7 @@ function _runWorkerAnalysis(buffer, fileName, detail, onProgress, { reanalyzeOnl
     if (reanalyzeOnly) {
       analysisWorker.postMessage({ id, fileName, detailLevel: detail, reanalyzeOnly: true });
     } else {
-      analysisWorker.postMessage({ id, buffer, fileName, detailLevel: detail }, [buffer]);
+      analysisWorker.postMessage({ id, buffer, fileName, detailLevel: detail, minDetailMm: _minDetailMm() }, [buffer]);
     }
   });
 }
@@ -409,6 +416,13 @@ document.getElementById('step-render-button')?.addEventListener('click', () => {
   }
 });
 
+// Kleinste Detailgröße geändert: das Netz selbst ändert sich → Datei komplett neu analysieren
+// (der Detail-Regler nutzt das gecachte, bereits bereinigte Netz).
+document.getElementById('min-detail-select')?.addEventListener('change', () => {
+  if (!lastSourceBuffer || !lastFileName || isProcessing) return;
+  runAnalysis({ buffer: lastSourceBuffer, fileName: lastFileName, reason: 'upload', fileSize: lastFileSize });
+});
+
 // Defeaturing-Umschalter: Verdikt sofort neu berechnen (Rendern/Export lesen den Toggle ohnehin).
 document.getElementById('defeature-toggle')?.addEventListener('change', () => {
   if (!lastAnalysis) return;
@@ -424,6 +438,12 @@ function setStepWatertightStatus(report) {
   if (!el) return;
   if (!report) { el.textContent = ''; el.dataset.state = ''; return; }
   const { watertight, boundaryEdges, nonManifoldEdges, orientationDefects, edgeCount, faceCount } = report;
+  // Netz-Bereinigung (Worker, mesh-clean.js): wie viele Mikro-Dreiecke vor der Analyse entfernt wurden
+  const mc = lastAnalysis?.meshClean;
+  const cleanNote = mc && mc.removedTris > 0
+    ? `${mc.removedTris} Mikro-Dreieck${mc.removedTris === 1 ? '' : 'e'} entfernt (Kanten < ${String(mc.minDetailMm).replace('.', ',')} mm)`
+      + (mc.shortAfter ? `, ${mc.shortAfter} kürzere Kante${mc.shortAfter === 1 ? '' : 'n'} geschützt (Ecken, scharfe Kanten, Ebenen)` : '')
+    : null;
   if (watertight) {
     el.textContent = `✓ Wasserdicht: ${faceCount} Flächen, alle ${edgeCount} Kanten genau 1× vor- und 1× rückwärts genutzt → geschlossener Körper.`;
     el.dataset.state = 'ok';
@@ -432,6 +452,7 @@ function setStepWatertightStatus(report) {
     // Flächenzahl mit „Verrundungen entfernen“ so viel kleiner ist.
     const n = (v) => (Number.isFinite(v) ? v : 0);
     const done = [];
+    if (cleanNote) done.push(cleanNote);
     if (n(report.boresConverted)) done.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
     if (n(report.mantlesConverted)) done.push(`${report.mantlesConverted} ${report.mantlesConverted === 1 ? 'Außenmantel' : 'Außenmäntel'} als echter Zylinder`);
     if (n(report.mantleConesConverted)) done.push(`${report.mantleConesConverted} ${report.mantleConesConverted === 1 ? 'Kegelmantel' : 'Kegelmäntel'} als echter Kegel`);
@@ -471,6 +492,12 @@ function setStepWatertightStatus(report) {
       el.textContent = `⚠ Nicht wasserdicht: ${parts.join(', ')} von ${edgeCount} Kanten (${faceCount} Flächen) → offene Hülle, kein Solid.`;
     }
     el.dataset.state = 'warn';
+    if (cleanNote) {
+      const detail = document.createElement('span');
+      detail.className = 'watertight-detail';
+      detail.textContent = cleanNote;
+      el.append(document.createElement('br'), detail);
+    }
   }
 }
 
