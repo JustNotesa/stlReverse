@@ -253,6 +253,7 @@ const edgeKeyOf = (ka, kb) => (ka < kb ? ka + '|' + kb : kb + '|' + ka);
  * Alle Kanten aller Flächen: je Fläche fi und Loop li (0 = outer, k = inner[k−1]) die
  * Kante i (a = L[i], b = L[(i+1)%n]); Kanten mit gleichem vtxKey(a) = vtxKey(b)
  * werden übersprungen.
+ * opts.skipCircleRim: Loops mit circleRim (analytischer Kreis-Rand) nicht indizieren.
  * → Map edgeKey → [{ fi, li, i, a, b }]
  */
 function buildEdgeIndex(fds, opts) {
@@ -264,6 +265,7 @@ function buildEdgeIndex(fds, opts) {
     const loops = [fd.outer, ...(fd.inner || [])];
     loops.forEach((L, li) => {
       if (!L || !L.length) return;
+      if (o.skipCircleRim && L.circleRim) return;             // analytischer Kreis-Rand
       const n = L.length;
       for (let i = 0; i < n; i++) {
         const a = L[i], b = L[(i + 1) % n];
@@ -860,4 +862,225 @@ export function findArcBands(fds, opts) {
     }
   }
   return { bands, arcs, stats };
+}
+
+// ── Nachbar-Prüfung (Schritt 5) ─────────────────────────────────────────────
+
+/**
+ * Exporter-Kantenschlüssel für fd.arcEdges — ZWEI Striche als Trenner (anders als
+ * der Index-Schlüssel '|'): k1<k2 ? k1+'||'+k2 : k2+'||'+k1.
+ */
+export const edgeCanonKey = (vtxKey, a, b) => {
+  const k1 = vtxKey(a), k2 = vtxKey(b);
+  return k1 < k2 ? k1 + '||' + k2 : k2 + '||' + k1;
+};
+
+/**
+ * Schritt 5: Nachbar-Prüfung bis zum Fixpunkt.
+ *
+ * Jeder Bogen eines Bands muss Kante für Kante an GENAU eine fremde Fläche grenzen:
+ *   (a) ein anderes, noch gültiges Band mit demselben Polygonzug  → Typ 'band'
+ *   (b) eine ebene Deckfläche ⟂ d (kein Band-Facet, kein circleRim/arcEdges)
+ *       mit demselben Loop                                        → Typ 'cap'
+ *   (c) sonst → das Band fällt weg; das invalidiert wiederum seine Nachbarn.
+ *
+ * fds: ebene Flächen; det: Ergebnis von findArcBands (wird mutiert) → det
+ * Ergebnisse: det.bands (nur gültige), det.arcs (nur Bögen mit gültigen Eigentümern),
+ * det.capEdits (je Bogen mit Typ 'cap' genau ein Eintrag), det.stats.valid.
+ */
+export function validateArcBands(fds, det, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  const vkey = vtxKeyOf(o);
+  const list = fds || [];
+  const arcs = det.arcs instanceof Map ? det.arcs : new Map();
+  det.arcs = arcs;
+  const index = buildEdgeIndex(list, { ...o, skipCircleRim: true });
+
+  // Facetten, die zu irgendeinem Band gehören (auch zu einem später verworfenen)
+  const bandFacets = new Set();
+  for (const b of det.bands || []) for (const fi of b.facets || []) bandFacets.add(fi);
+
+  const hasRim = (fd) => {
+    for (const L of [fd.outer, ...(fd.inner || [])]) if (L && L.circleRim) return true;
+    return false;
+  };
+
+  // Typ eines Bogen-Segments bestimmen (null → Band ungültig)
+  const classify = (band, seg, bandOf) => {
+    const pts = seg.pts || [];
+    const own = new Set(band.facets || []);
+    const owners = [];
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const ka = vkey(pts[k]), kb = vkey(pts[k + 1]);
+      if (ka === kb) continue;
+      const foreign = (index.get(edgeKeyOf(ka, kb)) || []).filter((e) => !own.has(e.fi));
+      if (foreign.length !== 1) return null;                 // 0 oder ≥2 fremde Eigentümer
+      owners.push(foreign[0]);
+    }
+    if (!owners.length) return null;
+
+    // (a) Nachbar-Band: alle fremden Eigentümer gehören zu EINEM gültigen Band B
+    const nb = bandOf.get(owners[0].fi);
+    if (nb && nb !== band && owners.every((e) => bandOf.get(e.fi) === nb)) {
+      const rec = arcs.get(seg.arcKey);
+      if (rec && (rec.owners || []).some((ow) => ow.band === nb.id)) {
+        return { type: 'band', band: nb };
+      }
+    }
+
+    // (b) Deckfläche: alle fremden Eigentümer = dieselbe Fläche, derselbe Loop
+    const fi = owners[0].fi, li = owners[0].li;
+    if (owners.every((e) => e.fi === fi && e.li === li)) {
+      const fd = list[fi];
+      if (fd && !bandFacets.has(fi) && !hasArcEdges(fd) && !hasRim(fd)) {
+        const nn = fd.normal ? norm(fd.normal) : null;
+        if (nn && len(nn) > 0 && Math.abs(dot(nn, band.d)) >= o.capCos) {
+          return { type: 'cap', cap: { fi, li } };
+        }
+      }
+    }
+    return null;
+  };
+
+  // Fixpunkt: ungültige Bänder entfernen und wiederholen
+  let valid = (det.bands || []).slice();
+  for (;;) {
+    const bandOf = new Map();
+    for (const b of valid) for (const fi of b.facets || []) bandOf.set(fi, b);
+    const bad = new Set();
+    for (const band of valid) {
+      for (const seg of band.segs || []) { seg.adjType = null; seg.cap = null; seg.adjBand = null; }
+      let ok = true;
+      for (const seg of band.segs || []) {
+        if (seg.type !== 'arc') continue;
+        const r = classify(band, seg, bandOf);
+        if (!r) { ok = false; break; }
+        seg.adjType = r.type;
+        if (r.type === 'cap') seg.cap = r.cap; else seg.adjBand = r.band.id;
+      }
+      if (!ok) bad.add(band.id);
+    }
+    if (!bad.size) break;
+    valid = valid.filter((b) => !bad.has(b.id));
+  }
+
+  // Marker der verworfenen Bänder entfernen
+  const keep = new Set(valid);
+  for (const b of det.bands || []) {
+    if (keep.has(b)) continue;
+    for (const seg of b.segs || []) { seg.adjType = null; seg.cap = null; seg.adjBand = null; }
+  }
+  det.bands = valid;
+
+  // Bögen ohne gültige Eigentümer entfernen, Eigentümer bereinigen
+  const ids = new Set(valid.map((b) => b.id));
+  for (const [key, rec] of [...arcs]) {
+    rec.owners = (rec.owners || []).filter((ow) => ids.has(ow.band));
+    if (!rec.owners.length) arcs.delete(key);
+  }
+
+  // Deckflächen-Änderungen: je Bogen mit Typ 'cap' genau ein Eintrag
+  const capEdits = [];
+  const seen = new Set();
+  for (const band of valid) {
+    for (const seg of band.segs || []) {
+      if (seg.type !== 'arc' || seg.adjType !== 'cap' || !seg.cap) continue;
+      if (seen.has(seg.arcKey)) continue;
+      const rec = arcs.get(seg.arcKey);
+      if (!rec || !rec.pts || rec.pts.length < 2) continue;
+      seen.add(seg.arcKey);
+      capEdits.push({
+        fi: seg.cap.fi, li: seg.cap.li, arcKey: seg.arcKey,
+        a: rec.pts[0], b: rec.pts[rec.pts.length - 1], pts: rec.pts,
+      });
+    }
+  }
+  det.capEdits = capEdits;
+  det.stats = det.stats || {};
+  det.stats.valid = valid.length;
+  return det;
+}
+
+// ── Anwendung ───────────────────────────────────────────────────────────────
+
+/**
+ * Inneren Abschnitt eines Bogens aus einem Loop entfernen.
+ * Die inneren Punkte (ohne Endpunkte) müssen GENAU der zusammenhängende Abschnitt
+ * zwischen a und b sein — in einer der beiden Laufrichtungen.
+ * → neue Punktliste (Original unverändert)
+ */
+function removeArcPoints(L, ce, vkey) {
+  const n = L.length;
+  const ka = vkey(ce.a), kb = vkey(ce.b);
+  let ia = -1, ib = -1;
+  for (let i = 0; i < n; i++) {
+    const k = vkey(L[i]);
+    if (ia < 0 && k === ka) ia = i;
+    if (ib < 0 && k === kb) ib = i;
+  }
+  if (ia < 0 || ib < 0 || ia === ib) {
+    throw new Error('applyArcBands: Bogen-Endpunkte nicht (eindeutig) im Loop ' + ce.li);
+  }
+  const inner = (ce.pts || []).slice(1, -1).map(vkey);
+  const section = (from, to) => {
+    const idx = [];
+    let i = (from + 1) % n;
+    while (i !== to) {
+      idx.push(i);
+      i = (i + 1) % n;
+      if (idx.length > n) break;
+    }
+    return idx;
+  };
+  const same = (idx, seq) => idx.length === seq.length && idx.every((i, k) => vkey(L[i]) === seq[k]);
+  const fwd = section(ia, ib);
+  const bwd = section(ib, ia);
+  let del = null;
+  if (same(fwd, inner)) del = fwd;
+  else if (same(bwd, inner.slice().reverse())) del = bwd;
+  if (!del) throw new Error('applyArcBands: Bogen-Abschnitt passt nicht zum Loop ' + ce.li);
+  const rm = new Set(del);
+  return L.filter((_, i) => !rm.has(i));
+}
+
+/**
+ * Bänder anwenden: alle Band-Facetten entfernen, die Deckflächen glätten
+ * (Polygonzug des Bogens → Bogen-Kante in fd.arcEdges).
+ * Das Original wird NICHT mutiert.
+ * → { fds: neue Liste, removed: Set<fi> }
+ */
+export function applyArcBands(fds, det, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  const vkey = vtxKeyOf(o);
+  const list = fds || [];
+  const removed = new Set();
+  for (const b of det.bands || []) for (const fi of b.facets || []) removed.add(fi);
+  const editsByFi = new Map();
+  for (const ce of det.capEdits || []) {
+    if (!editsByFi.has(ce.fi)) editsByFi.set(ce.fi, []);
+    editsByFi.get(ce.fi).push(ce);
+  }
+  const out = [];
+  list.forEach((fd, fi) => {
+    if (removed.has(fi)) return;
+    const edits = editsByFi.get(fi);
+    if (!edits || !edits.length) { out.push(fd); return; }
+    const loops = [fd.outer, ...(fd.inner || [])];
+    const newLoops = loops.map((L) => (L && L.length ? L.slice() : L));
+    const arcEdges = new Map();
+    for (const ce of edits) {
+      const L = newLoops[ce.li];
+      if (!L || !L.length) throw new Error('applyArcBands: Loop ' + ce.li + ' fehlt');
+      newLoops[ce.li] = removeArcPoints(L, ce, vkey);
+      arcEdges.set(edgeCanonKey(vkey, ce.a, ce.b), ce.arcKey);
+    }
+    out.push({
+      ...fd,
+      outer: newLoops[0],
+      inner: fd.inner ? newLoops.slice(1) : fd.inner,
+      arcEdges,
+      untouched: false,
+    });
+  });
+  return { fds: out, removed };
 }
