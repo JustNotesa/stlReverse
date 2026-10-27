@@ -1184,7 +1184,9 @@ export function buildVolumeStepBrepV2(analysis) {
   const CHAMFER_MAX = 3.0, CHAMFER_MIN = 0.04;
   let finalPlans = [];
   // Diagnose je Bohrung: prim.id → Ergebnis/Grund ('ok:through', 'ok:blind-flat', 'ok:blind-tip',
-  // 'blind:<Gate>', 'clear'). Nur für die Fehlersuche (Report boreNotes) — ohne Einfluss auf den Export.
+  // 'blind:<Gate>' — Gates: 'nowall' (keine Wandflächen übrig), 'wall', 'edges', 'rings:<n>', 'nodeck',
+  // 'through', 'fit', … — sowie 'clear'). Nur für die Fehlersuche (Report boreNotes) — ohne Einfluss
+  // auf den Export.
   let boreNotes = new Map();
   let chamferZones = [];
   // Gruppen, deren Facetten eine Chamfer-Zone verdrängt hat (filterChamferZones) —
@@ -3230,7 +3232,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const fail = (why) => { boreNotes.set(entry.prim.id, 'blind:' + why); return null; };
     const W = new Set();
     for (const g of entry.groups) for (const fi of (fdsOfGroup.get(g) || [])) if (!taken.has(fi)) W.add(fi);
-    if (W.size < 3) return fail('wall');
+    // 'nowall' = es sind KEINE Wandflächen übrig (die Gruppen hat z.B. ein Rohr/anderer Plan
+    // schon übernommen) — eigener Code, damit 'wall' (Kreis-Rand auf der Wand) unterscheidbar bleibt.
+    if (W.size < 3) return fail('nowall');
     // Rand der Wand: Kanten, die genau 1× in der Wand vorkommen — ihr Gegenüber ist genau EINE
     // Fläche außerhalb der Wand (wie sharpBorePlan)
     const cnt = new Map();
