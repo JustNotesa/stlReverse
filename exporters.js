@@ -828,8 +828,9 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   const isConcaveBore = (entry) => radialScore(entry) < -0.5; // Wand: −1 (zur Achse), konvexer Mantel: +1
   // KONVEXE Voll-Zylinder (Score deutlich positiv) kommen in den Mantel-Pfad (eigene Umwandlung
-  // unten: Außenwand → CYLINDRICAL_SURFACE, Ränder = AUSSEN-Loops der Deckflächen). Uneindeutige
-  // (dazwischen) bleiben facettiert.
+  // unten: Außenwand → CYLINDRICAL_SURFACE, Ränder = Loops der Deckflächen — meist Außen-Loops, beim
+  // Zapfen/der Stufenwelle auch ein Innen-Loop — oder Fasen/Kegelspitzen). Uneindeutige (dazwischen)
+  // bleiben facettiert.
   const mantleById = new Map();
   for (const [k, e] of boreById) {
     const sc = radialScore(e);
