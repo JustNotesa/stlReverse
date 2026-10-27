@@ -9,8 +9,15 @@
 //   C) Profilkreis auf der Deckfläche skizziert, Bahn startet 20° geneigt (γ = 20°)
 //      → SURFACE_OF_REVOLUTION / SURFACE_OF_LINEAR_EXTRUSION, Mündung oben = Kreis
 //   D) Robustheit: Kanalwand um 0.15 mm verbeult → KEIN Kanal erkannt, Export facettiert + dicht
-// Je Fall: wasserdicht, orientationDefects 0, occt parst, Volumen (feine occt-Vernetzung) gegen
-// das analytische Soll (Quader − Kanal, Pappus) < 0.2 %.
+//   E/F) Robustheit im Exporter (Mündung passt nicht / falsch orientiert) → facettiert
+//   U) U-Bogen (Gerade + 180°-Bogen + Gerade, γ = 0), R = 4.0 / 4.2 / 7 / 12: exakt 3 Stücke
+//      (Anker-Kette), Zylinder/Torus — früher Biarc-Kette mit Knick bis 4.2° (Kreise bis 0.022 mm
+//      neben ihren Flächen) bzw. bei R = 4.0 ein Fehlalarm von step-strict am 180°-Torusband
+//   S) S-Kurve mit 1 mm Zwischengerade (Anker-Kette greift nicht): Biarc-Vereinfachung ohne Knick
+//      über das Budget — Profil höchstens 0.1° gegen die Bahn geneigt
+//   P) D-Profil (Kreis mit ebener Abflachung) → KEIN Kanal, Abflachung bleibt, ΔV = 0 zum Netz
+// Je Fall: wasserdicht, orientationDefects 0, occt parst, step-strict ohne Verstoß, Volumen (feine
+// occt-Vernetzung) gegen das Netz < 0.2 % (Polygon-Effekt des einbeschriebenen N-Ecks).
 //
 // Ausführen: npm run test:tube   (Exit 0 = grün)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,6 +27,7 @@ import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
+import { checkStepStrict, parseStep } from './step-strict.mjs';
 
 const require = createRequire(import.meta.url);
 const { getOcct } = require('./occt-check.cjs');
@@ -35,9 +43,11 @@ const DEG = Math.PI / 180;
 const rotY = (v, th) => [v[0] * Math.cos(th) + v[2] * Math.sin(th), v[1], -v[0] * Math.sin(th) + v[2] * Math.cos(th)];
 
 // Kanal-Quader: Box [0,W]×[0,D]×[0,H], Bahn in y = D/2 aus Segmenten (Gerade L / Bogen R,Winkel),
-// Start oben (z = H) bei x0, Profilkreis r, um gamma gegen die Normalebene geneigt (Drehung um y),
-// Austritt durch die Seitenfläche x = 0. N Segmente je Ring.
-export function channelBlock({ W = 40, D = 10, H = 30, x0 = 25, r = 2.5, gamma = 0, segs, N = 48, dent = 0 }) {
+// Start oben (z = H) bei x0, Profilkreis r (N Segmente je Ring) oder freies Profil `profile`
+// (Punkte [x, y] um den Startpunkt in der Deckfläche, z.B. D-Profil), um gamma gegen die
+// Normalebene geneigt (Drehung um y). Austritt `exit`: Seitenfläche x = 0 ('x0'), Boden ('bot')
+// oder wieder die Deckfläche ('top', U-Bogen — zwei Löcher in einer Fläche).
+export function channelBlock({ W = 40, D = 10, H = 30, x0 = 25, r = 2.5, gamma = 0, segs, N = 48, dent = 0, exit = 'x0', profile = null }) {
   const yc = D / 2;
   // Bahn: Startrichtung so, dass die Profil-Normale (Deckflächen-Normale −z) um gamma gekippt ist
   const T0 = rotY([0, 0, -1], -gamma);
@@ -59,16 +69,30 @@ export function channelBlock({ W = 40, D = 10, H = 30, x0 = 25, r = 2.5, gamma =
     return { P: add(O, rotY(sub(pc.P, O), th)), rot: (pc.rot0 ?? 0) + th, pc };
   };
   let rot = 0; for (const q of pieces) { q.rot0 = rot; if (q.kind === 'arc') rot += q.th; }
-  // Profilpunkt (Winkel φ) am Start: Kreis in der Deckfläche z = H um (x0, yc)
-  const prof0 = (phi) => [r * Math.cos(phi), r * Math.sin(phi), 0];
-  const X = (s, phi) => { const f = frame(s); return add(f.P, rotY(prof0(phi), f.rot)); };
-  // Ringe entlang der Bahn; letzter Ring = Schnitt mit x = 0 (Bisektion je φ)
+  // Profilpunkte am Start (Deckfläche z = H, um (x0, yc)): Kreis mit N Punkten oder `profile`
+  const prof = profile ? profile.map((q) => [q[0], q[1], 0]) : Array.from({ length: N }, (_, j) => { const phi = (j / N) * 2 * Math.PI; return [r * Math.cos(phi), r * Math.sin(phi), 0]; });
+  const NP = prof.length;
+  const X = (s, j) => { const f = frame(s); return add(f.P, rotY(prof[j], f.rot)); };
+  // Ringe entlang der Bahn; letzter Ring = Schnitt mit der Austrittsfläche (Bisektion je Profilpunkt)
   const ds = 0.4, rings = [];
-  const exitS = (phi) => { let a = 0, b = total; for (let i = 0; i < 80; i++) { const m = 0.5 * (a + b); if (X(m, phi)[0] > 0) a = m; else b = m; } return 0.5 * (a + b); };
-  const sEnd = []; for (let j = 0; j < N; j++) sEnd.push(exitS((j / N) * 2 * Math.PI));
+  const depth = { x0: (p) => p[0], bot: (p) => p[2], top: (p) => H - p[2] }[exit]; // > 0: vor der Austrittsfläche
+  const snap = { x0: (p) => [0, p[1], p[2]], bot: (p) => [p[0], p[1], 0], top: (p) => [p[0], p[1], H] }[exit];
+  const exitS = (j) => {
+    if (exit === 'x0') { let a = 0, b = total; for (let i = 0; i < 80; i++) { const m = 0.5 * (a + b); if (X(m, j)[0] > 0) a = m; else b = m; } return 0.5 * (a + b); }
+    // erst sicher ins Material (Deckfläche: Start liegt in ihr), dann bis zur Durchstoßung marschieren
+    let prev = 0, armed = exit !== 'top';
+    for (let s = 0.05; s <= total; s += 0.05) {
+      const d = depth(X(s, j));
+      if (!armed) { if (d > 0.2) armed = true; prev = s; continue; }
+      if (d <= 0) { let a = prev, b = s; for (let i = 0; i < 80; i++) { const m = 0.5 * (a + b); if (depth(X(m, j)) > 0) a = m; else b = m; } return 0.5 * (a + b); }
+      prev = s;
+    }
+    throw new Error('Kanal erreicht die Austrittsfläche nicht');
+  };
+  const sEnd = []; for (let j = 0; j < NP; j++) sEnd.push(exitS(j));
   const sMin = Math.min(...sEnd);
-  for (let s = 0; s < sMin - 0.05; s += ds) rings.push(Array.from({ length: N }, (_, j) => X(s, (j / N) * 2 * Math.PI)));
-  rings.push(sEnd.map((s, j) => { const p = X(s, (j / N) * 2 * Math.PI); return [0, p[1], p[2]]; }));
+  for (let s = 0; s < sMin - 0.05; s += ds) rings.push(Array.from({ length: NP }, (_, j) => X(s, j)));
+  rings.push(sEnd.map((s, j) => snap(X(s, j))));
   if (dent) { // Delle: ein Ringabschnitt in der Mitte nach innen gedrückt
     const k = rings.length >> 1;
     for (let kk = k - 2; kk <= k + 2; kk++) for (let j = 0; j < 6; j++) { const c = frame(kk * ds).P; rings[kk][j] = add(rings[kk][j], mul(norm(sub(c, rings[kk][j])), dent)); }
@@ -78,8 +102,8 @@ export function channelBlock({ W = 40, D = 10, H = 30, x0 = 25, r = 2.5, gamma =
     const n = cross(sub(b, a), sub(c, a));
     if (dot(n, inward) < 0) tris.push([a, c, b]); else tris.push([a, b, c]);
   };
-  for (let k = 0; k + 1 < rings.length; k++) for (let j = 0; j < N; j++) {
-    const a = rings[k][j], b = rings[k][(j + 1) % N], c = rings[k + 1][(j + 1) % N], d = rings[k + 1][j];
+  for (let k = 0; k + 1 < rings.length; k++) for (let j = 0; j < NP; j++) {
+    const a = rings[k][j], b = rings[k][(j + 1) % NP], c = rings[k + 1][(j + 1) % NP], d = rings[k + 1][j];
     const ctr = frame(Math.min(k * ds, total)).P;
     const cen = mul(add(add(a, b), add(c, d)), 0.25);
     tri(a, b, c, sub(ctr, cen)); tri(a, c, d, sub(ctr, cen));
@@ -120,14 +144,33 @@ export function channelBlock({ W = 40, D = 10, H = 30, x0 = 25, r = 2.5, gamma =
     if (poly.length === 3) tri(poly[0].p, poly[1].p, poly[2].p, outN);
   };
   const B = (x, y, z) => [x, y, z];
-  const top = rings[0], exit = rings[rings.length - 1];
-  holed([B(0, 0, H), B(W, 0, H), B(W, D, H), B(0, D, H)], top, [0, 0, 1]);          // Deckfläche
-  holed([B(0, 0, 0), B(0, D, 0), B(0, D, H), B(0, 0, H)], exit, [-1, 0, 0]);        // Seite x = 0
+  const top = rings[0], exitRing = rings[rings.length - 1];
   const quad = (a, b, c, d, n) => { tri(a, b, c, n); tri(a, c, d, n); };
-  quad(B(0, 0, 0), B(W, 0, 0), B(W, D, 0), B(0, D, 0), [0, 0, -1]);                 // Boden
-  quad(B(W, 0, 0), B(W, 0, H), B(W, D, H), B(W, D, 0), [1, 0, 0]);                  // Seite x = W
-  quad(B(0, 0, 0), B(0, 0, H), B(W, 0, H), B(W, 0, 0), [0, -1, 0]);                 // y = 0
-  quad(B(0, D, 0), B(W, D, 0), B(W, D, H), B(0, D, H), [0, 1, 0]);                  // y = D
+  if (exit === 'top') {
+    // U-Bogen: beide Löcher in der Deckfläche → Rechteck zwischen den Löchern teilen (je Teil ein
+    // Loch); der Teilungspunkt liegt auch auf den Deck-Kanten der Seiten y = 0 / y = D (keine T-Stöße)
+    const xs = (ring) => ring.map((p) => p[0]);
+    const [lo, hi] = Math.max(...xs(exitRing)) < Math.min(...xs(top)) ? [exitRing, top] : [top, exitRing];
+    const xm = 0.5 * (Math.max(...xs(lo)) + Math.min(...xs(hi)));
+    holed([B(0, 0, H), B(xm, 0, H), B(xm, D, H), B(0, D, H)], lo, [0, 0, 1]);
+    holed([B(xm, 0, H), B(W, 0, H), B(W, D, H), B(xm, D, H)], hi, [0, 0, 1]);
+    quad(B(0, 0, 0), B(0, D, 0), B(0, D, H), B(0, 0, H), [-1, 0, 0]);               // Seite x = 0
+    quad(B(0, 0, 0), B(W, 0, 0), B(W, D, 0), B(0, D, 0), [0, 0, -1]);                 // Boden
+    quad(B(W, 0, 0), B(W, 0, H), B(W, D, H), B(W, D, 0), [1, 0, 0]);                  // Seite x = W
+    for (const y of [0, D]) {                                                         // y = 0 / y = D (Fächer)
+      const n = [0, y ? 1 : -1, 0], fan = [B(0, y, H), B(xm, y, H), B(W, y, H), B(W, y, 0)];
+      for (let i = 0; i + 1 < fan.length; i++) tri(B(0, y, 0), fan[i], fan[i + 1], n);
+    }
+  } else {
+    holed([B(0, 0, H), B(W, 0, H), B(W, D, H), B(0, D, H)], top, [0, 0, 1]);          // Deckfläche
+    if (exit === 'x0') holed([B(0, 0, 0), B(0, D, 0), B(0, D, H), B(0, 0, H)], exitRing, [-1, 0, 0]); // Seite x = 0
+    else quad(B(0, 0, 0), B(0, D, 0), B(0, D, H), B(0, 0, H), [-1, 0, 0]);
+    if (exit === 'bot') holed([B(0, 0, 0), B(W, 0, 0), B(W, D, 0), B(0, D, 0)], exitRing, [0, 0, -1]); // Boden
+    else quad(B(0, 0, 0), B(W, 0, 0), B(W, D, 0), B(0, D, 0), [0, 0, -1]);
+    quad(B(W, 0, 0), B(W, 0, H), B(W, D, H), B(W, D, 0), [1, 0, 0]);                  // Seite x = W
+    quad(B(0, 0, 0), B(0, 0, H), B(W, 0, H), B(W, 0, 0), [0, -1, 0]);                 // y = 0
+    quad(B(0, D, 0), B(W, D, 0), B(W, D, H), B(0, D, H), [0, 1, 0]);                  // y = D
+  }
   // Soll-Volumen: Quader − Kanal (Querschnitt Profilkreis-Projektion: π r² cos γ je Bahnlänge),
   // Austritts-Keil exakt über das Netz-Mittel ausgeglichen → hier nur grob für die Plausibilität
   return { faces: tris.map((v) => ({ vertices: v, normal: norm(cross(sub(v[1], v[0]), sub(v[2], v[0]))) })) };
@@ -156,7 +199,23 @@ export const cases = [
   // (Hinweis: eine ÜBERGANGSkurve umzudrehen dreht BEIDE Nutzungen — topologisch weiter dicht, nur
   // occt wählt dann das Komplementär-Band; das kann der Zähler prinzipiell nicht sehen.)
   { name: 'F  Mündungskurve falsch orientiert → globaler Fallback', mesh: { segs: [{ L: 12 }, { R: 8, deg: 90 }, { L: 30 }] }, tamper: (sp) => { sp.curves[0].sense = -sp.curves[0].sense; }, expect: { tubes: 1, exported: 0 } },
+  // U-Bogen: Ein- und Austritt in der Deckfläche. Früher projizierten die Stationen am Bogenende auf
+  // die Gerade davor zurück → Anker-Kette scheiterte (außer R ≈ 3.8/4.0), die Biarc-Vereinfachung
+  // knickte um bis zu 4.2° (Kreise bis 0.022 mm neben Zylinder/Torus). R = 4.0: Anker-Kette lief
+  // schon, step-strict meldete aber orient-curved am 180°-Torusband (Fehlalarm).
+  ...[4.0, 4.2, 7, 12].map((R) => ({ name: `U${R}  γ=0  U-Bogen R=${R} (Gerade + 180°-Bogen + Gerade)`, mesh: { W: 30 + 2 * R, x0: 22 + 2 * R, exit: 'top', segs: [{ L: 10 }, { R, deg: 180 }, { L: 14 }] }, expect: { tubes: 1, tilted: false, pieces: 3 } })),
+  // S-Kurve mit 1 mm Zwischengerade (zu kurz für einen Anker → Biarc-Kette): früher knickte die
+  // Vereinfachung um 2.6° (Kreise bis 0.004 mm neben ihren Flächen)
+  { name: 'S1  γ=0  S-Kurve 60°/−60° mit 1 mm Zwischengerade', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 8, deg: 60 }, { L: 1 }, { R: 8, deg: -60 }, { L: 20 }] }, expect: { tubes: 1 } },
+  // D-Profil (Kreis r = 2.5 mit ebener Abflachung, nur Eck-Vertices auf den D-Kanten): früher als
+  // RUNDER Kanal exportiert (Abflachung weg, ΔV −0.14 %) — muss facettiert bleiben
+  { name: 'P25  D-Profil α=25°, Abflachung ∥ Bahn-Ebene → bleibt facettiert', mesh: { profile: dProfile(2.5, 25 * DEG, Math.PI / 2, 40), segs: [{ L: 12 }, { R: 8, deg: 90 }, { L: 30 }] }, expect: { tubes: 0, flat: { n: [0, 1, 0], d: 5 + 2.5 * Math.cos(25 * DEG) } } },
+  { name: 'P15  D-Profil α=15°, Abflachung ⟂ Bahn-Ebene → bleibt facettiert', mesh: { profile: dProfile(2.5, 15 * DEG, 0, 40), segs: [{ L: 12 }, { R: 8, deg: 90 }, { L: 30 }] }, expect: { tubes: 0 } },
 ];
+// D-Profil: Kreisbogen von ψ+α bis ψ+2π−α (M Segmente), die Sehne schließt den Ring (keine Punkte darauf)
+function dProfile(r, alpha, psi, M) {
+  return Array.from({ length: M + 1 }, (_, j) => { const p = psi + alpha + (j / M) * (2 * Math.PI - 2 * alpha); return [r * Math.cos(p), r * Math.sin(p)]; });
+}
 
 const isMain = process.argv[1] && process.argv[1].endsWith('tube-regression.mjs');
 let fails = 0;
@@ -194,8 +253,26 @@ for (const cs of isMain ? cases : []) {
   if (cs.expect.tilted === false) check(nCyl >= 1 && nTor >= 1 && nRev + nExt === 0, `γ=0 → CYLINDRICAL (${nCyl}) + TOROIDAL (${nTor}), keine Rotations-/Extrusionsflächen`);
   if (cs.expect.tilted === true) check(nRev >= 1 && nCyl + nTor === 0, `γ≠0 → SURFACE_OF_REVOLUTION (${nRev}) / LINEAR_EXTRUSION (${nExt}), kein Zylinder/Torus`);
   if (cs.expect.ell != null) check(cnt(/ELLIPSE\(/g) === cs.expect.ell, `ELLIPSE = ${cs.expect.ell}`);
-  // Netz-Volumen ist ein einbeschriebenes Polygon (N=48) → analytischer Kanal ist minimal größer
-  check(Math.abs(dev) < 0.002, `Volumen occt vs. STL < 0.2 % (${(dev * 100).toFixed(3)} %)`);
+  // Strikte Importer (CST/ACIS): ohne Heilung gültig — Kreise auf ihren Flächen, Ränder richtig herum
+  const strict = checkStepStrict(res.step), kinds = {};
+  for (const v of strict.violations) kinds[v.kind] = (kinds[v.kind] || 0) + 1;
+  check(strict.violations.length === 0, `step-strict ohne Verstoß ${strict.violations.length ? JSON.stringify(kinds) : ''}(Rand↔Fläche max ${strict.stats.maxVertexSurface.toExponential(1)} mm)`);
+  if (cs.expect.pieces) check(tubes[0] && tubes[0].pieces.length === cs.expect.pieces && /Anker/.test(tubes[0].stats.chainKind), `exakte Anker-Kette mit ${cs.expect.pieces} Stücken (${tubes[0]?.stats.chainKind}, ${tubes[0]?.pieces.length})`);
+  // γ = 0: das starr mitgeführte Profil steht höchstens im Knick-Budget (0.1°) schräg zur Bahn
+  for (const sp of tubes) if (sp.gamma === 0) check(sp.stats.profileTiltDeg <= 0.1 + 1e-6, `Profil-Neigung gegen die Bahn ${sp.stats.profileTiltDeg.toFixed(4)}° ≤ 0.1° (Sweep-Stücke ${sp.stats.sweptPieces})`);
+  if (cs.expect.flat) { // Abflachung als eigene Ebene im STEP erhalten
+    const ents = parseStep(res.step), P = (r) => ents.get(r.ref).args[1];
+    const found = [...ents.values()].some((e) => {
+      if (e.type !== 'PLANE') return false;
+      const ax = ents.get(e.args[1].ref).args, o = P(ax[1]), n = P(ax[2]);
+      return Math.abs(Math.abs(dot(n, cs.expect.flat.n)) - 1) < 1e-6 && Math.abs(dot(o, cs.expect.flat.n) - cs.expect.flat.d) < 1e-4;
+    });
+    check(found, 'Abflachung als PLANE erhalten');
+  }
+  // Netz-Volumen ist ein einbeschriebenes Polygon (N=48) → analytischer Kanal ist minimal größer;
+  // bleibt der Kanal facettiert, muss das Volumen exakt dem Netz entsprechen
+  if (expExp === 0 && !cs.tamper) check(Math.abs(dev) < 1e-6, `facettiert: Volumen occt = STL (ΔV ${(dev * 100).toExponential(1)} %)`);
+  else check(Math.abs(dev) < 0.002, `Volumen occt vs. STL < 0.2 % (${(dev * 100).toFixed(3)} %)`);
 }
 if (isMain) {
   console.log(fails ? `\n❌ ${fails} Prüfung(en) fehlgeschlagen` : '\n✅ Kanal-Regression grün');

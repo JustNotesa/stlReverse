@@ -6,7 +6,7 @@
 //   golden       golden-regression.mjs      — Kennzahlen je Sample vs. golden.json
 //   v2 (quick)   fixtures-v2/check.mjs      — Härtetest-Kurzlauf
 //   ebike        ebike-scorecard.mjs        — verrundetes eBike, 47 Flächen
-//   tube         tube-regression.mjs        — 6 Synthetik-Kanäle
+//   tube         tube-regression.mjs        — 13 Synthetik-Kanäle (U-Bögen, S-Kurve, D-Profile)
 //   bore         bore-analytic-regression.mjs — Dünnplatten-Bohrungen
 //   mantel       mantle-regression.mjs      — Außenmäntel, Bohrungs-Funde, Fallback
 //   collinear    collinear-regression.mjs   — kollineare Kantenpunkte
