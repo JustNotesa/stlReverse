@@ -1104,6 +1104,27 @@ export const BODIES = [
     transform: { rot: [20, 35, 10], t: [50, -20, 7] },
     expect: { mode: 'skip', arcsOff: 12 },
   },
+  // Bohrung + Gravur auf derselben Deckfläche (Kabelhalter-Befund): die Durchgangsbohrung wird zum
+  // Zylinder mit analytischem Kreis-Rand (circleRim) → ihr Rand-Loop gehört zur Deckfläche. Die
+  // Gravur (Langloch-Tasche 0.5 tief) hat zwei Halbkreis-Wände, die Teil-Zylinder werden sollen —
+  // der Kreis-Rand-Loop darf sie nicht verwerfen (und beim Anwenden nicht verloren gehen).
+  {
+    id: 'p9', extra: true, file: 'v2_x_platte_bohrung_langloch_tasche',
+    desc: 'Platte 40×30×3 (Kanten scharf), Durchgangsbohrung R2 (48 Seg., ohne Fase/Senkung) bei (10,15) und auf der Oberseite eine Langloch-Tasche 0.5 tief bei (27,15) (zwei Geraden 8, zwei Halbkreise R2.5 mit je 24 Seg.) — die Bohrung macht den Rand-Loop der Deckfläche zum analytischen Kreis; die zwei Halbkreis-Wände müssen trotzdem Teil-Zylinder werden (Bögen 2, dazu die Bohrung als Zylinder)',
+    columns: [
+      { name: 'platte', profile: rectProfile(0, 0, 40, 30), z0: 0, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'bohrung', profile: circleProfile(10, 15, 2, 48, true), z0: 0, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'tasche', profile: slotProfile(8, 2.5, 24).map(([x, y]) => [x + 20.5, y + 12.5]).reverse(), z0: 2.5, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'top' }, { c: 2, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [{ c: 1, end: 'bottom' }] },
+      { up: true, outer: { c: 2, end: 'bottom', rev: true }, holes: [] },   // Taschenboden (z=2.5)
+    ],
+    expect: { mode: 'skip', arcsOff: 2, arcsOn: 2, bores: 1 },
+    // Bohrung ohne Fase/Senkung: der scharfe Zylinder ist die Ziel-Variante (boreSharpVariant)
+    boreChamfer: [{ col: 1, R: 2, seg: 48, r: 0, H: 3 }],
+  },
   // Senkung + Fase an BEIDEN Enden der Bohrung (Kabelhalter-Befund: die Mündungs-Kegel wurden über
   // Kreuz dem falschen Rand zugeordnet → Orientierungsfehler, alles facettiert)
   {
