@@ -830,4 +830,20 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(det.arcs.size).toBe(8);
     expect(det.capEdits.length).toBe(8);
   });
+
+  // ── Zeitbudget: die Band-Suche darf nicht unbegrenzt laufen ───────────────
+  test('23: Zeitbudget (budgetMs: 0) → 0 Bänder, stats.budgetHit = true', () => {
+    const prof = roundedRect(40, 30, [5, 5, 5, 5], 8);
+    const fds = extrude([{ z: 0, pts2d: prof }, { z: 10, pts2d: prof }]);
+    // ohne Budget: 4 Bögen (eine je Ecke)
+    const normal = run(fds);
+    expect(normal.bands.length).toBe(4);
+    expect(normal.stats.budgetHit).toBe(false);
+    // Budget abgelaufen → keine Kette wird mehr verarbeitet
+    const det = run(fds, { budgetMs: 0 });
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.bands).toBe(0);
+    expect(det.stats.budgetHit).toBe(true);
+    expect(ARC_DEFAULTS.budgetMs).toBe(2500);
+  });
 });

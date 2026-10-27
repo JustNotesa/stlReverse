@@ -67,7 +67,12 @@ export const ARC_DEFAULTS = {
   capCos: 0.99999,     // |n·d| ≥ capCos: Fläche steht senkrecht zur Achse (Deck-/Stirnfläche)
   surfTol: 5e-5,       // mm: exakter Bogen ↔ Bandfläche / Deckebene (strikte Importer)
   samples: 9,          // Abtastpunkte je Bogen für Prüfungen
+  budgetMs: 2500,      // ms: Zeitbudget für findArcBands (Kettenverarbeitung stoppen)
 };
+
+// Zeitmessung (Budget) — performance.now() mit Fallback auf Date.now()
+const nowMs = () => (typeof performance !== 'undefined' && performance &&
+  typeof performance.now === 'function') ? performance.now() : Date.now();
 
 // ── Vektor-Helfer ───────────────────────────────────────────────────────────
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -824,6 +829,70 @@ function tryBand(ctx, chain, i, j) {
   };
 }
 
+/**
+ * Band-Suche ab Startfacette i — gallopingend statt linear.
+ *
+ * "gültig" = tryBand liefert ein echtes Band (nicht null, nicht 'insufficient').
+ * Die Gültigkeit gilt als monoton: 'insufficient' (zu wenige Punkte) nur am
+ * Anfang, danach entweder gültig bis zum Ende der Kette oder ein Fehlschlag.
+ * Deshalb:
+ *   1. Galloping  j = i+1, i+2, i+4, i+8, … (bei m−1 gedeckelt) bis zum ersten
+ *      Fehlschlag → letzter Erfolg / erster Fehlschlag als Grenzen.
+ *   2. Binärsuche zwischen diesen Grenzen → größtes gültiges j.
+ *   3. Kandidat: größtes gültiges j mit endsOk UND nSegs ≥ minSegs; sonst bis zu
+ *      8 Schritte zurück (die beiden Band-Enden müssen Mantellinien sein).
+ * → { chk, j } | null
+ */
+function scanBandFrom(ctx, chain, i, m) {
+  const o = ctx.o;
+  const cache = new Map();
+  const probe = (j) => {
+    let r = cache.get(j);
+    if (!r) {
+      const c = tryBand(ctx, chain, i, j);
+      r = { st: !c ? 'bad' : (c.insufficient ? 'few' : 'ok'), c };
+      cache.set(j, r);
+    }
+    return r;
+  };
+
+  // 1. Galloping — erster Fehlschlag bricht ab
+  let lastOk = -1, firstBad = -1, firstChk = null;
+  for (let j = i + 1, step = 1; j <= m - 1;) {
+    const p = probe(j);
+    if (p.st === 'ok') {
+      if (!firstChk) {
+        firstChk = p.c;
+        // Start-Seitenkante muss Mantellinie sein — sonst beginnt hier kein Band
+        if (!firstChk.startOk) return null;
+      }
+      lastOk = j;
+    } else if (p.st === 'bad') { firstBad = j; break; }
+    if (j >= m - 1) break;
+    j = Math.min(m - 1, j + step);
+    step *= 2;
+  }
+
+  // 2. Binärsuche: größtes gültiges j (a: gültig bzw. Sentinel i, b: ungültig/Ende)
+  let a = lastOk >= 0 ? lastOk : i;
+  let b = firstBad >= 0 ? firstBad : m;
+  while (b - a > 1) {
+    const mid = a + ((b - a) >> 1);
+    if (probe(mid).st === 'ok') a = mid; else b = mid;
+  }
+  if (a <= i) return null;                       // kein gültiges Band ab i
+
+  // 3. Kandidat: endsOk (Mantellinien an beiden Enden) + genug Segmente
+  for (let d = 0; d <= 8; d++) {
+    const j = a - d;
+    if (j < i) break;
+    const p = probe(j);
+    if (p.st !== 'ok') continue;
+    if (p.c.endsOk && p.c.nSegs >= o.minSegs) return { chk: p.c, j };
+  }
+  return null;
+}
+
 /** Bogen-Schlüssel: Endpunkte (sortiert) + kleinster innerer Punkt ('' bei 2 Punkten) */
 function arcKeyOf(pts, vkey) {
   const ka = vkey(pts[0]), kb = vkey(pts[pts.length - 1]);
@@ -1145,9 +1214,14 @@ export function findArcBands(fds, opts) {
   const index = buildEdgeIndex(list, o);
   const axes = axisCandidates(list, o);
   const bands = [];
-  const stats = { axes: axes.length, candidates: 0, chains: 0, bands: 0, cyl: 0, cone: 0 };
+  const stats = { axes: axes.length, candidates: 0, chains: 0, bands: 0, cyl: 0, cone: 0, budgetHit: false };
   const taken = new Set();                       // Facetten mit Band einer früheren Achse
+  // Zeitbudget: nach Ablauf keine weiteren Ketten verarbeiten (Bänder bleiben)
+  const t0 = nowMs();
+  const budgetMs = typeof o.budgetMs === 'number' ? o.budgetMs : Infinity;
+  const overBudget = () => (nowMs() - t0) >= budgetMs;
 
+  axesLoop:
   for (const d of axes) {
     const frame = makeFrame(d);
     const { facets, chains } = buildChains(list, d, frame, index, taken, o);
@@ -1156,6 +1230,7 @@ export function findArcBands(fds, opts) {
     const ctx = { fds: list, frame, o, vkey, facInfo: facets };
 
     for (const chain of chains) {
+      if (overBudget()) { stats.budgetHit = true; break axesLoop; }
       let work = chain;
       if (chain.cyclic) {
         // Vollkreis? → nichts anlegen (bleibt facettiert)
@@ -1165,27 +1240,18 @@ export function findArcBands(fds, opts) {
         work = cutCycle(chain, widestFacet(ctx, chain));
       }
 
-      // gierig teilen: größtes j ≥ i mit gültigem Band. Ein Band gilt nur, wenn
-      // seine beiden END-Seitenkanten Mantellinien sind (LINE-Kanten im STEP);
-      // die inneren Seitenkanten dürfen schräg sein (Dreiecksfächer).
+      // gierig teilen: größtes gültiges j ≥ i (gallopingend gesucht). Ein Band
+      // gilt nur, wenn seine beiden END-Seitenkanten Mantellinien sind (LINE-Kanten
+      // im STEP); die inneren Seitenkanten dürfen schräg sein (Dreiecksfächer).
       const m = work.facets.length;
       let i = 0;
       while (i < m) {
         if (!work.sides[i]) { i++; continue; }
-        let best = null, bestJ = -1, first = null;
-        for (let j = i; j < m; j++) {
-          const c = tryBand(ctx, work, i, j);
-          if (!c) break;                          // Geometrie passt nicht → kein Band ab i
-          if (c.insufficient) continue;           // noch zu wenige Punkte → weiter suchen
-          if (!first) {
-            first = c;
-            // Start-Seitenkante muss Mantellinie sein (sonst beginnt hier kein Band)
-            if (!c.startOk) break;
-          }
-          if (c.endsOk && c.nSegs >= o.minSegs) { best = c; bestJ = j; }
-        }
-        if (best) {
-          const made = makeBand(ctx, work, i, bestJ, best, bands.length);
+        if (overBudget()) { stats.budgetHit = true; break axesLoop; }
+        const found = scanBandFrom(ctx, work, i, m);
+        if (found) {
+          const { chk, j: bestJ } = found;
+          const made = makeBand(ctx, work, i, bestJ, chk, bands.length);
           if (made) {
             const band = made.band;
             setBandSrc(band, ctx, work, i, bestJ);
