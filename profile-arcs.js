@@ -749,10 +749,27 @@ function oneCircle(pts2d, K, tolAbs, tolRel) {
 }
 
 /**
+ * Ist die Seitenkante s eine Mantellinie (Ruling)? Lo- und Hi-Punkt müssen den
+ * gleichen Polarwinkel haben (jeweils um die Mitte ihres Kreises) — dann ist die
+ * Kante eine Gerade der Band-Fläche (LINE-Kante im STEP-Band).
+ */
+function sideIsRuling(frame, side, cLo, cHi, rMax, tol) {
+  if (!side) return false;
+  const a = toLocal(frame, side[0]), b = toLocal(frame, side[1]);
+  const pa = Math.atan2(a[1] - cLo[1], a[0] - cLo[0]);
+  const pb = Math.atan2(b[1] - cHi[1], b[0] - cHi[0]);
+  let dphi = pa - pb;
+  while (dphi > Math.PI) dphi -= 2 * Math.PI;
+  while (dphi < -Math.PI) dphi += 2 * Math.PI;
+  return Math.abs(dphi) * rMax <= tol;
+}
+
+/**
  * Prüft, ob die Facetten i..j der Kette ein Band ergeben (Schritt 3):
- * beide Läufe auf je einen Kreis, koaxial, Seitenkanten = Mantellinien,
- * Segmentwinkel klein und gleich gerichtet.
- * → { loPts, hiPts, Klo, Khi, tol, nSegs, tlo, thi } | null
+ * beide Läufe auf je einen Kreis, koaxial, die beiden END-Seitenkanten =
+ * Mantellinien, Segmentwinkel klein und gleich gerichtet.
+ * → { loPts, hiPts, Klo, Khi, tol, nSegs, tlo, thi, endsOk, startOk, endOk } | null
+ *    { insufficient: true } → noch zu wenige Punkte (Band erst ab mehr Facetten)
  */
 function tryBand(ctx, chain, i, j) {
   const { fds, frame, o, vkey, facInfo } = ctx;
@@ -775,7 +792,7 @@ function tryBand(ctx, chain, i, j) {
     for (const p of hiRun) { const kk = vkey(p); if (!seenHi.has(kk)) { seenHi.add(kk); hiPts.push(p); } }
     tlo += info.tlo; thi += info.thi; cnt++;
   }
-  if (loPts.length < 3 || hiPts.length < 3) return null;
+  if (loPts.length < 3 || hiPts.length < 3) return { insufficient: true, nSegs: -1 };
   const lo2d = loPts.map((p) => { const l = toLocal(frame, p); return [l[0], l[1]]; });
   const hi2d = hiPts.map((p) => { const l = toLocal(frame, p); return [l[0], l[1]]; });
   const Klo = fitCircle2d(lo2d), Khi = fitCircle2d(hi2d);
@@ -787,18 +804,13 @@ function tryBand(ctx, chain, i, j) {
   // Sehnenzug EINES Kreises (lokaler Umkreis je drei Punkte passt zum Fit-Radius)
   if (!oneCircle(lo2d, Klo, o.tolFitAbs, o.tolFitRel)) return null;
   if (!oneCircle(hi2d, Khi, o.tolFitAbs, o.tolFitRel)) return null;
-  // Seitenkanten = Mantellinien: lo- und hi-Punkt im selben Polarwinkel
-  for (let k = i; k <= j + 1; k++) {
-    const s = sides[k];
-    if (!s) return null;
-    const a = toLocal(frame, s[0]), b = toLocal(frame, s[1]);
-    const pa = Math.atan2(a[1] - Klo.c[1], a[0] - Klo.c[0]);
-    const pb = Math.atan2(b[1] - Khi.c[1], b[0] - Khi.c[0]);
-    let dphi = pa - pb;
-    while (dphi > Math.PI) dphi -= 2 * Math.PI;
-    while (dphi < -Math.PI) dphi += 2 * Math.PI;
-    if (Math.abs(dphi) * rMax > tol) return null;
-  }
+  // Seitenkanten: NUR die beiden END-Kanten (sides[i], sides[j+1]) werden
+  // LINE-Kanten des Bandes → sie müssen Mantellinien sein. Die inneren
+  // Seitenkanten verschwinden beim Umwandeln in die Fläche — bei einem
+  // Dreiecksfächer sind sie schräg und deshalb unkritisch.
+  const startOk = sideIsRuling(frame, sides[i], Klo.c, Khi.c, rMax, tol);
+  const endOk = sideIsRuling(frame, sides[j + 1], Klo.c, Khi.c, rMax, tol);
+  const endsOk = startOk && endOk;
   // Segmentwinkel: gleiches Vorzeichen in beiden Läufen
   const maxAng = o.maxSegDeg * Math.PI / 180;
   const sLo = chainAngleSign(lo2d, Klo.c, maxAng);
@@ -808,6 +820,7 @@ function tryBand(ctx, chain, i, j) {
     loPts, hiPts, Klo, Khi, tol, rMax,
     nSegs: Math.max(loPts.length - 1, hiPts.length - 1),
     tlo: tlo / cnt, thi: thi / cnt,
+    endsOk, startOk, endOk,
   };
 }
 
@@ -1001,7 +1014,7 @@ function setBandSrc(band, ctx, chain, i, j) {
  */
 function pushBand(ctx, chain, a, b, out) {
   const chk = tryBand(ctx, chain, a, b);
-  if (!chk || chk.nSegs < ctx.o.minSegs) return;
+  if (!chk || !chk.endsOk || chk.nSegs < ctx.o.minSegs) return;
   const made = makeBand(ctx, chain, a, b, chk, out.length);
   if (!made) return;
   setBandSrc(made.band, ctx, chain, a, b);
@@ -1012,10 +1025,16 @@ function pushBand(ctx, chain, a, b, out) {
  * Teilungsstellen eines Bandes: Facettengrenzen (Index s in der Kette), an denen ein
  * Bogen des Bandes einen inneren Punkt hat, der Bogen-ENDpunkt eines anderen Bandes ist.
  * Für das lo-Seg zählt der lo-Punkt der Seitenkante, für das hi-Seg der hi-Punkt.
+ * Geschnitten wird nur an Mantellinien — die Schnittkante wird LINE-Kante des Bandes.
  * → aufsteigend sortierte Liste der Grenzindizes (i < s ≤ j).
  */
-function cutsOfBand(X, chain, i, j, breaks, vkey) {
+function cutsOfBand(X, chain, i, j, breaks, vkey, o) {
   const cuts = new Set();
+  const cLo = X.levels && X.levels.lo ? X.levels.lo.c2 : null;
+  const cHi = X.levels && X.levels.hi ? X.levels.hi.c2 : null;
+  if (!cLo || !cHi) return [];
+  const rMax = Math.max(X.levels.lo.r, X.levels.hi.r);
+  const tol = Math.max(o.tolFitAbs, o.tolFitRel * rMax);
   for (const seg of (X.segs || [])) {
     if (seg.type !== 'arc' || !seg.pts || seg.pts.length < 3) continue;
     const useLo = seg.level === 'lo';
@@ -1025,6 +1044,7 @@ function cutsOfBand(X, chain, i, j, breaks, vkey) {
       for (let s = i + 1; s <= j; s++) {
         const side = chain.sides[s];
         if (!side) continue;
+        if (!sideIsRuling(X.frame, side, cLo, cHi, rMax, tol)) continue;
         if (vkey(useLo ? side[0] : side[1]) === kk) { cuts.add(s); break; }
       }
     }
@@ -1073,7 +1093,7 @@ function alignBands(bands, opts) {
       if (!src || !src.chain || !src.chain.sides) { next.push(X); continue; }
       const { ctx, chain } = src;
       const i = src.i, j = src.j;
-      const cuts = cutsOfBand(X, chain, i, j, breaks, vkey);
+      const cuts = cutsOfBand(X, chain, i, j, breaks, vkey, o);
       if (!cuts.length) { next.push(X); continue; }
       changed = true;
       aligned += cuts.length;
@@ -1140,32 +1160,41 @@ export function findArcBands(fds, opts) {
       if (chain.cyclic) {
         // Vollkreis? → nichts anlegen (bleibt facettiert)
         const whole = tryBand(ctx, chain, 0, chain.facets.length - 1);
-        if (whole) continue;
+        if (whole && !whole.insufficient) continue;
         // sonst an der Seitenkante nach der breitesten lo-Kante aufschneiden
         work = cutCycle(chain, widestFacet(ctx, chain));
       }
 
-      // gierig teilen: größtes j ≥ i mit gültigem Band
+      // gierig teilen: größtes j ≥ i mit gültigem Band. Ein Band gilt nur, wenn
+      // seine beiden END-Seitenkanten Mantellinien sind (LINE-Kanten im STEP);
+      // die inneren Seitenkanten dürfen schräg sein (Dreiecksfächer).
       const m = work.facets.length;
       let i = 0;
       while (i < m) {
-        let j = i, chk = tryBand(ctx, work, i, i);
-        while (j + 1 < m) {
-          const c = tryBand(ctx, work, i, j + 1);
-          if (!c) break;
-          j++; chk = c;
+        if (!work.sides[i]) { i++; continue; }
+        let best = null, bestJ = -1, first = null;
+        for (let j = i; j < m; j++) {
+          const c = tryBand(ctx, work, i, j);
+          if (!c) break;                          // Geometrie passt nicht → kein Band ab i
+          if (c.insufficient) continue;           // noch zu wenige Punkte → weiter suchen
+          if (!first) {
+            first = c;
+            // Start-Seitenkante muss Mantellinie sein (sonst beginnt hier kein Band)
+            if (!c.startOk) break;
+          }
+          if (c.endsOk && c.nSegs >= o.minSegs) { best = c; bestJ = j; }
         }
-        if (chk && chk.nSegs >= o.minSegs) {
-          const made = makeBand(ctx, work, i, j, chk, bands.length);
+        if (best) {
+          const made = makeBand(ctx, work, i, bestJ, best, bands.length);
           if (made) {
             const band = made.band;
-            setBandSrc(band, ctx, work, i, j);
+            setBandSrc(band, ctx, work, i, bestJ);
             bands.push(band);
             for (const fi of band.facets) taken.add(fi);
             stats.bands++;
             if (band.kind === 'cyl') stats.cyl++; else stats.cone++;
           }
-          i = j + 1;
+          i = bestJ + 1;                     // auch bei gesperrter Signatur weiter
           continue;
         }
         i = i + 1;
