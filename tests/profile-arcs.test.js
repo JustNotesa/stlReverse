@@ -112,6 +112,56 @@ function roundedRect(w, h, radii, segs) {
   return out;
 }
 
+// Wand eines Bogens als Dreiecksfächer: die obere Ringebene ist um step/2
+// versetzt → die inneren Seitenkanten der Wand sind schräg (keine Mantellinien),
+// nur die beiden Randkanten (Winkel a0 und a1) sind Mantellinien.
+// lo: Winkel a0 + k·step,  hi: a0 + (k+½)·step, beide mit den exakten Randwinkeln.
+function arcFan(c, r, a0, a1, segs, zLo, zHi) {
+  const step = (a1 - a0) / segs;
+  const P = (a, z) => [
+    c[0] + r * Math.cos(a * Math.PI / 180),
+    c[1] + r * Math.sin(a * Math.PI / 180),
+    z,
+  ];
+  const lo = [], hi = [];
+  for (let k = 0; k <= segs; k++) lo.push(P(a0 + k * step, zLo));
+  hi.push(P(a0, zHi));
+  for (let k = 0; k < segs; k++) hi.push(P(a0 + (k + 0.5) * step, zHi));
+  hi.push(P(a1, zHi));
+  // Zickzack-Fächer: abwechselnd (2 lo + 1 hi) und (1 lo + 2 hi); benachbarte
+  // Dreiecke teilen genau eine Seitenkante (lo↔hi).
+  const tris = [];
+  for (let k = 0; k < segs; k++) {
+    tris.push([hi[k], lo[k], lo[k + 1]]);
+    tris.push([hi[k + 1], hi[k], lo[k + 1]]);
+  }
+  tris.push([lo[segs], hi[segs + 1], hi[segs]]);
+  return { lo, hi, tris };
+}
+
+// Rundrechteck, dessen Wand zwischen den Ringebenen aus Dreiecksfächern besteht
+function fanExtrusion(w, h, R, segs, zLo, zHi) {
+  const corners = [
+    [[w / 2 - R, -h / 2 + R], -90, 0],
+    [[w / 2 - R, h / 2 - R], 0, 90],
+    [[-w / 2 + R, h / 2 - R], 90, 180],
+    [[-w / 2 + R, -h / 2 + R], 180, 270],
+  ];
+  const arcs = corners.map(([c, a0, a1]) => arcFan(c, R, a0, a1, segs, zLo, zHi));
+  const fds = [];
+  for (let ci = 0; ci < 4; ci++) {
+    const cur = arcs[ci], nxt = arcs[(ci + 1) % 4];
+    for (const t of cur.tris) fds.push(face(t));
+    // gerade Kante zwischen zwei Ecken (Viereck, Seitenkanten = Mantellinien)
+    fds.push(face([cur.lo[segs], nxt.lo[0], nxt.hi[0], cur.hi[segs + 1]]));
+  }
+  const capLo = [], capHi = [];
+  for (const a of arcs) { capLo.push(...a.lo); capHi.push(...a.hi); }
+  fds.push(face(capLo.slice().reverse(), [0, 0, -1]));      // unten → −z
+  fds.push(face(capHi, [0, 0, 1]));                          // oben → +z
+  return fds;
+}
+
 // L-Profil: Schenkel legA/legB, Biegung innen rIn / außen rOut (konzentrisch)
 function lProfile(legA, legB, rIn, rOut, segs) {
   const thick = rOut - rIn;
@@ -742,5 +792,42 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(K).toBeTruthy();
     expect(K.maxRes).toBeLessThan(1e-5);
     expect(Math.abs(K.r[0] - K.r[1] - 1)).toBeLessThan(1e-4);
+  });
+
+  // ── Dreiecksfächer: echte Netze tessellieren Bogen-Bänder als Dreiecke ────
+  // Die obere Ringebene ist je Ecke um step/2 versetzt → die inneren Seitenkanten
+  // der Wand sind schräg (keine Mantellinien). Nur die beiden END-Kanten eines
+  // Bandes werden LINE-Kanten → sie müssen Mantellinien (senkrecht) sein.
+  test('22: Dreiecksfächer-Wand (R5, 8 Seg.) → 4 "cyl"-Bänder, Enden senkrecht', () => {
+    const fds = fanExtrusion(40, 30, 5, 8, 0, 10);
+    const det = run(fds);
+    expect(det.bands.length).toBe(4);
+    expect(det.stats.cyl).toBe(4);
+    expect(det.stats.cone).toBe(0);
+    expect(det.bands.every((b) => b.kind === 'cyl')).toBe(true);
+    expect(det.bands.every((b) => b.sense === 1)).toBe(true);
+    expect(det.bands.every((b) => Math.abs(b.levels.lo.r - 5) < 1e-6)).toBe(true);
+    expect(det.bands.every((b) => Math.abs(b.levels.hi.r - 5) < 1e-6)).toBe(true);
+    // je Ecke 17 Dreiecke (Fächer) → 9 Segmente (8 unten / 9 oben)
+    expect(det.bands.every((b) => b.facets.length === 17)).toBe(true);
+    expect(det.bands.every((b) => b.nSegs === 9)).toBe(true);
+    for (const b of det.bands) {
+      expect(b.segs.map((s) => s.type)).toEqual(['arc', 'line', 'arc', 'line']);
+      expect(b.segs[0].pts.length).toBe(9);                // lo: 9 Punkte
+      expect(b.segs[2].pts.length).toBe(10);               // hi: 9 + 1 versetzter
+      // die beiden Randkanten (LINIE-Segs) sind senkrecht → Mantellinien
+      for (const seg of [b.segs[1], b.segs[3]]) {
+        const [p, q] = seg.pts;
+        expect(Math.abs(p[0] - q[0])).toBeLessThan(1e-9);
+        expect(Math.abs(p[1] - q[1])).toBeLessThan(1e-9);
+        expect(Math.abs(p[2] - q[2])).toBeCloseTo(10, 9);
+      }
+    }
+    // alle Bänder gültig: je Bogen eine Deckfläche, 8 Bögen, 8 Deckflächen-Änderungen
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(4);
+    expect(det.stats.valid).toBe(4);
+    expect(det.arcs.size).toBe(8);
+    expect(det.capEdits.length).toBe(8);
   });
 });
