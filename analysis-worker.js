@@ -3,6 +3,7 @@ import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=14';
 import { detectTubes } from './tube-sweep.js?v=3';
+import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=1';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
 
@@ -20,9 +21,10 @@ const sanitizeRatio = (value) => {
 const MAX_FACES = 50000;
 let cachedMesh = null;
 let cachedFileName = null;
+let cachedClean = null;   // Bericht der Netz-Bereinigung zum gecachten Netz
 
 self.addEventListener('message', (event) => {
-  const { id, buffer, fileName, detailLevel, reanalyzeOnly } = event.data || {};
+  const { id, buffer, fileName, detailLevel, reanalyzeOnly, minDetailMm } = event.data || {};
   if (typeof id === 'undefined') {
     self.postMessage({ id, ok: false, message: 'Ungültige Worker-Nachricht' });
     return;
@@ -67,18 +69,33 @@ self.addEventListener('message', (event) => {
         }
       });
 
-      // Simplify if mesh exceeds threshold
+      // Netz-Bereinigung „Kleinste Detailgröße“ (mesh-clean.js): Mikro-Kanten kollabieren, bevor
+      // Region-Growing sie zu STEP-Kanten macht. 0 = aus. Gleiche Funktion wie in den Node-Tests.
       mesh = rawMesh;
-      if (rawMesh.faces.length > MAX_FACES) {
+      const tau = Number.isFinite(minDetailMm) ? minDetailMm : DEFAULT_MIN_DETAIL_MM;
+      cachedClean = null;
+      if (tau > 0) {
+        self.postMessage({ id, progress: { step: 'worker', detail: `Mikro-Kanten < ${tau} mm werden entfernt …`, ratio: 0.39 } });
+        const { mesh: cleaned, report } = cleanMesh(rawMesh, { minDetailMm: tau });
+        mesh = cleaned;
+        cachedClean = report;
+        self.postMessage({
+          id,
+          progress: { step: 'worker', detail: `Netz bereinigt: ${report.removedTris} Mikro-Dreiecke entfernt`, ratio: 0.40 }
+        });
+      }
+
+      // Simplify if mesh exceeds threshold
+      if (mesh.faces.length > MAX_FACES) {
         self.postMessage({
           id,
           progress: {
             step: 'worker',
-            detail: `Vereinfache Mesh (${rawMesh.faces.length.toLocaleString?.('de-DE') || rawMesh.faces.length} → ${MAX_FACES.toLocaleString?.('de-DE') || MAX_FACES})`,
+            detail: `Vereinfache Mesh (${mesh.faces.length.toLocaleString?.('de-DE') || mesh.faces.length} → ${MAX_FACES.toLocaleString?.('de-DE') || MAX_FACES})`,
             ratio: 0.40
           }
         });
-        mesh = simplifyMesh(rawMesh, MAX_FACES, ({ processed, total }) => {
+        mesh = simplifyMesh(mesh, MAX_FACES, ({ processed, total }) => {
           if (!processed || !total) return;
           self.postMessage({
             id,
@@ -102,7 +119,7 @@ self.addEventListener('message', (event) => {
           id,
           progress: {
             step: 'worker',
-            detail: `${rawMesh.faces.length.toLocaleString?.('de-DE') || rawMesh.faces.length} Dreiecke (kein Simplify nötig)`,
+            detail: `${mesh.faces.length.toLocaleString?.('de-DE') || mesh.faces.length} Dreiecke (kein Simplify nötig)`,
             ratio: 0.50
           }
         });
@@ -137,6 +154,7 @@ self.addEventListener('message', (event) => {
     // Nachbar: bei feiner Tessellierung kettete der Nachbar-Vergleich ganze Rundungen zu einer
     // „Ebene“ (Bug 2026-10-23).
     analysis.normalGroups = buildNormalGroups(mesh);
+    analysis.meshClean = cachedClean;
 
     // Face Unification: fuse räumlich getrennte koplanare Regionen (OCCT-äquivalent
     // zu ShapeUpgrade_UnifySameDomain). Reduziert ADVANCED_FACE-Zahl in der STEP

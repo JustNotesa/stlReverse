@@ -19,7 +19,7 @@
 // umwandeln. Beide Fälle MÜSSEN boresConverted===1 + CYLINDRICAL_SURFACE + watertight.
 //
 // Läuft ohne Browser/Worker: spiegelt die Worker-Pipeline
-//   parseStl → simplifyMesh → buildNormalGroups → unifyCoplanarGroups →
+//   parseStl → cleanMesh → simplifyMesh → buildNormalGroups → unifyCoplanarGroups →
 //   recognizePrimitives → buildVolumeStepBrepV2
 // (buildNormalGroups kommt aus dem gemeinsamen Modul region-growing.js — dasselbe wie im Worker.)
 //
@@ -31,6 +31,7 @@ import { dirname, join } from 'path';
 import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
@@ -43,7 +44,7 @@ const MAX_FACES = 50000;
 function exportFor(file) {
   const buf = readFileSync(join(SAMPLES, file));
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  let mesh = parseStl(ab, () => {});
+  let mesh = cleanMesh(parseStl(ab, () => {})).mesh;   // Netz-Bereinigung wie im Worker
   if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
   let groups = buildNormalGroups(mesh);
   const { unified } = unifyCoplanarGroups(groups);

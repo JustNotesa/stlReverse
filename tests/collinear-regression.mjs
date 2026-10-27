@@ -23,6 +23,7 @@ import { createRequire } from 'module';
 import { parseStl } from '../analysis-core.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
@@ -52,7 +53,7 @@ function topo(step) {
 
 function exportFor(name, defeature) {
   const buf = readFileSync(join(dir, `${name}.stl`));
-  const mesh = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
+  const mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh;
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   recognizePrimitives(groups);
   detectTubes(groups);

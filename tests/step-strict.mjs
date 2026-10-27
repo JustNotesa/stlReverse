@@ -627,6 +627,7 @@ if (isMain) {
   } else {
     const { parseStl } = await import(join(ROOT, 'analysis-core.js'));
     const { buildNormalGroups } = await import(join(ROOT, 'region-growing.js'));
+    const { cleanMesh } = await import(join(ROOT, 'mesh-clean.js'));
     const { unifyCoplanarGroups } = await import(join(ROOT, 'face-unification.js'));
     const { recognizePrimitives } = await import(join(ROOT, 'primitive-recognition.js'));
     const { detectTubes } = await import(join(ROOT, 'tube-sweep.js'));
@@ -635,7 +636,7 @@ if (isMain) {
     for (const f of readdirSync(join(ROOT, 'samples')).filter((x) => x.toLowerCase().endsWith('.stl')).sort()) {
       const buf = readFileSync(join(ROOT, 'samples', f));
       console.log = () => {};
-      let mesh = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
+      let mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh;
       const g = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
       recognizePrimitives(g); detectTubes(g);
       const res = { on: buildVolumeStepBrepV2({ normalGroups: g, defeature: true }), off: buildVolumeStepBrepV2({ normalGroups: g, defeature: false }) };

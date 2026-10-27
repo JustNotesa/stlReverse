@@ -15,7 +15,8 @@ async function analyze(sampleFile, { withExport = true } = {}) {
   const { recognizePrimitives } = await import(path.join(ROOT, 'primitive-recognition.js'));
   const buf = fs.readFileSync(path.join(ROOT, 'samples', sampleFile));
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  const mesh = parseStl(ab, () => {});
+  const { cleanMesh } = await import(path.join(ROOT, 'mesh-clean.js'));
+  const mesh = cleanMesh(parseStl(ab, () => {})).mesh;   // Netz-Bereinigung wie im Worker
   let groups = buildNormalGroups(mesh);
   const { unified } = unifyCoplanarGroups(groups);
   groups = unified.sort((a, b) => b.vertices.length - a.vertices.length);
