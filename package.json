@@ -20,7 +20,8 @@
     "test:mantel": "node tests/mantle-regression.mjs",
     "test:orient": "node tests/orientation-guard.mjs",
     "test:strict": "node tests/step-strict.mjs",
-    "test:schalen": "node tests/shell-regression.mjs"
+    "test:schalen": "node tests/shell-regression.mjs",
+    "test:ocp": "node tests/ocp-suite.mjs"
   },
   "jest": {
     "testMatch": [

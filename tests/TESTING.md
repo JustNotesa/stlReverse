@@ -5,7 +5,7 @@
 ```bash
 # ALLE schnellen Regressionen nacheinander (tests/run-all.mjs):
 # unit (Jest) → golden → v2 (quick) → ebike → tube → bore → mantel → collinear → strict → orient
-# → schalen. Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
+# → schalen → ocp. Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
 npm test
 
 # Nur Unit-Tests (Jest: tests/*.test.js — analysis-core + utils)
@@ -30,6 +30,10 @@ npm run test:orient      # Orientierungs-Wächter: kein Fehlalarm, verdrehte Fl�
 npm run test:schalen     # Schalen-Analyse + Freigang: Hohlräume (BREP_WITH_VOIDS), invertierte Netze,
                          # Finnen, berührende Körper, offene Fremdteile, dünne Stege an Kreisen;
                          # je Fall occt-Volumen = Soll, step-strict 0 + Prüfer-Selbsttest
+npm run test:ocp         # volles OpenCascade (OCP, Python) als zweiter Prüfer: BRepCheck, BOP-Check,
+                         # ShapeAnalysis 1e-6 mm, Volumen — alle Samples + Schalen-Körper; Erwartungs-
+                         # liste je Datei (tests/ocp-suite.mjs); ohne OCP übersprungen. Weitere STL:
+                         # node tests/ocp-suite.mjs pfad/teil.stl
 
 # Nur E2E-Tests (Puppeteer; läuft bei npm test bewusst NICHT mit)
 npm run test:e2e
