@@ -190,7 +190,8 @@ for (const n of NEG) {
 // alle anderen bleiben scharf — keine Fallback-Stufe, wasserdicht, streng sauber (früher: alles facettiert).
 const BREAK = [
   { brk: 'v1', src: () => sampleGroups('plate_4fillets.stl'), name: 'plate_4fillets (4× v1)', want: { fillets: 3, bands: 0, corners: 0 } },
-  { brk: 'v1', src: () => genGroups('k1', G.BODIES.find((b) => b.id === 'k1')), name: 'Härtetest k1 (flache Tasche, 4× v1)', want: { fillets: 2, bands: 0, corners: 0 } },
+  { brk: 'v1', src: () => genGroups('k1', G.BODIES.find((b) => b.id === 'k1')), name: 'Härtetest k1 (flache Tasche, 4× v1)', want: { fillets: 3, bands: 0, corners: 0 } },
+  { brk: 'v1', src: () => genGroups('k2', G.BODIES.find((b) => b.id === 'k2')), name: 'Härtetest k2 (Eckrundungen mit gefasten Enden, 4× v1)', want: { fillets: 3, bands: 0, corners: 0 } },
   { brk: 'v2', src: () => fixtureGroups('v2_a_rechteck_r1.5.stl'), name: 'Härtetest a (2 Bänder)', want: { fillets: 0, bands: 1, corners: 0 } },
   { brk: 'v2', src: () => fixtureGroups('v2_b_rechteck_bohrung.stl'), name: 'Härtetest b (4 Bänder + Bohrung)', want: { fillets: 0, bands: 3, corners: 0 } },
   { brk: 'v2b', src: () => fixtureGroups('v2_c_rundrechteck_r1.stl'), name: 'Härtetest c (2 Bänder, 4 Ecken)', want: { fillets: 0, bands: 2, corners: 3 } },
