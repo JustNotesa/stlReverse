@@ -324,7 +324,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 3917,
+      "faces": 3897,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -338,7 +338,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 3917,
+      "faces": 3897,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
