@@ -10,10 +10,12 @@
 // report.orientationGuardFailures + Fallback (Rückfall je Bohrung: nur die betroffene Bohrung bleibt
 // facettiert; sonst Stufe 1: ohne Bohrungen/Mäntel/Kegel/Kanäle, Defeaturing bleibt; Stufe 2: facettiert).
 //
-//   Positiv:  alle Samples (AN/AUS) + Welle mit gefasten Außenkanten (gen.mjs) + Synthetik-Kanäle A–C
+//   Positiv:  alle Samples (AN/AUS) + Welle mit gefasten Außenkanten (gen.mjs) + Sacklöcher s1/s2/s5/s6/s7
+//             (gen.mjs: Zylinder + flacher Boden bzw. Kegel-Spitze) + Synthetik-Kanäle A–C
 //             aus tube-regression → kein Fehlalarm
 //   Negativ:  Test-Hook STLREV_TEST_FLIP = bore | mantle | mantlecone | cone | tube | tubecurve verdreht
-//             die Flächen ('mantlecone' = konvexe Kegel-Mäntel inkl. Kegel mit Spitze und Mantel-Fasen)
+//             die Flächen ('mantlecone' = konvexe Kegel-Mäntel inkl. Kegel mit Spitze und Mantel-Fasen;
+//             'bore' auch am Sackloch mit Bohrspitze — dort muss beim Rückfall der Kegel mit verschwinden)
 //     (1) nur melden (STLREV_TEST_GUARD_REPORT_ONLY=1): Wächter schlägt an, das Wasserdicht-
 //         Verdikt NICHT — und tests/step-strict.mjs findet den Fehler unabhängig (orient-curved)
 //     (2) mit Fallback: Export fällt sauber zurück — wasserdicht, streng ohne Orientierungs-
@@ -22,7 +24,7 @@
 //             Hülle) → nur sie bleibt facettiert, die übrigen bleiben scharf, keine Fallback-Stufe
 //   Rückfall je Bohrung: Test-Hook STLREV_TEST_BREAK = bore verdirbt EINE Bohrung (ihre Mündung
 //             bleibt ungetaggt → offene Kreis-Kante) → nur sie bleibt facettiert, die übrigen bleiben
-//             analytisch, keine Fallback-Stufe
+//             analytisch, keine Fallback-Stufe (u. a. Sackloch-Mix s7: 2 Sacklöcher + Durchgangsloch)
 //   Laufzeit: Wächter-Anteil am Export (eBike; mit --stress zusätzlich 50k-Torus)
 //
 // Ausführen:  npm run test:orient          (Exit 0 = grün)
@@ -139,6 +141,19 @@ for (const on of [true, false]) {
   check(r.orientationGuardFailures === 0 && r.fallbackStage === 0 && r.mantlesConverted === 1 && r.mantleChamfersConverted === 2,
     `${'Welle mit gefasten Außenkanten (gen.mjs)'.padEnd(48)} ${on ? 'AN ' : 'AUS'}  Wächter 0 (analytisch: ${r.mantlesConverted} Mantel, ${r.mantleChamfersConverted} Fasen-Kegel)`);
 }
+// Sacklöcher (blind holes, Härtetest s1/s2/s5/s6/s7 aus gen.mjs): Zylinder + flacher Boden bzw.
+// Kegel-Spitze (VERTEX_LOOP); s5/s6 sind gedreht/verschoben, s7 hat 3 Bohrungen (2 Sacklöcher
+// + 1 Durchgangsloch) → kein Fehlalarm, kein Fallback, alle Bohrungen analytisch.
+for (const id of ['s1', 's2', 's5', 's6', 's7']) {
+  const body = G.BODIES.find((b) => b.id === id);
+  const want = id === 's7' ? 3 : 1;
+  for (const on of [true, false]) {
+    const { res } = exportWith(genGroups(id, body), on);
+    const r = res.report;
+    check(r.orientationGuardFailures === 0 && r.fallbackStage === 0 && r.boresConverted === want,
+      `${('Härtetest ' + id + ' (Sackloch)').padEnd(48)} ${on ? 'AN ' : 'AUS'}  Wächter 0 (analytisch: ${r.boresConverted} Bohrungen)`);
+  }
+}
 for (const letter of ['A', 'B', 'C']) {
   const { res } = exportWith(synthGroups(letter), true);
   const r = res.report;
@@ -152,6 +167,10 @@ const NEG = [
   { flip: 'bore', on: true, src: () => sampleGroups('block_with_hole.stl'), name: 'block_with_hole', gone: (r) => r.boresConverted === 0 },
   { flip: 'bore', on: false, src: () => sampleGroups('washer_thin.stl'), name: 'washer_thin', gone: (r) => r.boresConverted === 0 },
   { flip: 'bore', on: true, src: () => sampleGroups(EBIKE), name: 'eBike verrundet', gone: (r) => r.boresConverted === 0, keepsDefeature: true },
+  // Sackloch mit Bohrspitze: Zylinder + Kegel (VERTEX_LOOP) — der Kegel muss beim Rückfall mit
+  // verschwinden, sonst bliebe eine CONICAL_SURFACE im Export stehen.
+  { flip: 'bore', on: true, src: () => genGroups('s2', G.BODIES.find((b) => b.id === 's2')), name: 'Härtetest s2 (Sackloch mit Bohrspitze: Zylinder + Kegel mit VERTEX_LOOP)', gone: (r, s) => r.boresConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
+  { flip: 'bore', on: false, src: () => genGroups('s2', G.BODIES.find((b) => b.id === 's2')), name: 'Härtetest s2 (Sackloch mit Bohrspitze: Zylinder + Kegel mit VERTEX_LOOP)', gone: (r, s) => r.boresConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'mantle', on: true, src: () => sampleGroups('cylinder.stl'), name: 'cylinder', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: false, src: () => sampleGroups('washer_thin.stl'), name: 'washer_thin', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted (Mantel + Bohrung + Kegel)', gone: (r) => r.mantlesConverted === 0 },
@@ -226,6 +245,9 @@ const BORE_CASES = [
   // OHNE Rundungen hat scharfe Mündungen → 2 Bohrungen, auch im AUS-Pfad analytisch.
   { on: false, src: () => sampleGroups(EBIKE_PLAIN), name: 'eBike ohne Rundungen (2 Bohrungen)', n: 2, bands: false },
   { on: true, src: () => sampleGroups(EBIKE), name: 'eBike verrundet (2 Bohrungen)', n: 2, bands: true },
+  // Sackloch-Mix: 2 Sacklöcher (flach + Spitze) + 1 Durchgangsloch = 3 Bohrungen
+  { on: true, src: () => genGroups('s7', G.BODIES.find((b) => b.id === 's7')), name: 'Härtetest s7 (Sackloch flach + Sackloch Spitze + Durchgangsloch)', n: 3, bands: false },
+  { on: false, src: () => genGroups('s7', G.BODIES.find((b) => b.id === 's7')), name: 'Härtetest s7 (Sackloch flach + Sackloch Spitze + Durchgangsloch)', n: 3, bands: false },
 ];
 for (const c of BORE_CASES) {
   origLog(`\nRückfall je Bohrung STLREV_TEST_BREAK=bore — ${c.name} (${c.on ? 'AN' : 'AUS'})`);
