@@ -206,14 +206,14 @@ const meshVol = (t) => G.meshVolume(t);
 // Kegel(stumpf) um die z-Achse: Grundkreis R0 bei z = 0, Deckel R1 bei z = H (R1 = 0 → Spitze), n Segmente,
 // Wand in `rows` Zeilen, Deckflächen als Fächer. rho(s) = eigener Radius-Verlauf (s = 0…1), skip(i) =
 // Profilpunkt auslassen (D-Form), topTilt = Deckel um die y-Achse geneigt (Grad), apexOff = Spitze seitlich
-// versetzt, angles = eigene Teilung, transform wie gen.mjs
-function coneBody({ R0, R1, H, n = 64, rows = 1, rho = null, skip = null, topTilt = 0, apexOff = 0, angles = null, transform = null }) {
+// versetzt, angles = eigene Teilung, twist = Ringe gegeneinander verdreht (Grad, oben voll), transform wie gen.mjs
+function coneBody({ R0, R1, H, n = 64, rows = 1, rho = null, skip = null, topTilt = 0, apexOff = 0, angles = null, twist = 0, transform = null }) {
   const A = (angles || Array.from({ length: n }, (_, i) => 2 * PI * i / n)).filter((_, i) => !(skip && skip(i)));
   const tb = Math.tan(topTilt * PI / 180), rings = [];
   for (let k = 0; k <= rows; k++) {
-    const s = k / rows, r = rho ? rho(s) : R0 + (R1 - R0) * s;
+    const s = k / rows, r = rho ? rho(s) : R0 + (R1 - R0) * s, ph = twist * PI / 180 * s;
     if (r <= 1e-12) { rings.push([[apexOff, 0, H]]); break; }
-    rings.push(A.map((a) => { const x = r * Math.cos(a), y = r * Math.sin(a); return [x, y, k === rows ? H * s + tb * x : H * s]; }));
+    rings.push(A.map((a) => { const x = r * Math.cos(a + ph), y = r * Math.sin(a + ph); return [x, y, k === rows ? H * s + tb * x : H * s]; }));
   }
   const out = [];
   for (let k = 0; k + 1 < rings.length; k++) {
@@ -357,6 +357,9 @@ const CONE_NO = [
   ['Knick-Kegel (1°, keine Deckfläche dazwischen)', coneBody({ R0: 6, R1: 2.409, H: 9, rows: 2, rho: (s) => (s <= 0.5 ? 6 - 3.5 * s : 4.25 - (s - 0.5) * 2 * 1.841) })],
   ['Kegel-Kette (Knick 24°)', coneBody({ R0: 6, R1: 1.2, H: 9, rows: 2, rho: (s) => (s <= 0.5 ? 6 - 2.4 * s : 4.8 - (s - 0.5) * 2 * 3.6) })],
   ['Spitzkegel, Spitze 0.5 mm neben der Achse', coneBody({ R0: 6, R1: 0, H: 9, apexOff: 0.5 })],
+  // Verdrillung: alle Punkte auf den Randkreisen, die Facetten aber auf einem Hyperboloid (wallSpanOk)
+  ['Kegelstumpf, Wand 6° verdrillt', coneBody({ R0: 6, R1: 2.5, H: 9, twist: 6 })],
+  ['Welle R5, Wand 15° verdrillt (Hyperboloid)', coneBody({ R0: 5, R1: 5, H: 20, twist: 15 })],
   ['konisches Loch (konkav) in einer Platte', tris({ columns: [col(rectProfile(-15, -10, 30, 20), 0, 8), col(circleProfile(0, 0, 4, 48, true), 0, 8, { draftDeg: -10 })] })],
 ];
 for (const [name, t] of CONE_NO) {

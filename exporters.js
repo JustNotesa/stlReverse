@@ -2446,6 +2446,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const cyl = (p) => { const w = _sub3(p, c0), t = _dot3(w, axis); return { t, rho: Math.hypot(w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t), w }; };
     // Ränder: eben (in ihrer Deckebene), auf dem Kreis, fein genug und einmal ganz um die Achse
     const ringAt = [0, H];
+    let maxSeg = 0;
     for (let r = 0; r < 2; r++) {
       const ring = rings[r];
       let turn = 0;
@@ -2456,7 +2457,7 @@ export function buildVolumeStepBrepV2(analysis) {
         const rb = _sub3(b.w, [axis[0] * b.t, axis[1] * b.t, axis[2] * b.t]);
         const ang = Math.atan2(_dot3(_cross3(ra, rb), axis), _dot3(ra, rb));
         if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return null;
-        turn += ang;
+        turn += ang; maxSeg = Math.max(maxSeg, Math.abs(ang));
       }
       if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return null;
       if (!ringAngleUniform(ring, c0, axis)) return null; // D-Welle (Sehnen-Abflachung) → kein Zylinder
@@ -2477,6 +2478,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) <= 0) return null; // konkav → Bohrung, kein Mantel
     }
+    if (!wallSpanOk(W, c0, axis, maxSeg, tol)) return null;            // verdrillte Wand (Hyperboloid)
     const rims = [mkCircleDesc(c0, R, axis), mkCircleDesc(c1, R, axis)];
     if (rims[0].rimKey === rims[1].rimKey) return null;
     // Je Ende: Deck-Kreis = Mantel-Rand (direkt) bzw. Fasen-Kegel vom Mantel-Rand zum Deck-Kreis bzw.
@@ -2496,7 +2498,7 @@ export function buildVolumeStepBrepV2(analysis) {
         if (!top || !(Ha > tol)) return null;
         const apex = [cr[0] + out[0] * Ha, cr[1] + out[1] * Ha, cr[2] + out[2] * Ha];
         if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
-        if (!bandOnCone(e.band.W, cr, R, out, Ha, -R / Ha, tol)) return null;
+        if (!bandOnCone(e.band.W, cr, R, out, Ha, -R / Ha, tol) || !wallSpanOk(e.band.W, cr, axis, maxSeg, tol)) return null;
         cones.push({
           large: rims[r], small: null, apex, coneAxis: [-out[0], -out[1], -out[2]],
           semiAngle: Math.atan2(R, Ha), groups: e.band.groups, zone: { c0: cr, zAx: out, H: Ha, R0: R, k: -R / Ha }, chamfer: true,
@@ -2512,7 +2514,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const cd = [cr[0] + out[0] * Hc, cr[1] + out[1] * Hc, cr[2] + out[2] * Hc];
       if (Math.hypot(fdk.center[0] - cd[0], fdk.center[1] - cd[1], fdk.center[2] - cd[2]) > tolC) return null; // koaxial
       const k = (Rd - R) / Hc;
-      if (!bandOnCone(e.band.W, cr, R, out, Hc, k, tolC)) return null;
+      if (!bandOnCone(e.band.W, cr, R, out, Hc, k, tolC) || !wallSpanOk(e.band.W, cr, axis, Math.max(maxSeg, fdk.maxSeg), tolC)) return null;
       if (!circleOnDeck(cd, Rd, axis, e.deck.fd)) return null;
       const deckRim = mkCircleDesc(cd, Rd, axis);
       if (deckRim.rimKey === rims[r].rimKey || deckRim.rimKey === rims[1 - r].rimKey) return null;
@@ -2633,25 +2635,50 @@ export function buildVolumeStepBrepV2(analysis) {
   const CONE_NORMAL_COS = Math.cos(10 * Math.PI / 180); // Facetten-Normale ↔ Kegel-Normale
   const CONE_MIN_SEG = 9;           // ≥ 9 Segmente (SEG_MAX_DEG = 42°)
   const CONE_MAX_WALL = 20000;      // Wand-Flächen je Kandidat (Laufzeit-Schutz)
-  // Geschlossener Punktzug (Ebene ⟂ n) als Vollkreis → { center, radius } | null: jeder Punkt in
-  // der Kreisebene und auf dem Kreis, Segmente ≤ 42°, volle Umrundung, gleichmäßig.
+  // Geschlossener Punktzug (Ebene ⟂ n) als Vollkreis → { center, radius, maxSeg } | null: jeder
+  // Punkt in der Kreisebene und auf dem Kreis, Segmente ≤ 42°, volle Umrundung, gleichmäßig.
+  // maxSeg = größter Segmentwinkel (rad), Maß für wallSpanOk.
   const ringAsCircle = (ring, n) => {
     if (ring.length < CONE_MIN_SEG) return null;
     const f = fitCircleInPlane(ring, n);
     if (!f) return null;
     const tol = Math.max(0.01, 0.002 * f.radius);
     const rad = (p) => { const w = _sub3(p, f.center), t = _dot3(w, n); return { t, r: [w[0] - n[0] * t, w[1] - n[1] * t, w[2] - n[2] * t] }; };
-    let turn = 0;
+    let turn = 0, maxSeg = 0;
     for (let i = 0; i < ring.length; i++) {
       const a = rad(ring[i]), b = rad(ring[(i + 1) % ring.length]);
       if (Math.abs(a.t) > tol || Math.abs(Math.hypot(a.r[0], a.r[1], a.r[2]) - f.radius) > tol) return null;
       const ang = Math.atan2(_dot3(_cross3(a.r, b.r), n), _dot3(a.r, b.r));
       if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return null;
-      turn += ang;
+      turn += ang; maxSeg = Math.max(maxSeg, Math.abs(ang));
     }
     if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return null;
     if (!ringAngleUniform(ring, f.center, n)) return null;
-    return f;
+    return { ...f, maxSeg };
+  };
+  // Verdrillungs-Schutz (Wand eines Zylinders/Kegels): Punkte auf dem Mantel allein reichen nicht —
+  // ist der obere Rand gegen den unteren verdreht und die Wand verbindet i ↔ i, liegen alle Punkte
+  // auf den Randkreisen, die Facetten aber auf einem Hyperboloid (Taille bis R·(1 − cos(φ/2)) innen;
+  // 30°-verdrillte Welle R5: Netz 1.7 % kleiner als der Zylinder). Eine echte Teilung verläuft
+  // entlang der Mantellinien: jede Wand-Kante überspannt um die Achse höchstens einen Randsegment-
+  // Winkel (Mantellinie 0, Sehne/Diagonale ≤ maxSeg). Kanten an der Spitze (Radius < rMin) zählen nicht.
+  const wallSpanOk = (W, c, axis, maxSeg, rMin) => {
+    const lim = maxSeg * 1.05 + 1e-9;
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (let i = 0; i < L.length; i++) {
+          const wa = _sub3(L[i], c), wb = _sub3(L[(i + 1) % L.length], c);
+          const ta = _dot3(wa, axis), tb = _dot3(wb, axis);
+          const ra = [wa[0] - axis[0] * ta, wa[1] - axis[1] * ta, wa[2] - axis[2] * ta];
+          const rb = [wb[0] - axis[0] * tb, wb[1] - axis[1] * tb, wb[2] - axis[2] * tb];
+          if (Math.hypot(ra[0], ra[1], ra[2]) < rMin || Math.hypot(rb[0], rb[1], rb[2]) < rMin) continue;
+          const x = _cross3(ra, rb);
+          if (Math.atan2(Math.hypot(x[0], x[1], x[2]), _dot3(ra, rb)) > lim) return false;
+        }
+      }
+    }
+    return true;
   };
   const faceCentroid = (fd) => {
     let cx = 0, cy = 0, cz = 0, k = 0;
@@ -2800,6 +2827,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const c1 = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
       if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return null; // koaxial
       if (!bandOnCone(W, c0, R0, zAx, H, (R1 - R0) / H, tol)) return null;
+      if (!wallSpanOk(W, c0, zAx, Math.max(seed.maxSeg, f1.maxSeg), tol)) return null;  // verdrillte Wand
       if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0]) || !circleOnDeck(c1, R1, zAx, d1.fd)) return null;
       const rim0 = mkCircleDesc(c0, R0, zAx), rim1 = mkCircleDesc(c1, R1, zAx);
       if (rim0.rimKey === rim1.rimKey) return null;
@@ -2826,7 +2854,7 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!top || !(H > tol)) return null;
     const apex = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
     if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
-    if (!bandOnCone(W, c0, R0, zAx, H, -R0 / H, tol)) return null;
+    if (!bandOnCone(W, c0, R0, zAx, H, -R0 / H, tol) || !wallSpanOk(W, c0, zAx, seed.maxSeg, tol)) return null;
     if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0])) return null;
     const rim0 = mkCircleDesc(c0, R0, zAx);
     return {
@@ -2847,7 +2875,7 @@ export function buildVolumeStepBrepV2(analysis) {
       for (const L of [fd.outer, ...fd.inner]) {
         if (L.circleRim || loopEdgeCount(L) < CONE_MIN_SEG) continue;
         const f = ringAsCircle(L, n);
-        if (f) seeds.push({ fi, loop: L, center: f.center, radius: f.radius });
+        if (f) seeds.push({ fi, loop: L, center: f.center, radius: f.radius, maxSeg: f.maxSeg });
       }
     });
     if (!seeds.length) return;
