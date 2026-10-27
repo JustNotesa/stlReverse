@@ -14,7 +14,7 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=3';
 // Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
-import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, arcSamples, expandArcLoop } from './profile-arcs.js';
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop } from './profile-arcs.js';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
@@ -4668,7 +4668,8 @@ export function buildVolumeStepBrepV2(analysis) {
       const oe = [];
       for (const seg of pl.segs) {
         if (seg.type === 'arc') {
-          const g = arcGeoms.get(seg.arcKey);
+          const g = arcGeoms && arcGeoms.get(seg.arcKey);
+          if (!g) throw new Error('Profil-Bogen unvollständig');
           const e = getOrCreateArcEdge(g), fwd = ptKey(seg.pts[0]) === e.startKey;
           useArc(seg.arcKey, fwd);
           oe.push(addOrientedEdge(e.ecId, fwd));
@@ -4685,6 +4686,7 @@ export function buildVolumeStepBrepV2(analysis) {
           }
         }
       }
+      if (oe.length < 3) throw new Error('Profil-Bogen unvollständig');
       emitFace(addAdvancedFace([addFaceOuterBound(addEdgeLoop(oe))], surf, pl.sense > 0), { arcBand: pl, key: pl });
     }
 
@@ -5598,12 +5600,21 @@ export function buildVolumeStepBrepV2(analysis) {
     return { fds, arcs: null };
   };
   // Zusammenbau mit Bögen; scheitert er (failed) und liegt es an den Bögen, werden die Bänder an
-  // defekten Kanten gesperrt und neu gebaut, zuletzt ohne Bögen. Liegt es nicht an den Bögen (ohne
-  // Bögen genauso gescheitert), bleibt der Zusammenbau mit Bögen (anschließende Rückfälle wie bisher).
+  // defekten Kanten gesperrt und neu gebaut. Scheitert er danach weiter, liegt es nicht an den Bögen:
+  // die Sperren werden zurückgenommen und der facettierte Zusammenbau geliefert. Der wird höchstens
+  // einmal erzeugt — hat die letzte Runde schon ohne Bögen gebaut (cv.arcs === null), ist ihr Ergebnis
+  // bereits der facettierte. Die anschließenden Rückfall-Stufen sehen so den facettierten Aufbau und
+  // finden die defekte Kante im Netz (der Bogen-Aufbau verdeckt die Kanten der Originalflächen).
   const assembleWithArcs = (fds, plans, tubes = [], mantles = [], cones = []) => {
     const blocked0 = new Set(arcBlocked);
     let cv = convertArcs(fds);
-    let a = assembleSolids(cv.fds, plans, tubes, mantles, cones, cv.arcs);
+    let a;
+    try {
+      a = assembleSolids(cv.fds, plans, tubes, mantles, cones, cv.arcs);
+    } catch (e) {
+      // Unvollständiger Bogen (Geometrie fehlt / Rand zu kurz) → Bögen verwerfen, facettiert bauen
+      return assembleSolids(fds, plans, tubes, mantles, cones, null);
+    }
     if (!cv.arcs || !failed(a)) return a;
     for (let r = 0; r < 2; r++) {
       arcStats.retries++;
@@ -5622,16 +5633,10 @@ export function buildVolumeStepBrepV2(analysis) {
       if (!failed(a)) return a;
       if (!cv.arcs) break;
     }
-    // Auch ohne (diese) Bögen gescheitert → nicht die Bögen schuld: Sperren zurück, mit Bögen bauen
-    // (die übrigen Rückfall-Stufen entscheiden wie bisher). Übernommen wird der Bogen-Zusammenbau nur,
-    // wenn er gelingt: die Rückfall-Stufen je Merkmal suchen die defekte Kante im Netz und müssen den
-    // facettierten Zusammenbau sehen — der Bogen-Zusammenbau verdeckt die Kanten der Originalflächen
-    // (die Bogen-Kanten zählen nicht in der Kanten-Bilanz) und würde die falschen Entrundungen sperren.
+    // Weiter gescheitert → nicht die Bögen schuld: Sperren zurück, facettiert bauen (einmal).
     arcBlocked.clear(); for (const s of blocked0) arcBlocked.add(s);
     arcStats.dropped = arcBlocked.size;
-    cv = convertArcs(fds);
-    const withArcs = assembleSolids(cv.fds, plans, tubes, mantles, cones, cv.arcs);
-    if (!failed(withArcs)) return withArcs;
+    if (!cv.arcs) return a;                       // letzte Runde lief bereits ohne Bögen
     return assembleSolids(fds, plans, tubes, mantles, cones, null);
   };
   // Rückfall je Merkmal (vor den globalen Stufen): Scheitert ein Zusammenbau an defekten LINIEN-Kanten
