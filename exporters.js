@@ -1822,6 +1822,8 @@ export function buildVolumeStepBrepV2(analysis) {
   // Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt + der globale Fallback.
   // (Aufruf in runPipeline() unten.)
   let bandsDefeatured = 0;
+  // Zähler für v2c (Kegel-Bänder, s. defeatureConeBands) — wird zu bandsDefeatured addiert.
+  let coneBandsDefeatured = 0;
   function defeatureBands() {
     const WALL_COS = 1e-3;          // |n_W·d| ≤ … → Wand steht senkrecht auf P (CAD-Extrusion: ~1e-7)
     const PARALLEL_COS = 0.9995;    // |n·d| ≥ … → (fast) parallel zu P → kein Band-Element
@@ -3997,6 +3999,436 @@ export function buildVolumeStepBrepV2(analysis) {
     if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
   };
 
+  // ---- Body-Defeaturing v2c: Verrundungs-Bänder an KEGEL-Wänden schärfen ----
+  // v2 (defeatureBands) schärft Bänder zwischen einer Ebene (Deckfläche) und Wänden, die
+  // SENKRECHT auf der Ebene stehen (Wandnormale ⊥ Ebene). Steht an der Kante eine schräge Wand
+  // (Kegel/Fase), bleibt das Band stehen: ein Kegelstumpf mit verrundeten Rändern bleibt
+  // facettiert, obwohl „Verrundungen entfernen" an ist.
+  // Dieser Pass schärft genau solche Bänder: Er läuft die Wand einer Deckfläche in Ringen (Zeilen)
+  // ab und sucht im Profil (ρ, z) — dem Meridian-Schnitt durch die Achse — einen LAUF von ≥ 2
+  // geraden Wandstücken, der einen Kreisbogen (Verrundung) bildet: zwischen einer Deckfläche und
+  // einer schrägen Wand (Kegel) oder zwischen einer zylindrischen und einer kegelförmigen Wand.
+  // Der scharfe Punkt X = Schnitt der beiden Nachbar-Geraden; die Ringe vor/nach dem Lauf werden
+  // auf X's Radius und Höhe geschoben (gleicher Azimut → die Wand behält ihre Form, sie wird nur
+  // verlängert bzw. verkürzt), die Verrundungs-Facetten entfallen. Danach erkennt
+  // convertMantleCones() die scharfe Kegelwand als CONICAL_SURFACE.
+  // Bohrungen und Senkungen (Normale nach innen) sind per Außen-Gate ausgeschlossen — sie gehören
+  // zum Bohrungs-Pfad (dort wird die Fase zur Senkung). DECK–ZYL (die v2-Aufgabe) bleibt hier
+  // unberührt.
+  const defeatureConeBands = () => {
+    const KINK_MAX = 25 * Math.PI / 180;      // Knick im Lauf (Verrundung): ≤ 25°
+    const KINK_MIN = 0.05 * Math.PI / 180;     // … und > 0.05° (sonst kein echter Knick)
+    const MERGE_COS = Math.cos(0.2 * Math.PI / 180);  // Zeilen gleicher Richtung → 1 Segment
+    const AXIS_COS = Math.cos(2 * Math.PI / 180);      // CYL: Richtung ⊥ zur Achse (2°)
+    const CONE_COS = Math.cos(2 * Math.PI / 180);      // CONE: ≥ 2° zu BEIDEN Profil-Achsen
+    const MAX_ROWS = 256;                   // Zeilen je Wand (Laufzeit-Schutz)
+    const MAX_ITERS = 64;                   // Schärfungen je Export
+    const removed = new Set();              // entfernte Verrundungs-Facetten (Index in faceDefs)
+    const cross2 = (p, q) => p[0] * q[1] - p[1] * q[0];
+    const dot2 = (p, q) => p[0] * q[0] + p[1] * q[1];
+    const ang2 = (p, q) => Math.acos(Math.max(-1, Math.min(1, dot2(p, q))));
+    // Abstand Punkt → Gerade (Richtung ist Einheitsvektor)
+    const distLine = (p, line) => Math.abs(cross2([p[0] - line.p[0], p[1] - line.p[1]], line.dir));
+    let done = 0;
+    for (let iter = 0; iter < MAX_ITERS; iter++) {
+      // Saat: Flächen mit einem echten Kreis-Loop (Deckflächen, Deckel von Kegeln/Zylindern)
+      const seeds = [];
+      faceDefs.forEach((fd, fi) => {
+        if (removed.has(fi)) return;
+        const a = _norm3(fd.normal);
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (L.circleRim) continue;
+          const f = ringAsCircle(L, a);
+          if (f) seeds.push({ fi, L, f, a });
+        }
+      });
+      if (!seeds.length) break;
+      // Vertex-Schlüssel → Flächen-Indizes (je Iteration neu: verschobene Punkte ändern Schlüssel)
+      const vtxFaces = new Map();
+      faceDefs.forEach((fd, fi) => {
+        if (removed.has(fi)) return;
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (L.circleRim) continue;
+          for (const p of L) {
+            const k = vtxKey(p);
+            let o = vtxFaces.get(k);
+            if (!o) { o = []; vtxFaces.set(k, o); }
+            if (o[o.length - 1] !== fi) o.push(fi);
+          }
+        }
+      });
+      let plan = null;
+      for (const s of seeds) {
+        // Auswertung wirft nie nach einer Änderung: ein Fehler verwirft nur diese Saat,
+        // bereits angewandte Bänder bleiben konsistent
+        try { plan = evalConeSeed(s, vtxFaces); } catch (_) { plan = null; }
+        if (plan) break;
+      }
+      if (!plan) break;
+      applyConeBand(plan);
+      done++;
+    }
+    if (removed.size) faceDefs = faceDefs.filter((_, i) => !removed.has(i));
+    return done;
+
+    // ---- Saat: Deckfläche P (Kreis-Loop L) → Wand in Zeilen ablaufen, Lauf suchen
+    function evalConeSeed({ fi: pi, L, f, a }, vtxFaces) {
+      const c = f.center;
+      const tol = Math.max(0.01, 0.002 * f.radius);
+      const uRef = computeRefDir(a), vRef = _cross3(a, uRef);
+      // Punkt → Profil: z (Höhe entlang der Achse), ρ (Radius), e (Radialrichtung), Azimut
+      const fr = (p) => {
+        const w = _sub3(p, c);
+        const z = _dot3(w, a);
+        const rv = [w[0] - a[0] * z, w[1] - a[1] * z, w[2] - a[2] * z];
+        const rho = Math.hypot(rv[0], rv[1], rv[2]);
+        return { z, rho, e: rho > 1e-12 ? [rv[0] / rho, rv[1] / rho, rv[2] / rho] : null, az: Math.atan2(_dot3(w, vRef), _dot3(w, uRef)) };
+      };
+      // Umlaufsinn eines Loops um die Achse (positiv = rechtshändig um a)
+      const senseOf = (loop) => {
+        let s = 0;
+        for (let i = 0; i < loop.length; i++) {
+          const p = _sub3(loop[i], c), q = _sub3(loop[(i + 1) % loop.length], c);
+          s += _dot3(_cross3(p, q), a);
+        }
+        return s >= 0 ? 1 : -1;
+      };
+      // ---- Zeilen (Ringe) der Wand unter dem Saat-Loop
+      const rows = [];
+      let R = L.slice();
+      const used = new Set([pi]);
+      let endDeck = null, zEnd = null;
+      for (let k = 1; k <= MAX_ROWS; k++) {
+        const rk = new Set(R.map(vtxKey));
+        const cand = new Set();
+        for (const key of rk) for (const fj of (vtxFaces.get(key) || [])) if (!used.has(fj) && !removed.has(fj)) cand.add(fj);
+        if (!cand.size) break;
+        const S = [...cand];
+        // Enddeck? Genau eine ebene Fläche, deren Loop dem Ring entspricht
+        if (S.length === 1) {
+          const Q = faceDefs[S[0]];
+          if (Math.abs(_dot3(_norm3(Q.normal), a)) >= 0.9999) {
+            for (const Lq of [Q.outer, ...Q.inner]) {
+              if (Lq.circleRim || Lq.length !== R.length) continue;
+              let same = true;
+              for (const p of Lq) if (!rk.has(vtxKey(p))) { same = false; break; }
+              if (same) { endDeck = { fi: S[0], loop: Lq }; zEnd = fr(R[0]).z; break; }
+            }
+            if (endDeck) break;
+          }
+        }
+        // Wandzeile: keine inneren Löcher, keine ebene Fläche (sonst Deck, nicht Wand)
+        let bad = false;
+        for (const fj of S) if (faceDefs[fj].inner.length) { bad = true; break; }
+        if (!bad) for (const fj of S) if (Math.abs(_dot3(_norm3(faceDefs[fj].normal), a)) >= 0.9999) { bad = true; break; }
+        if (bad) break;
+        // Nächster Ring: alle Punkte der S-Flächen, die nicht im Ring davor liegen
+        const nk = new Map();
+        for (const fj of S) {
+          const fd = faceDefs[fj];
+          for (const Lp of [fd.outer, ...fd.inner]) for (const p of Lp) {
+            const key = vtxKey(p);
+            if (rk.has(key) || nk.has(key)) continue;
+            nk.set(key, p);
+          }
+        }
+        if (!nk.size) break;
+        let rhoMin = Infinity, rhoMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+        for (const p of nk.values()) { const q = fr(p); rhoMin = Math.min(rhoMin, q.rho); rhoMax = Math.max(rhoMax, q.rho); zMin = Math.min(zMin, q.z); zMax = Math.max(zMax, q.z); }
+        if (rhoMax <= tol) break;                                // Kegelspitze (kein Ring)
+        if (rhoMax - rhoMin > tol || zMax - zMin > tol) break;    // kein Kreis-Ring
+        const cyc = orderRing(nk, S);
+        if (!cyc) break;
+        rows.push({ faces: S, ring: cyc, ringPrev: R, p: [(rhoMin + rhoMax) / 2, (zMin + zMax) / 2] });
+        for (const fj of S) used.add(fj);
+        R = cyc;
+      }
+      // ---- Segmente: Zeilen mit gleicher Richtung (≤ 0.2°) → ein Segment
+      const segs = [];
+      let pPrev = [f.radius, 0];
+      for (const row of rows) {
+        const p = row.p;
+        const d = [p[0] - pPrev[0], p[1] - pPrev[1]];
+        const len = Math.hypot(d[0], d[1]);
+        if (!(len > 1e-9)) break;
+        const dir = [d[0] / len, d[1] / len];
+        const last = segs[segs.length - 1];
+        if (last && dot2(last.dir, dir) >= MERGE_COS) {
+          last.rows.push(row); last.end = p; last.len += len;
+          for (const fj of row.faces) last.faces.push(fj);
+        } else {
+          // `p`: Punkt auf der Geraden (Start des Segments) — distLine() und die X-Schnitt-
+          // Rechnung brauchen ihn (die Profil-Gerade ist durch p + t*dir definiert).
+          segs.push({ rows: [row], start: pPrev, p: pPrev, end: p, dir, len, faces: [...row.faces] });
+        }
+        pPrev = p;
+      }
+      if (segs.length < 2) return null;
+      // ---- Nachbarn: Deckfläche (virtuell) oder reales Segment (ZYL/Kegel)
+      const typeOf = (s) => {
+        if (Math.abs(s.dir[1]) >= AXIS_COS) return 'CYL';       // ⊥ zur Achse
+        if (Math.abs(s.dir[0]) <= CONE_COS) return 'CONE';       // schräg in beiden Achsen
+        return null;
+      };
+      const deckA = { type: 'DECK', p: [f.radius, 0], dir: [1, 0], len: Infinity };
+      const deckB = endDeck ? { type: 'DECK', p: [f.radius, zEnd], dir: [1, 0], len: Infinity } : null;
+      for (let i = 0; i + 1 < segs.length; i++) {
+        const A = i === 0 ? deckA : segs[i - 1];
+        const aType = i === 0 ? 'DECK' : typeOf(segs[i - 1]);
+        if (!aType) continue;
+        for (let j = segs.length - 1; j >= i + 1; j--) {
+          const B = (j === segs.length - 1) ? deckB : segs[j + 1];
+          if (!B) continue;
+          const bType = B === deckB ? 'DECK' : typeOf(segs[j + 1]);
+          if (!bType) continue;
+          const pair = aType + '-' + bType;
+          if (pair !== 'DECK-CONE' && pair !== 'CONE-DECK' && pair !== 'CYL-CONE' && pair !== 'CONE-CYL') continue;
+          const plan = checkRun(i, j, A, aType, B, bType);
+          if (plan) return plan;
+        }
+      }
+      return null;
+
+      // ---- Lauf prüfen (Knicke, Kreis, Tangentialität, Außen-Gate, scharfer Punkt)
+      function checkRun(i, j, A, aType, B, bType) {
+        // rej(…): Lauf verwerfen (die Begründung steht als Text am Aufruf)
+        const rej = () => null;
+        const run = segs.slice(i, j + 1);
+        // Deck-Linien: so orientieren, dass der Knick zum Lauf klein ist
+        let dA = A.dir, dB = B.dir;
+        if (aType === 'DECK') { const o = pickDir(run[0].dir); if (!o) return rej('pickDirA'); dA = o; }
+        if (bType === 'DECK') { const o = pickDir(run[run.length - 1].dir); if (!o) return rej('pickDirB'); dB = o; }
+        // Knicke: alle klein und im SELBEN Umlaufsinn
+        const dirs = [dA, ...run.map((s) => s.dir), dB];
+        let sign = 0;
+        for (let t = 0; t + 1 < dirs.length; t++) {
+          const ang = ang2(dirs[t], dirs[t + 1]);
+          if (!(ang <= KINK_MAX && ang >= KINK_MIN)) return rej(`kink ${(ang * 180 / Math.PI).toFixed(2)}°`);
+          const sg = Math.sign(cross2(dirs[t], dirs[t + 1]));
+          if (!sg) return rej('kink sign 0');
+          if (!sign) sign = sg; else if (sg !== sign) return rej('kink sign');
+        }
+        // Reale Nachbarn deutlich länger als das längste Lauf-Stück (echte Verrundung)
+        let maxRunLen = 0;
+        for (const s of run) maxRunLen = Math.max(maxRunLen, s.len);
+        if (aType !== 'DECK' && A.len < 3 * maxRunLen) return rej('lenA');
+        if (bType !== 'DECK' && B.len < 3 * maxRunLen) return rej('lenB');
+        // Lauf-Punkte im Profil + Kreis-Fit (Kåsa)
+        const pts = [run[0].start];
+        for (const s of run) pts.push(s.end);
+        if (pts.length < 3) return rej('pts');
+        const fit = fitCircle2d(pts);
+        if (!fit || !(fit.r > 0)) return rej('fit');
+        const r = fit.r;
+        let dev = 0;
+        for (const p of pts) dev = Math.max(dev, Math.abs(Math.hypot(p[0] - fit.c[0], p[1] - fit.c[1]) - r));
+        if (dev > Math.max(0.005, 0.02 * r)) return rej(`dev ${dev.toFixed(4)}/${r.toFixed(3)}`);
+        // Tangentialität an beide Nachbar-Geraden
+        const tolT = Math.max(0.01, 0.05 * r);
+        if (Math.abs(distLine(fit.c, A) - r) > tolT) return rej(`tangA ${distLine(fit.c, A).toFixed(4)} vs ${r.toFixed(4)}`);
+        if (Math.abs(distLine(fit.c, B) - r) > tolT) return rej(`tangB ${distLine(fit.c, B).toFixed(4)} vs ${r.toFixed(4)}`);
+        // Lauf-Facetten + reale Nachbar-Facetten: Normale nach außen (Löcher/Senkungen ausgeschlossen)
+        const runFaces = [];
+        for (const s of run) for (const fj of s.faces) runFaces.push(fj);
+        if (!outwardOk(runFaces, -1e-6)) return rej('out-run');
+        if (aType !== 'DECK' && !outwardOk(A.faces, 0.05)) return rej('out-A');
+        if (bType !== 'DECK' && !outwardOk(B.faces, 0.05)) return rej('out-B');
+        // Gesperrt? (Rückfall je Merkmal) → Lauf bleibt facettiert
+        for (const fj of runFaces) { const g = faceDefs[fj].group; if (g && blockedGroups.has(g)) return rej('blocked'); }
+        // Scharfer Punkt X = Schnitt der Nachbar-Geraden
+        const den = cross2(A.dir, B.dir);
+        if (Math.abs(den) < 1e-9) return rej('parallel');
+        const dv = [B.p[0] - A.p[0], B.p[1] - A.p[1]];
+        const t = cross2(dv, B.dir) / den;
+        const X = [A.p[0] + A.dir[0] * t, A.p[1] + A.dir[1] * t];
+        if (aType === 'DECK') X[1] = 0;         // Deckebene exakt
+        if (bType === 'DECK') X[1] = zEnd;      // Enddeck-Ebene exakt
+        if (!(X[0] > Math.max(tol, 0.05 * r))) return rej(`Xrho ${X[0]}`);
+        if (Math.hypot(X[0] - pts[0][0], X[1] - pts[0][1]) > 3 * r) return rej('X-start');
+        const lastPt = pts[pts.length - 1];
+        if (Math.hypot(X[0] - lastPt[0], X[1] - lastPt[1]) > 3 * r) return rej('X-end');
+        // Ringe vor/nach dem Lauf
+        const Rs = run[0].rows[0].ringPrev;
+        const lastRow = run[run.length - 1].rows[run[run.length - 1].rows.length - 1];
+        const Re = lastRow.ring;
+        // Sicherheit: keine andere Fläche benutzt die Ring-Punkte
+        const firstRowB = bType === 'DECK' ? [] : B.rows[0].faces;
+        const lastRowA = aType === 'DECK' ? [] : A.rows[A.rows.length - 1].faces;
+        const allowed = new Set([pi]);
+        if (endDeck) allowed.add(endDeck.fi);
+        for (const fj of runFaces) allowed.add(fj);
+        for (const fj of firstRowB) allowed.add(fj);
+        for (const fj of lastRowA) allowed.add(fj);
+        for (const ring of [Rs, Re]) for (const p of ring) {
+          for (const fj of (vtxFaces.get(vtxKey(p)) || [])) if (!allowed.has(fj)) return rej(`safety ${fj}`);
+        }
+        // Abbilden: Ring-Punkt auf X schieben (gleicher Azimut → die Wand behält ihre Form)
+        const mapPoint = (p) => {
+          const q = fr(p);
+          return [c[0] + a[0] * X[1] + q.e[0] * X[0], c[1] + a[1] * X[1] + q.e[1] * X[0], c[2] + a[2] * X[1] + q.e[2] * X[0]];
+        };
+        const mapPts = new Map();
+        let deckFace = -1, deckLoop = null, newLoop = null;
+        let replaceFaces = [];
+        if (aType === 'DECK') {
+          // Deck-Loop ← abgebildete Re-Punkte (Umlaufsinn wie der alte Loop)
+          for (const p of Re) mapPts.set(vtxKey(p), mapPoint(p));
+          newLoop = Re.map((p) => mapPts.get(vtxKey(p)));
+          if (senseOf(newLoop) !== senseOf(L)) newLoop.reverse();
+          deckFace = pi; deckLoop = L;
+          replaceFaces = firstRowB.slice();
+        } else if (bType === 'DECK') {
+          // Enddeck-Loop ← abgebildete Rs-Punkte
+          for (const p of Rs) mapPts.set(vtxKey(p), mapPoint(p));
+          newLoop = Rs.map((p) => mapPts.get(vtxKey(p)));
+          if (senseOf(newLoop) !== senseOf(endDeck.loop)) newLoop.reverse();
+          deckFace = endDeck.fi; deckLoop = endDeck.loop;
+          replaceFaces = lastRowA.slice();
+        } else {
+          // Zylinder ↔ Kegel: beide Ringe auf dieselben neuen Punkte (eine scharfe Kante).
+          // Die beiden Ring-Zyklen starten ggf. an verschiedenen Ecken (Index-Versatz) →
+          // deshalb nach AZIMUT paaren, nicht nach Index.
+          if (Rs.length !== Re.length) return rej('ring count');
+          const normAz = (a) => { let v = a % (2 * Math.PI); if (v < 0) v += 2 * Math.PI; return v; };
+          const azRs = Rs.map((p) => normAz(fr(p).az));
+          const azRe = Re.map((p) => normAz(fr(p).az));
+          const usedRe = new Set();
+          for (let t = 0; t < Rs.length; t++) {
+            let hit = -1;
+            for (let u = 0; u < Re.length; u++) {
+              if (usedRe.has(u)) continue;
+              let d = azRs[t] - azRe[u];
+              while (d > Math.PI) d -= 2 * Math.PI;
+              while (d < -Math.PI) d += 2 * Math.PI;
+              if (Math.abs(d) <= 1e-6) { hit = u; break; }
+            }
+            if (hit < 0) return rej(`azimut ${azRs[t].toFixed(6)}`);
+            usedRe.add(hit);
+            const np = mapPoint(Rs[t]);
+            mapPts.set(vtxKey(Rs[t]), np);
+            mapPts.set(vtxKey(Re[hit]), np);
+          }
+          if (usedRe.size !== Re.length) return rej('azimut bijektion');
+          replaceFaces = [...lastRowA, ...firstRowB];
+        }
+        return { pi, qfi: endDeck ? endDeck.fi : -1, runFaces, mapPts, deckFace, deckLoop, newLoop, replaceFaces };
+      }
+
+      // Richtung der virtuellen Deck-Linie (z = const): so wählen, dass der Knick klein ist
+      function pickDir(sd) {
+        let best = null;
+        for (const d of [[1, 0], [-1, 0]]) {
+          const ang = ang2(d, sd);
+          if (!best || ang < best.ang) best = { dir: d, ang };
+        }
+        return best.ang <= KINK_MAX ? best.dir : null;
+      }
+      // Außen-Gate: Radialanteil der Flächennormale am Loop-Schwerpunkt
+      function outwardOk(faces, minRad) {
+        for (const fj of faces) {
+          const fd = faceDefs[fj];
+          const n = _norm3(fd.normal);
+          const ct = loopCentroid([fd.outer]);
+          if (!ct) return false;
+          const q = fr(ct);
+          if (!q.e) return false;
+          if (_dot3(n, q.e) < minRad) return false;
+        }
+        return true;
+      }
+    }
+
+    // Ring N zu einem Zyklus ordnen (Kanten der S-Flächen, beide Enden in N)
+    function orderRing(nk, S) {
+      const adj = new Map();
+      for (const fj of S) {
+        const fd = faceDefs[fj];
+        for (const Lp of [fd.outer, ...fd.inner]) {
+          for (let i = 0; i < Lp.length; i++) {
+            const k1 = vtxKey(Lp[i]), k2 = vtxKey(Lp[(i + 1) % Lp.length]);
+            if (k1 === k2 || !nk.has(k1) || !nk.has(k2)) continue;
+            if (!adj.has(k1)) adj.set(k1, []);
+            if (!adj.has(k2)) adj.set(k2, []);
+            const l1 = adj.get(k1), l2 = adj.get(k2);
+            if (!l1.includes(k2)) l1.push(k2);
+            if (!l2.includes(k1)) l2.push(k1);
+          }
+        }
+      }
+      for (const key of nk.keys()) { const l = adj.get(key); if (!l || l.length !== 2) return null; }
+      const start = nk.keys().next().value;
+      const out = [];
+      let prev = null, cur = start;
+      for (let guard = 0; guard <= nk.size; guard++) {
+        out.push(nk.get(cur));
+        const l = adj.get(cur);
+        const nxt = l[0] === prev ? l[1] : l[0];
+        if (nxt === start) return out.length === nk.size ? out : null;
+        prev = cur; cur = nxt;
+      }
+      return null;
+    }
+
+    // Kreis-Fit (Kåsa) für Punkte (ρ, z) → { c, r } | null
+    function fitCircle2d(pts) {
+      const n = pts.length;
+      if (n < 3) return null;
+      let Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0, Sz = 0, Sxz = 0, Syz = 0;
+      for (const p of pts) {
+        const x = p[0], y = p[1], z = x * x + y * y;
+        Sx += x; Sy += y; Sxx += x * x; Syy += y * y; Sxy += x * y; Sz += z; Sxz += x * z; Syz += y * z;
+      }
+      const M = [[Sxx, Sxy, Sx, -Sxz], [Sxy, Syy, Sy, -Syz], [Sx, Sy, n, -Sz]];
+      for (let cc = 0; cc < 3; cc++) {
+        let piv = cc;
+        for (let r = cc + 1; r < 3; r++) if (Math.abs(M[r][cc]) > Math.abs(M[piv][cc])) piv = r;
+        if (Math.abs(M[piv][cc]) < 1e-12) return null;
+        [M[cc], M[piv]] = [M[piv], M[cc]];
+        for (let r = 0; r < 3; r++) {
+          if (r === cc) continue;
+          const fq = M[r][cc] / M[cc][cc];
+          for (let j = cc; j < 4; j++) M[r][j] -= fq * M[cc][j];
+        }
+      }
+      const D = M[0][3] / M[0][0], E = M[1][3] / M[1][1], F = M[2][3] / M[2][2];
+      const cx = -D / 2, cy = -E / 2;
+      const r2 = cx * cx + cy * cy - F;
+      if (!(r2 > 0)) return null;
+      return { c: [cx, cy], r: Math.sqrt(r2) };
+    }
+
+    // ---- Anwenden: Deck-Loop ersetzen, Ring-Punkte schieben, Lauf-Facetten entfernen
+    function applyConeBand(plan) {
+      const { pi, qfi, runFaces, mapPts, deckFace, deckLoop, newLoop, replaceFaces } = plan;
+      const op = { kind: 'v2c', groups: runFaces.map((fj) => faceDefs[fj].group).filter(Boolean), keys: new Set() };
+      for (const fj of runFaces) addLoopKeys(op.keys, faceDefs[fj]);
+      for (const p of mapPts.values()) op.keys.add(vtxKey(p));
+      featureOps.push(op);
+      markOp(faceDefs[pi], op);
+      if (qfi >= 0) markOp(faceDefs[qfi], op);
+      // Deck-Loop ersetzen (dasselbe Array-Objekt → die Fläche behält ihre Identität)
+      if (deckLoop) { deckLoop.length = 0; deckLoop.push(...newLoop); }
+      // Ring-Punkte in den Nachbarflächen ersetzen
+      const touched = new Set();
+      for (const fj of replaceFaces) {
+        const fd = faceDefs[fj];
+        let changed = false;
+        for (const Lp of [fd.outer, ...fd.inner]) {
+          for (let i = 0; i < Lp.length; i++) {
+            const np = mapPts.get(vtxKey(Lp[i]));
+            if (np && np !== Lp[i]) { Lp[i] = np; changed = true; }
+          }
+        }
+        if (changed) { touched.add(fj); markOp(fd, op); }
+      }
+      // Schwerpunkte nachziehen
+      for (const fj of touched) { const fd = faceDefs[fj]; const ct = loopCentroid([fd.outer, ...fd.inner]); if (ct) fd.centroid = ct; }
+      if (deckFace >= 0) { const fd = faceDefs[deckFace]; const ct = loopCentroid([fd.outer, ...fd.inner]); if (ct) fd.centroid = ct; }
+      // Verrundungs-Facetten entfallen
+      for (const fj of runFaces) removed.add(fj);
+    }
+  };
+
   // ---- Ablauf (re-entrant für die Fallback-Stufen) ----
   // withBores=false: ohne Bohrungs-Umwandlung (Defeaturing bleibt). Setzt faceDefs, finalPlans,
   // chamferZones und die Defeaturing-Zähler.
@@ -4005,7 +4437,7 @@ export function buildVolumeStepBrepV2(analysis) {
     finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set();
     boreNotes = new Map();
     preSplitStats = null;
-    filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; featureOps = [];
+    filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; coneBandsDefeatured = 0; featureOps = [];
     if (!DEFEATURE) {
       // Toggle AUS — bisheriger Ablauf unverändert: Bohrungs-Pläne aus den Original-Dreiecken,
       // Bohrungs-Gruppen vorerst überspringen, nur Direkt-Treffer; gescheiterte Pläne bekommen
@@ -4045,6 +4477,12 @@ export function buildVolumeStepBrepV2(analysis) {
         cornersDefeatured = defeatureProfileCorners();
       } catch (_) { cornersDefeatured = 0; /* Guard: jede Ecke wird erst nach allen Prüfungen angewandt */ }
     }
+    // Kegel-Bänder (v2c): Verrundungen an schrägen Wänden (Kegel/Fase) schärfen — danach
+    // erkennt convertMantleCones() die scharfe Kegelwand als CONICAL_SURFACE.
+    try {
+      coneBandsDefeatured = defeatureConeBands();
+    } catch (_) { coneBandsDefeatured = 0; /* Guard: Änderungen werden erst nach allen Prüfungen angewandt */ }
+    bandsDefeatured += coneBandsDefeatured;
     if (!withBores) return;
     // VOR der Bohrungs-Umwandlung: die unebenen Flächen zerlegen. Deckflächen mit einem Kreis-Rand
     // (Bohrungs-Mündung) lassen sich danach nicht mehr zerlegen (enforcePlanarity überspringt
@@ -5727,6 +6165,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const a = assembleSolids(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
+    a.report.coneBandsDefeatured = coneBandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
     if (preSplitStats) { pl.st.refits += preSplitStats.refits; pl.st.splits += preSplitStats.splits; pl.st.parts += preSplitStats.parts; }
     planarReport(a.report, pl.st);
@@ -5943,6 +6382,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const base = tracked(assembleSolids(fallbackDefs, []));
     base.report.filletsDefeatured = 0;
     base.report.bandsDefeatured = 0;
+    base.report.coneBandsDefeatured = 0;
     base.report.cornersDefeatured = 0;
     planarReport(base.report, pl.st);
     asm = base; fallbackStage = 2;
