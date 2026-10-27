@@ -1005,7 +1005,7 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!rims) return null;
     const wall = { loops: tris, pts: [] };                       // Wand = Original-Dreiecke
     if (!boreWallOk(rims, wall.loops, wall.pts, BORE_RIM_TOL(rims[0].radius))) return null;     // verdrillt / Delle → facettiert
-    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall };
+    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall, entry };
   };
 
   // Wie attemptBore, aber die Ränder kommen aus den AKTUELLEN Wand-faceDefs statt aus den
@@ -1036,7 +1036,7 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!rims) return null;
     const wall = wallOfFaces(fis);
     if (!boreWallOk(rims, wall.loops, wall.pts, BORE_RIM_TOL(rims[0].radius))) return null;     // verdrillt / Delle → facettiert
-    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall };
+    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall, entry };
   };
 
   // Innen-Loop einer Flachfläche rein GEOMETRISCH einem Rand zuordnen (simplifyLoop kann die
@@ -1302,8 +1302,15 @@ export function buildVolumeStepBrepV2(analysis) {
       if (!matched) matched = matchRims(plan.rims);
       if (!matched) { restore(plan); continue; }
       plan.coneRims = [];
+      let firstRim = true;
       for (const m of matched) {
-        if (m.mode === 'direct') { m.inner.circleRim = m.rim; continue; }
+        const isFirst = firstRim; firstRim = false;
+        if (m.mode === 'direct') {
+          // Test-Hook 'bore': der ERSTE Rand des Plans bleibt ungetaggt → die Kreis-Kante wird nur
+          // vom Zylinder genutzt (offene Kreis-Kante) → die Hülle reißt an dieser Bohrung auf.
+          if (!(isFirst && breakNow('bore', [plan.entry]))) m.inner.circleRim = m.rim;
+          continue;
+        }
         const flatDesc = mkCircleDesc(m.circ.center, m.circ.radius, m.rim.axis);
         m.inner.circleRim = flatDesc;                                   // flache Fläche nutzt äußeren Kreis R2@z2
         const coneAxis = m.dz >= 0 ? m.rim.axis : [-m.rim.axis[0], -m.rim.axis[1], -m.rim.axis[2]];
@@ -1386,6 +1393,11 @@ export function buildVolumeStepBrepV2(analysis) {
   // gesperrt (blockedGroups, bleiben facettiert) und der Ablauf neu gebaut, statt alles zu facettieren.
   // blockedGroups gilt für alle weiteren Läufe dieses Exports (auch die Fallback-Stufen).
   const blockedGroups = new Set();
+  // ---- Rückfall je Bohrung ----
+  // Wie blockedGroups je Entrundungs-Gruppe, aber je Bohrung: der boreById-Eintrag (Plan + Wände)
+  // bleibt FACETTIERT, wenn seine Umwandlung die Hülle aufreißt (offene Kreis-Kante, Wächter-Befund
+  // an Zylinder oder Fasen-Kegel). Die übrigen Bohrungen bleiben analytisch.
+  const blockedBores = new Set();  // boreById-Einträge, die facettiert bleiben (Rückfall je Bohrung)
   let featureOps = [];
   const isBlocked = (groups) => { for (const g of groups) if (g && blockedGroups.has(g)) return true; return false; };
   const markOp = (fd, op) => { if (!fd.ops) fd.ops = new Set(); fd.ops.add(op); };
@@ -1393,6 +1405,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // Test-Hook (nur Node, tests/orientation-guard.mjs): STLREV_TEST_BREAK='v1'|'v2'|'v2b' verdirbt die
   // erste angewandte Operation dieser Art (eine Nachbarfläche wird nicht nachgezogen → offene Hülle) —
   // dieselbe Rundung in jedem weiteren Lauf, bis sie gesperrt ist.
+  // STLREV_TEST_BREAK='bore' verdirbt die erste umgewandelte Bohrung: ihr erster Mündungs-Rand
+  // bleibt ohne circleRim-Tag → die Kreis-Kante wird nur vom Zylinder genutzt (offene Kreis-Kante) →
+  // die Hülle reißt an dieser Bohrung auf. Der Eintrag (boreById) bleibt dabei derselbe.
   const TEST_BREAK = testEnv('STLREV_TEST_BREAK');
   let brokenGroup = null;
   const breakNow = (kind, groups) => {
@@ -3192,7 +3207,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
     if (rim0.rimKey === rim1.rimKey) return null;
     return {
-      plan: { prim: entry.prim, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center, coneRims: [] },
+      plan: { prim: entry.prim, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center, coneRims: [], entry },
       wall: W, decks: [decks[0].loop, decks[1].loop],
     };
   };
@@ -3217,11 +3232,13 @@ export function buildVolumeStepBrepV2(analysis) {
     });
     const drop = new Set();
     for (const entry of boreById.values()) {
+      if (blockedBores.has(entry)) continue;      // gesperrt (Rückfall je Bohrung) → bleibt facettiert
       let res = null;
       try { res = sharpBorePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
       if (!res || !rimsClear(res.plan.rims, res.decks)) continue;
       for (const fi of res.wall) drop.add(fi);
-      res.decks[0].circleRim = res.plan.rims[0];
+      // Test-Hook 'bore': die erste Mündung bleibt ungetaggt → offene Kreis-Kante (s. breakNow).
+      if (!breakNow('bore', [entry])) res.decks[0].circleRim = res.plan.rims[0];
       res.decks[1].circleRim = res.plan.rims[1];
       finalPlans.push(res.plan);
       done.add(entry);
@@ -3829,6 +3846,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const boreSkip = new Set();
       if (withBores) {
         for (const entry of boreById.values()) {
+          if (blockedBores.has(entry)) continue;      // gesperrt (Rückfall je Bohrung) → bleibt facettiert
           let plan = null;
           try { plan = attemptBore(entry); } catch (_) { plan = null; }
           if (plan) { tentative.push(plan); for (const g of plan.groups) boreSkip.add(g); }
@@ -3884,7 +3902,7 @@ export function buildVolumeStepBrepV2(analysis) {
       if (fd.group) { let a = fdsOfGroupL.get(fd.group); if (!a) { a = []; fdsOfGroupL.set(fd.group, a); } a.push(fi); }
     });
     for (const entry of boreById.values()) {
-      if (sharp.has(entry)) continue;
+      if (sharp.has(entry) || blockedBores.has(entry)) continue;
       let plan = null;
       try { plan = attemptBoreCurrent(entry, fdsOfGroupL); } catch (_) { plan = null; }
       if (plan) tentative.push(plan);
@@ -4367,6 +4385,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const emitFace = (fid, src = null) => { faceIds.push(fid); faceKeys.push(faceKeySink); faceSrc.push(src); faceKeySink = []; };
     faceKeySink = [];
     let guardFailures = 0, guardMs = 0;
+    // Bohrungs-Pläne, deren Wächter geschlagen hat (Zylinder oder einer seiner Fasen-Kegel) — der
+    // Rückfall je Bohrung (buildStage) sperrt genau diese Bohrung (sie bleibt facettiert).
+    const guardFailedPlans = new Set();
     // Emittierte same_sense-Werte (korrekt bzw. vom Test-Hook gedreht) — der Wächter prüft
     // IMMER den tatsächlich emittierten Wert.
     const ssBore = testFlip('bore');   // korrekt .F.: Wand-Normale zeigt zur Achse (ins Loch)
@@ -4456,7 +4477,7 @@ export function buildVolumeStepBrepV2(analysis) {
           rimLoops[0].d = _sub3(rimLoops[1].geom.center, rimLoops[0].geom.center);
           rimLoops[1].d = _sub3(rimLoops[0].geom.center, rimLoops[1].geom.center);
         }
-        if ((mean !== null && mean < 0) || (rimLoops.length === 2 && !loopSenseOk(rimLoops, nAt))) guardFailures++;
+        if ((mean !== null && mean < 0) || (rimLoops.length === 2 && !loopSenseOk(rimLoops, nAt))) { guardFailures++; guardFailedPlans.add(plan); }
         guardMs += nowMs() - tg;
       }
 
@@ -4487,7 +4508,7 @@ export function buildVolumeStepBrepV2(analysis) {
             { geom: cr.rimDesc, fwd: fRim, d: dRF },
             { geom: cr.flatDesc, fwd: fFlat, d: [-dRF[0], -dRF[1], -dRF[2]] },
           ], nAt);
-          if ((mean !== null && mean < 0) || !loopsOk) guardFailures++;
+          if ((mean !== null && mean < 0) || !loopsOk) { guardFailures++; guardFailedPlans.add(plan); }
           guardMs += nowMs() - tg;
         }
       }
@@ -4666,6 +4687,7 @@ export function buildVolumeStepBrepV2(analysis) {
     faceIds.forEach((f, i) => { const r = find(i), s = shellMap.get(r); if (s) s.push(f); else shellMap.set(r, [f]); });
     return {
       faceIds, faceKeys, faceSrc,
+      guardFailedPlans,          // Bohrungs-Pläne mit Wächter-Befund (Rückfall je Bohrung)
       shells: [...shellMap.values()],
       report: {
         faceCount: faceIds.length,
@@ -5522,13 +5544,98 @@ export function buildVolumeStepBrepV2(analysis) {
   // Punkt der Operation; (2) sonst grob: Marke fd.ops der Flächen an der Kante. Nur deren Rundungen
   // werden gesperrt (bleiben facettiert), der Lauf wird neu gebaut. Angenommen wird der neue Zusammenbau,
   // wenn er gelingt oder weniger defekte Kanten hat; sonst wird die Sperre zurückgenommen und der vorige
-  // Zusammenbau wiederhergestellt. Höchstens MAX_FEATURE_RETRIES Neubauten je Stufe. Kreis-Kanten
-  // (Bohrungen/Mäntel/Kanäle) und Wächter-/Schalen-Befunde bleiben bei den Stufen 1/2 unten.
+  // Zusammenbau wiederhergestellt. Höchstens MAX_FEATURE_RETRIES Neubauten je Stufe.
+  // Rückfall je BOHRUNG (ebenfalls vor den globalen Stufen): Bohrungen tragen ihre Fehler selbst —
+  // eine offene Kreis-Kante (Rand ohne Tag → nur vom Zylinder genutzt), ein Wächter-Befund an ihrem
+  // Zylinder oder Fasen-Kegel oder eine defekte LINIEN-Kante an einer Fläche mit Kreis-Rand. Dann wird
+  // NUR diese Bohrung gesperrt (blockedBores → bleibt facettiert), die übrigen bleiben analytisch.
+  // Mäntel/Kegel/Kanäle und Schalen-Befunde bleiben bei den Stufen 1/2 unten.
   const MAX_FEATURE_RETRIES = 4;
-  let featureRetries = 0, featuresDropped = 0;
+  let featureRetries = 0, featuresDropped = 0, boresDropped = 0;
   const badLineKeys = () => {
     const out = [];
     for (const [k, u] of edgeUse) { const t = u.fwd + u.rev; if (t === 1 || t > 2 || (t === 2 && u.fwd !== 1)) out.push(k); }
+    return out;
+  };
+  // defekte Kreis-Kanten (Randkante, non-manifold, Orientierungsfehler) — wie badLineKeys, aber Kreise
+  const badCircleKeys = () => {
+    const out = [];
+    for (const [rk, u] of circleUse) { const t = u.fwd + u.rev; if (t === 1 || t > 2 || (t === 2 && u.fwd !== 1)) out.push(rk); }
+    return out;
+  };
+  const badCircles = () => badCircleKeys().length;
+  // Bohrungen, die den Fehler verursacht haben: (1) eine defekte Kreis-Kante gehört zu ihnen,
+  // (2) der Wächter hat ihren Zylinder oder ihren Fasen-Kegel verworfen, (3) eine defekte LINIEN-Kante
+  // liegt an einer Fläche mit Kreis-Rand (die Mündung dieser Bohrung).
+  const boreCulprits = (a, bad) => {
+    const out = new Set();
+    const rimOwner = new Map();          // rimKey → boreById-Eintrag
+    for (const plan of finalPlans) {
+      if (!plan || !plan.entry) continue;
+      for (const rim of (plan.rims || [])) if (rim && rim.rimKey) rimOwner.set(rim.rimKey, plan.entry);
+      for (const cr of (plan.coneRims || [])) if (cr && cr.flatDesc && cr.flatDesc.rimKey) rimOwner.set(cr.flatDesc.rimKey, plan.entry);
+      if (plan.tip && plan.tip.rim && plan.tip.rim.rimKey) rimOwner.set(plan.tip.rim.rimKey, plan.entry);
+    }
+    if (!rimOwner.size) return out;
+    for (const rk of badCircleKeys()) { const e = rimOwner.get(rk); if (e) out.add(e); }
+    if (a && a.guardFailedPlans) for (const plan of a.guardFailedPlans) if (plan && plan.entry) out.add(plan.entry);
+    if (bad && bad.length) {
+      // defekte LINIEN-Kante an einer Fläche mit Kreis-Rand → die Bohrung, deren Mündung DIESER Rand
+      // trägt. Wichtig: der Rand muss die defekte Kante wirklich enthalten — eine Platte mit 3 Löchern
+      // hat ALLE drei Mündungen in EINER Deckfläche; sonst würde jede Bohrung der Platte verurteilt.
+      const badSet = new Set(bad.map((k) => String(k).split('#')[0]));
+      const loopHasBad = (L) => {
+        const n = L.length;
+        for (let i = 0; i < n; i++) if (badSet.has(edgeCanonKey(L[i], L[(i + 1) % n]))) return true;
+        return false;
+      };
+      a.faceKeys.forEach((ks, i) => {
+        if (!ks.some((k) => badSet.has(String(k).split('#')[0]))) return;
+        const src = a.faceSrc[i], fd = src && src.fd;
+        if (!fd) return;
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (!L || !L.circleRim) continue;
+          const e = rimOwner.get(L.circleRim.rimKey);
+          if (e && loopHasBad(L)) out.add(e);
+        }
+      });
+    }
+    return out;
+  };
+  // Defekte LINIEN-Kanten, die eine BOHRUNG verursacht hat: ihr Loop (die Mündung ohne circleRim-Tag)
+  // liegt auf dem Randkreis dieser Bohrung. Sie werden NICHT als Merkmals-Fehler gedeutet — sonst zöge
+  // der Merkmals-Rückfall ein Band mit, das die Mündung geschärft hat (und die ganze Bohrung mitnahm).
+  const boreExplainedEdges = (a, bad, bores) => {
+    const out = new Set();
+    if (!bores.size || !bad || !bad.length) return out;
+    const rims = [];
+    for (const plan of finalPlans) {
+      if (!plan || !plan.entry || !bores.has(plan.entry)) continue;
+      for (const rim of (plan.rims || [])) if (rim && rim.radius) rims.push(rim);
+      for (const cr of (plan.coneRims || [])) if (cr && cr.flatDesc && cr.flatDesc.radius) rims.push(cr.flatDesc);
+    }
+    if (!rims.length) return out;
+    const onRim = (p, rim) => {
+      const w = _sub3(p, rim.center), t = _dot3(w, rim.axis);
+      const rho = Math.hypot(w[0] - rim.axis[0] * t, w[1] - rim.axis[1] * t, w[2] - rim.axis[2] * t);
+      return Math.abs(rho - rim.radius) <= Math.max(0.15, 0.05 * rim.radius);
+    };
+    const badSet = new Set(bad.map((k) => String(k).split('#')[0]));
+    a.faceKeys.forEach((ks, i) => {
+      const hit = ks.filter((k) => badSet.has(String(k).split('#')[0]));
+      if (!hit.length) return;
+      const src = a.faceSrc[i], fd = src && src.fd;
+      if (!fd) return;
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (!L || L.circleRim || !L.length) continue;          // nur Loops OHNE Kreis-Tag (verdorbene Mündung)
+        const n = L.length, le = new Set();
+        for (let k = 0; k < n; k++) le.add(edgeCanonKey(L[k], L[(k + 1) % n]));
+        const badHere = hit.filter((k) => le.has(String(k).split('#')[0]));
+        if (!badHere.length) continue;
+        if (!rims.some((rim) => L.every((p) => onRim(p, rim)))) continue;
+        for (const k of badHere) out.add(k);
+      }
+    });
     return out;
   };
   const featureCulprits = (a, bad) => {
@@ -5567,21 +5674,35 @@ export function buildVolumeStepBrepV2(analysis) {
     runPipeline(withBores);
     let a = tracked(assembleCurrent());
     let np = DEFEATURE ? nonPlanarOps() : { n: 0, ops: new Set() };
-    for (let r = 0; DEFEATURE && r < MAX_FEATURE_RETRIES && (failed(a) || np.ops.size); r++) {
+    // Der Loop läuft jetzt auch ohne Defeaturing-Toggle (dann nur für Bohrungen).
+    for (let r = 0; r < MAX_FEATURE_RETRIES && (failed(a) || np.ops.size); r++) {
       const bad = failed(a) ? badLineKeys() : [];
+      // Fehlerlast des aktuellen Laufs: defekte LINIEN-Kanten + defekte Kreis-Kanten + Wächter-Befunde
+      const dA = failed(a) ? bad.length + badCircles() + a.report.orientationGuardFailures : 0;
+      const bores = withBores && failed(a) ? boreCulprits(a, bad) : new Set();
       const culprits = new Set(np.ops);
-      if (bad.length) for (const op of featureCulprits(a, bad)) culprits.add(op);
-      if (!culprits.size) break;
-      const savedBlocked = [...blockedGroups];
+      if (DEFEATURE && bad.length) {
+        // Kanten, die eine Bohrung verursacht hat, sind kein Merkmals-Fehler (s. boreExplainedEdges)
+        const explained = boreExplainedEdges(a, bad, bores);
+        for (const op of featureCulprits(a, bad.filter((k) => !explained.has(k)))) culprits.add(op);
+      }
+      if (!culprits.size && !bores.size) break;
+      const savedBlocked = [...blockedGroups], savedBores = [...blockedBores];
       for (const op of culprits) for (const g of op.groups) blockedGroups.add(g);
+      for (const e of bores) blockedBores.add(e);
       const saved = entities.slice(entMark), savedId = id;
       runPipeline(withBores);
       const b = tracked(assembleCurrent());
       featureRetries++;
-      const npB = nonPlanarOps(), badB = failed(b) ? badLineKeys().length : 0;
-      if ((!failed(b) || failed(a)) && badB + npB.n < bad.length + np.n) { a = b; np = npB; featuresDropped += culprits.size; continue; }
+      const npB = DEFEATURE ? nonPlanarOps() : { n: 0, ops: new Set() };
+      const dB = failed(b) ? badLineKeys().length + badCircles() + b.report.orientationGuardFailures : 0;
+      if ((!failed(b) || failed(a)) && dB + npB.n < dA + np.n) {
+        a = b; np = npB; featuresDropped += culprits.size + bores.size; boresDropped += bores.size; continue;
+      }
       blockedGroups.clear();
       for (const g of savedBlocked) blockedGroups.add(g);
+      blockedBores.clear();
+      for (const e of savedBores) blockedBores.add(e);
       entities.length = entMark;
       for (const e of saved) entities.push(e);
       id = savedId;
@@ -5644,6 +5765,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // Rückfall je Merkmal: Neubauten und gesperrte (facettiert belassene) Entrundungen über alle Stufen
   asm.report.featureRetries = featureRetries;
   asm.report.featuresDropped = fallbackStage === 2 ? 0 : featuresDropped;   // facettierte Basislinie: nichts übrig
+  asm.report.boresDropped = fallbackStage === 2 ? 0 : boresDropped;         // dito: Bohrungen, die facettiert bleiben
   const allFaceIds = asm.faceIds;
   const report = asm.report;
   if (allFaceIds.length < 2) return null;
