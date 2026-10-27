@@ -1183,6 +1183,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // herausgenommenen Wandflächen der Bohrung an faceDefs zurück.
   const CHAMFER_MAX = 3.0, CHAMFER_MIN = 0.04;
   let finalPlans = [];
+  // Diagnose je Bohrung: prim.id → Ergebnis/Grund ('ok:through', 'ok:blind-flat', 'ok:blind-tip',
+  // 'blind:<Gate>', 'clear'). Nur für die Fehlersuche (Report boreNotes) — ohne Einfluss auf den Export.
+  let boreNotes = new Map();
   let chamferZones = [];
   // Gruppen, deren Facetten eine Chamfer-Zone verdrängt hat (filterChamferZones) —
   // Beweismaterial für den Orientierungs-Wächter der Kegel-Flächen (assemble).
@@ -3192,12 +3195,163 @@ export function buildVolumeStepBrepV2(analysis) {
     const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
     if (rim0.rimKey === rim1.rimKey) return null;
     return {
-      plan: { prim: entry.prim, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center, coneRims: [] },
+      plan: { prim: entry.prim, entry, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center, coneRims: [] },
       wall: W, decks: [decks[0].loop, decks[1].loop],
     };
   };
-  // Alle passenden Bohrungen umwandeln → Set der umgewandelten Einträge
-  const convertSharpBores = () => {
+  // ---- BLINDLOCH (Sackloch) ----
+  // Ein Sackloch hat an der Wand genau ZWEI Rand-Ringe, aber nur EINER davon ist der komplette
+  // Innen-Loop einer ebenen Deckfläche (die Mündung). Der andere Ring ist der BODEN und hat zwei
+  // erlaubte Formen:
+  //   (a) FLACH: der komplette Außen-Loop genau EINER ebenen Fläche ohne weitere Innen-Loops
+  //       (die Boden-Scheibe) — sie wird zur Kreis-Fläche mit der Kreis-Kante des Bodens;
+  //   (b) SPITZE (Bohrspitze 118°/120°): ein Fächer konkaver Facetten, der in EINEM Punkt auf der
+  //       Achse endet — wird zum Kegel mit VERTEX_LOOP an der Spitze.
+  // Alles andere (runder Boden, Fase, unregelmäßiger Rand, zwei Mündungen = Durchgangsloch) bleibt
+  // facettiert. Die Gates sind dieselben wie beim scharfen Durchgangsloch (Ringe eben/auf dem Kreis/
+  // gleichmäßig, Wand ⟂ zur Achse und konkav, Wand auf dem Zylinder) — nur der zweite Rand ist der
+  // Boden statt einer zweiten Deckfläche.
+  const blindBorePlan = (entry, owners, fdsOfGroup, taken) => {
+    const fail = (why) => { boreNotes.set(entry.prim.id, 'blind:' + why); return null; };
+    const W = new Set();
+    for (const g of entry.groups) for (const fi of (fdsOfGroup.get(g) || [])) if (!taken.has(fi)) W.add(fi);
+    if (W.size < 3) return fail('wall');
+    // Rand der Wand: Kanten, die genau 1× in der Wand vorkommen — ihr Gegenüber ist genau EINE
+    // Fläche außerhalb der Wand (wie sharpBorePlan)
+    const cnt = new Map();
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim) return fail('wall');
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          const k = edgeKeyFn(a, b);
+          const e = cnt.get(k);
+          if (e) e.n++; else cnt.set(k, { n: 1, v0: a, v1: b });
+        }
+      }
+    }
+    const rimEdges = [], otherOf = new Map();
+    for (const [k, e] of cnt) {
+      if (e.n > 2) return fail('edges');
+      if (e.n === 2) continue;
+      const others = (owners.get(k) || []).filter((o) => !W.has(o.fi));
+      if (others.length !== 1 || taken.has(others[0].fi)) return fail('edges');
+      rimEdges.push({ v0: e.v0, v1: e.v1 });
+      otherOf.set(k, others[0]);
+    }
+    const rings = chainEdges(rimEdges);
+    if (rings.length !== 2 || rings[0].length + rings[1].length !== rimEdges.length) return fail('rings:' + rings.length);
+    // Je Ring: gehört er zu genau EINER Fläche/Loop (own)? Und ist er der komplette Innen-Loop
+    // einer ebenen Deckfläche (Mündung)? Genau EIN Ring darf Mündung sein — zwei = Durchgangsloch.
+    const ringInfo = rings.map((ring) => {
+      let own = null, single = true;
+      for (let i = 0; i < ring.length; i++) {
+        const o = otherOf.get(edgeKeyFn(ring[i], ring[(i + 1) % ring.length]));
+        if (!o || (own && (o.fi !== own.fi || o.loop !== own.loop))) { single = false; break; }
+        own = o;
+      }
+      const fd = (single && own) ? faceDefs[own.fi] : null;
+      const isDeck = !!(single && fd && fd.inner.includes(own.loop) && !own.loop.circleRim && loopEdgeCount(own.loop) === ring.length);
+      return { ring, own: single ? own : null, deck: isDeck ? { fi: own.fi, fd, loop: own.loop } : null };
+    });
+    const deckIdx = ringInfo.findIndex((ri) => ri.deck);
+    if (deckIdx < 0) return fail('nodeck');
+    if (ringInfo[1 - deckIdx].deck) return fail('through');   // zwei Mündungs-Ringe = Durchgangsloch
+    const deck = ringInfo[deckIdx].deck;
+    const deckRing = ringInfo[deckIdx].ring;
+    const bottomRing = ringInfo[1 - deckIdx].ring;
+    const bottomOwn = ringInfo[1 - deckIdx].own;
+    // Achse = Deck-Normale, vom Boden zur Mündung; beide Ränder müssen koaxial sein
+    const n = _norm3(deck.fd.normal);
+    const f1 = fitCircleInPlane(deckRing, n), f0 = fitCircleInPlane(bottomRing, n);
+    if (!f0 || !f1) return fail('fit');
+    const along = _dot3(_sub3(f1.center, f0.center), n);
+    const axis = along >= 0 ? n : [-n[0], -n[1], -n[2]];   // Achse: vom Boden zur Mündung
+    const H = Math.abs(along);
+    const R = (f0.radius + f1.radius) / 2;
+    const tol = Math.max(0.01, 0.002 * R);
+    if (Math.abs(f0.radius - f1.radius) > tol || !(H > tol)) return fail('radius');
+    const c0 = f0.center;
+    const c1 = [c0[0] + axis[0] * H, c0[1] + axis[1] * H, c0[2] + axis[2] * H];
+    if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return fail('coaxial');
+    if (!(_dot3(n, axis) > 0.9999)) return fail('deckSide');  // Deckfläche zeigt zur Mündung
+    const cyl = (p) => { const w = _sub3(p, c0), t = _dot3(w, axis); return { t, rho: Math.hypot(w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t), w }; };
+    // Ränder: eben (in ihrer Ebene), auf dem Kreis, fein genug und einmal ganz um die Achse
+    const ringAt = [0, H];
+    let maxSeg = 0;
+    for (let r = 0; r < 2; r++) {
+      const ring = r === 0 ? bottomRing : deckRing;
+      let turn = 0;
+      for (let i = 0; i < ring.length; i++) {
+        const a = cyl(ring[i]), b = cyl(ring[(i + 1) % ring.length]);
+        if (Math.abs(a.t - ringAt[r]) > tol || Math.abs(a.rho - R) > tol) return fail('ring');
+        const ra = _sub3(a.w, [axis[0] * a.t, axis[1] * a.t, axis[2] * a.t]);
+        const rb = _sub3(b.w, [axis[0] * b.t, axis[1] * b.t, axis[2] * b.t]);
+        const ang = Math.atan2(_dot3(_cross3(ra, rb), axis), _dot3(ra, rb));
+        if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return fail('ring');
+        turn += ang; maxSeg = Math.max(maxSeg, Math.abs(ang));
+      }
+      if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return fail('ring');
+      if (!ringAngleUniform(ring, c0, axis)) return fail('ring'); // D-Loch (Sehnen-Abflachung) → kein Zylinder
+    }
+    // Wand: alle Punkte auf dem Mantel zwischen den Rändern, Normalen ⟂ Achse und zur Achse hin
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      const nw = _norm3(fd.normal);
+      if (Math.abs(_dot3(nw, axis)) > SHARP_WALL_AXIS_COS) return fail('wall');
+      let cx = 0, cy = 0, cz = 0, np = 0;
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (const p of L) {
+          const q = cyl(p);
+          if (Math.abs(q.rho - R) > tol || q.t < -tol || q.t > H + tol) return fail('wall');
+          cx += p[0]; cy += p[1]; cz += p[2]; np++;
+        }
+      }
+      const q = cyl([cx / np, cy / np, cz / np]);
+      if (_dot3(nw, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) >= 0) return fail('wall'); // konvex → keine Bohrung
+    }
+    // Innenpunkte der Wandflächen (Original-Dreiecke) und Verdrillung wie beim Mantel (boreWallOk)
+    const wall = wallOfFaces(W);
+    if (!boreWallOk([{ center: c0, axis, radius: R, maxSeg }, { center: c1, axis, radius: R, maxSeg }], wall.loops, wall.pts, tol)) return fail('wall');
+    if (!circleOnDeck(c1, R, axis, deck.fd)) return fail('deckCircle');
+    const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
+    if (rim0.rimKey === rim1.rimKey) return fail('rimKey');
+    // (a) FLACHER BODEN: der Boden-Ring ist der komplette Außen-Loop genau EINER ebenen Fläche
+    if (bottomOwn) {
+      const fdB = faceDefs[bottomOwn.fi];
+      if (bottomOwn.loop === fdB.outer && fdB.inner.length === 0 && !bottomOwn.loop.circleRim &&
+          loopEdgeCount(bottomOwn.loop) === bottomRing.length && !W.has(bottomOwn.fi) && !taken.has(bottomOwn.fi) &&
+          _dot3(_norm3(fdB.normal), axis) >= 0.9999) {          // Boden zeigt zur Mündung
+        if (!circleOnDeck(c0, R, axis, fdB)) return fail('flat:circle');
+        return {
+          plan: { prim: entry.prim, entry, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center, coneRims: [], blind: 'flat' },
+          wall: W, decks: [fdB.outer, deck.loop], rims: [rim0, rim1],
+        };
+      }
+    }
+    // (b) BOHRSPITZE: der Boden ist ein Band konkaver Facetten, das in EINER Spitze auf der Achse endet
+    const band = coneBand(bottomRing, W, axis, c0, owners, taken, true);
+    if (!band || band.deck) return fail('tip:band');
+    const zAx = [-axis[0], -axis[1], -axis[2]];                  // von der Mündung zum Boden (Spitzenrichtung)
+    let Ht = 0, top = null;
+    for (const fi of band.W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) { const t = _dot3(_sub3(p, c0), zAx); if (t > Ht) { Ht = t; top = p; } } }
+    if (!top || !(Ht > tol)) return fail('tip:top');
+    const apex = [c0[0] + zAx[0] * Ht, c0[1] + zAx[1] * Ht, c0[2] + zAx[2] * Ht];
+    if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return fail('tip:apex');
+    if (!bandOnCone(band.W, c0, R, zAx, Ht, -R / Ht, tol, maxSeg, true)) return fail('tip:cone');
+    if (!wallSpanOk(band.W, c0, zAx, maxSeg, tol)) return fail('tip:cone');
+    const plan = {
+      prim: entry.prim, entry, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center, coneRims: [], blind: 'tip',
+      tip: { rim: rim0, apex, coneAxis: axis, semiAngle: Math.atan2(R, Ht), groups: band.groups, zone: { c0, zAx, H: Ht, R0: R, k: -R / Ht } },
+    };
+    return { plan, wall: new Set([...W, ...band.W]), decks: [deck.loop], rims: [rim1] };
+  };
+  // Alle passenden Bohrungen umwandeln → Set der umgewandelten Einträge.
+  // blindOnly=true: nur Sacklöcher (blindBorePlan) — der scharfe Durchgangs-Pfad bleibt unberührt
+  // (Toggle AUS: dort übernimmt der Bestandspfad attemptBore/matchBorePlans die Durchgangslöcher).
+  const convertSharpBores = (blindOnly = false) => {
     const done = new Set();
     if (!boreById.size) return done;
     const owners = new Map();       // Kante → [{ fi, loop }]
@@ -3218,12 +3372,17 @@ export function buildVolumeStepBrepV2(analysis) {
     const drop = new Set();
     for (const entry of boreById.values()) {
       let res = null;
-      try { res = sharpBorePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
-      if (!res || !rimsClear(res.plan.rims, res.decks)) continue;
+      if (!blindOnly) { try { res = sharpBorePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; } }
+      if (!res) {
+        try { res = blindBorePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
+      }
+      if (!res) continue;
+      const rims = res.rims || res.plan.rims;
+      if (!rimsClear(rims, res.decks)) { boreNotes.set(entry.prim.id, 'clear'); continue; }
       for (const fi of res.wall) drop.add(fi);
-      res.decks[0].circleRim = res.plan.rims[0];
-      res.decks[1].circleRim = res.plan.rims[1];
+      res.decks.forEach((L, i) => { L.circleRim = rims[i]; });
       finalPlans.push(res.plan);
+      boreNotes.set(entry.prim.id, res.plan.blind ? 'ok:blind-' + res.plan.blind : 'ok:through');
       done.add(entry);
     }
     if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
@@ -3595,7 +3754,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // die übrigen Randkanten bilden keinen (Spitze) oder genau EINEN weiteren Ring, und der muss ein
   // KOMPLETTER Loop (außen oder innen) genau einer Fläche sein (Deckfläche).
   // → { W:Set<fi>, deck: { fi, fd, loop, ring } | null, groups } | null
-  const coneBand = (ring, stop, n0, cs, owners, taken) => {
+  // concave=true: das Band ist die KONKAVE Innenwand (Bohrspitze) — die Facetten-Normalen zeigen dann
+  // ZUR Achse statt von ihr weg (Spiegelbild der konvexen Kegel-Mäntel).
+  const coneBand = (ring, stop, n0, cs, owners, taken, concave = false) => {
     const W = new Set(), startKeys = new Set();
     for (let i = 0; i < ring.length; i++) {
       const a = ring[i], b = ring[(i + 1) % ring.length];
@@ -3620,9 +3781,9 @@ export function buildVolumeStepBrepV2(analysis) {
       if (ok !== undefined) return ok;
       const fd = faceDefs[fi], n = _norm3(fd.normal);
       ok = !fd.outer.circleRim && !fd.inner.some((L) => L.circleRim) && Math.abs(_dot3(n, n0) - a0) <= tiltTol;
-      if (ok) { // konvex: Normale zeigt von der Achse weg
+      if (ok) { // konvex: Normale zeigt von der Achse weg (konkav: zur Achse hin)
         const w = _sub3(faceCentroid(fd), cs), t = _dot3(w, n0);
-        ok = _dot3(n, [w[0] - n0[0] * t, w[1] - n0[1] * t, w[2] - n0[2] * t]) > 0;
+        ok = (concave ? -1 : 1) * _dot3(n, [w[0] - n0[0] * t, w[1] - n0[1] * t, w[2] - n0[2] * t]) > 0;
       }
       fitMemo.set(fi, ok);
       return ok;
@@ -3689,8 +3850,9 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   // Liegt das Band auf dem Kegel ρ(t) = R0 + k·t (t entlang zAx ab c0, 0 ≤ t ≤ H)? Jeder Punkt
   // innerhalb tol, jede Facetten-Normale nahe der Kegel-Normale (e_r − k·zAx)/√(1+k²) — radial nach
-  // außen, zur schmalen Seite gekippt — an ihrem Schwerpunkt.
-  const bandOnCone = (W, c0, R0, zAx, H, k, tol, maxSeg) => {
+  // außen, zur schmalen Seite gekippt — an ihrem Schwerpunkt. concave=true: das Band ist die
+  // INNENwand (Bohrspitze) → die Facetten-Normalen zeigen zur Achse (Spiegelbild).
+  const bandOnCone = (W, c0, R0, zAx, H, k, tol, maxSeg, concave = false) => {
     const cn = 1 / Math.sqrt(1 + k * k), cs = Math.cos(maxSeg / 2);
     // dr(p) = Achsabstand − Kegelradius auf Höhe t (null außerhalb 0 … H)
     const dr = (p) => {
@@ -3708,7 +3870,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const w = _sub3(faceCentroid(fd), c0), t = _dot3(w, zAx);
       const er = _norm3([w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t]);
       const nc = [(er[0] - k * zAx[0]) * cn, (er[1] - k * zAx[1]) * cn, (er[2] - k * zAx[2]) * cn];
-      if (!(_dot3(_norm3(fd.normal), nc) >= CONE_NORMAL_COS)) return false;
+      if (!((concave ? -1 : 1) * _dot3(_norm3(fd.normal), nc) >= CONE_NORMAL_COS)) return false;
     }
     return true;
   };
@@ -3819,6 +3981,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen, Mäntel, Kegel UND Kanäle neu bauen.
   const runPipeline = (withBores) => {
     finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set();
+    boreNotes = new Map();
     preSplitStats = null;
     filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; featureOps = [];
     if (!DEFEATURE) {
@@ -3836,7 +3999,9 @@ export function buildVolumeStepBrepV2(analysis) {
       }
       faceDefs = buildFaceDefs(boreSkip);
       matchBorePlans(tentative, (plan) => { for (const g of plan.groups) for (const fd of extractGroupFaces(g)) { fd.group = g; faceDefs.push(fd); } });
-      if (withBores) { planTubes(); convertMantles(); convertMantleCones(); }
+      // Sacklöcher auch OHNE Toggle: der scharfe Pfad (blindOnly) ersetzt die Wand durch Zylinder +
+      // Boden; die Durchgangslöcher behalten hier den Bestandspfad (attemptBore/matchBorePlans).
+      if (withBores) { convertSharpBores(true); planTubes(); convertMantles(); convertMantleCones(); }
       return;
     }
     // Toggle AN — ERST entrunden (v1, v2, v2b), DANN Bohrungen. Die Bohrungs-Gruppen bleiben dafür
@@ -4460,6 +4625,39 @@ export function buildVolumeStepBrepV2(analysis) {
         guardMs += nowMs() - tg;
       }
 
+      // Bohrspitze (BLINDLOCH, plan.tip): Kegel vom Boden-Randkreis zur Spitze auf der Achse. Die
+      // STEP-Kegelnormale zeigt radial von der Achse weg (zur schmalen Seite gekippt) — die Bohrung
+      // ist konkav → gleiches same_sense wie die Lochwand (.F.): die effektive Normale zeigt in den
+      // Hohlraum. Der Boden-Randkreis wird vom Zylinder GEGENLÄUFIG genutzt (je Kreis 1× vor/1×
+      // zurück), die Spitze ist ein VERTEX_LOOP (nur ihr Punkt, keine Kante).
+      if (plan.tip) {
+        const tp = plan.tip, lg = tp.rim, cax = tp.coneAxis;
+        const surf = addConicalSurface(addAxis2Placement3D(lg.center, cax, lg.refDir), lg.radius, tp.semiAngle);
+        const ce = getOrCreateCircleEdge(lg.rimKey, lg);
+        const fT = _dot3(lg.axis, cax) > 0;    // konkav: gegenläufig zur Zylinder-Nutzung desselben Kreises
+        useCircle(lg.rimKey, fT);
+        const bounds = [addFaceOuterBound(addEdgeLoop([addOrientedEdge(ce.ecId, fT)]))];
+        const vl = id++;
+        entities.push(`#${vl}=VERTEX_LOOP('',#${getVertex(tp.apex, edgeScope ? edgeScope.get(`c:${lg.rimKey}`) || '' : '').vtxId});`);
+        bounds.push(addFaceBound(vl));
+        emitFace(addAdvancedFace(bounds, surf, ssBore),
+          { band: [lg, { center: tp.apex, radius: 0, axis: lg.axis, refDir: lg.refDir }], sgn: ssBore ? 1 : -1, key: tp });
+        { // Wächter: (a) die Kegel-Facetten gegen die emittierte Kegel-Orientierung, (b) Umlaufsinn des Bodens
+          const tg = nowMs();
+          const nAt = coneNormalAt(lg.center, cax, tp.semiAngle, ssBore ? 1 : -1);
+          const z = tp.zone;
+          const onCone = (p) => {
+            const w0 = _sub3(p, z.c0), t = _dot3(w0, z.zAx);
+            if (t < -0.15 || t > z.H + 0.15) return false;
+            return Math.abs(Math.hypot(w0[0] - z.zAx[0] * t, w0[1] - z.zAx[1] * t, w0[2] - z.zAx[2] * t) - (z.R0 + z.k * t)) <= 0.15;
+          };
+          const mean = guardScan(tp.groups, onCone, nAt);
+          const rimLoops = [{ geom: lg, fwd: fT, d: _sub3(tp.apex, lg.center) }];
+          if ((mean !== null && mean < 0) || !loopSenseOk(rimLoops, nAt)) guardFailures++;
+          guardMs += nowMs() - tg;
+        }
+      }
+
       // Chamfer-Kegel (Fase): überbrückt Rand-Kreis R@z1 (mit Zylinder geteilt) und Flach-Kreis
       // R2@z2 (mit der flachen Fläche geteilt). Die STEP-Kegelnormale zeigt ins Material → same_sense
       // .F.; coneAxis zeigt vom Rand-Kreis zum Flach-Kreis. Fläche links vom Rand: Rand-Kreis im
@@ -4674,6 +4872,7 @@ export function buildVolumeStepBrepV2(analysis) {
         boundaryEdges: bE, nonManifoldEdges: nmE, orientationDefects: oD,
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
+        boresBlind: plans.filter((p) => p.blind).length,        // davon Sacklöcher (flacher Boden / Spitze)
         mantlesConverted: mantlesArg.length,
         mantleConesConverted: mantleConesArg.filter((c) => !c.chamfer).length,   // Kegel-Mäntel
         mantleChamfersConverted: mantleConesArg.filter((c) => c.chamfer).length,  // Fasen/Kegelspitzen an Zylinder-Mänteln
@@ -5644,6 +5843,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // Rückfall je Merkmal: Neubauten und gesperrte (facettiert belassene) Entrundungen über alle Stufen
   asm.report.featureRetries = featureRetries;
   asm.report.featuresDropped = fallbackStage === 2 ? 0 : featuresDropped;   // facettierte Basislinie: nichts übrig
+  asm.report.boreNotes = [...boreNotes].map(([id, why]) => ({ id, why }));   // Diagnose je Bohrung
   const allFaceIds = asm.faceIds;
   const report = asm.report;
   if (allFaceIds.length < 2) return null;
