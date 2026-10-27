@@ -14,6 +14,20 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=3';
 
+// Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
+// nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
+// Punkt → mit dem früheren Pauschalwert 0.01 mm verwarf CST am Kabelhalter die Deckfläche (962 ihrer
+// Randkanten < 0.01 mm). 1e-4 mm:
+//   - größer als die bekannten Rest-Abweichungen (Rand↔Fläche ≤ 4.7e-5 mm, facettierte Rundungen
+//     nach enforcePlanarity; 6 Nachkommastellen ≙ 5e-7) und genau die Schranke, die
+//     tests/step-strict.mjs für Punkt↔Fläche/Kurve erzwingt — der Exporter garantiert also, was er
+//     deklariert;
+//   - deutlich kleiner als jede Kante, die ein Drucker abbildet: 46× unter der kürzesten Kante
+//     eines unbereinigten Real-Netzes (Kabelhalter 0.0046 mm) und 200× unter der Mindest-
+//     Detailgröße der Netz-Bereinigung (mesh-clean.js, Standard 0.02 mm);
+//   - gleich dem Punkt-Raster des Region-Growing (Schlüssel auf 1e-4 mm).
+export const STEP_UNCERTAINTY_MM = '1.E-04';
+
 export function buildOutlinesDxf(outlines) {
   const lines = [];
   const planeOrder = ['XY', 'YZ', 'ZX'];
@@ -5092,7 +5106,7 @@ export function buildVolumeStepBrepV2(analysis) {
   const solUnitId = id++;
   entities.push(`#${solUnitId}=( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );`);
   const uncId = id++;
-  entities.push(`#${uncId}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.01),#${lenUnitId},'distance_accuracy_value','confusion accuracy');`);
+  entities.push(`#${uncId}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(${STEP_UNCERTAINTY_MM}),#${lenUnitId},'distance_accuracy_value','confusion accuracy');`);
   const ctxId = id++;
   entities.push(`#${ctxId}=( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${uncId})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId},#${angUnitId},#${solUnitId})) REPRESENTATION_CONTEXT('','3D') );`);
 
@@ -5317,7 +5331,7 @@ export function buildVolumeStepTriangles(analysis) {
   const solUnitId = id++;
   entities.push(`#${solUnitId}=( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );`);
   const uncId = id++;
-  entities.push(`#${uncId}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.01),#${lenUnitId},'distance_accuracy_value','confusion accuracy');`);
+  entities.push(`#${uncId}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(${STEP_UNCERTAINTY_MM}),#${lenUnitId},'distance_accuracy_value','confusion accuracy');`);
   const ctxId = id++;
   entities.push(`#${ctxId}=( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${uncId})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId},#${angUnitId},#${solUnitId})) REPRESENTATION_CONTEXT('','3D') );`);
   const shapeRepId = id++;
