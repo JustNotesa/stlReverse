@@ -2477,6 +2477,7 @@ export function buildVolumeStepBrepV2(analysis) {
       }
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) <= 0) return null; // konkav → Bohrung, kein Mantel
+      if (!srcPointsOk(fd, (p) => { const s = cyl(p); return s.rho > R + tol || s.rho < R * Math.cos(maxSeg / 2) - tol || s.t < -tol || s.t > H + tol; })) return null;
     }
     if (!wallSpanOk(W, c0, axis, maxSeg, tol)) return null;            // verdrillte Wand (Hyperboloid)
     const rims = [mkCircleDesc(c0, R, axis), mkCircleDesc(c1, R, axis)];
@@ -2498,7 +2499,7 @@ export function buildVolumeStepBrepV2(analysis) {
         if (!top || !(Ha > tol)) return null;
         const apex = [cr[0] + out[0] * Ha, cr[1] + out[1] * Ha, cr[2] + out[2] * Ha];
         if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
-        if (!bandOnCone(e.band.W, cr, R, out, Ha, -R / Ha, tol) || !wallSpanOk(e.band.W, cr, axis, maxSeg, tol)) return null;
+        if (!bandOnCone(e.band.W, cr, R, out, Ha, -R / Ha, tol, maxSeg) || !wallSpanOk(e.band.W, cr, axis, maxSeg, tol)) return null;
         cones.push({
           large: rims[r], small: null, apex, coneAxis: [-out[0], -out[1], -out[2]],
           semiAngle: Math.atan2(R, Ha), groups: e.band.groups, zone: { c0: cr, zAx: out, H: Ha, R0: R, k: -R / Ha }, chamfer: true,
@@ -2514,7 +2515,8 @@ export function buildVolumeStepBrepV2(analysis) {
       const cd = [cr[0] + out[0] * Hc, cr[1] + out[1] * Hc, cr[2] + out[2] * Hc];
       if (Math.hypot(fdk.center[0] - cd[0], fdk.center[1] - cd[1], fdk.center[2] - cd[2]) > tolC) return null; // koaxial
       const k = (Rd - R) / Hc;
-      if (!bandOnCone(e.band.W, cr, R, out, Hc, k, tolC) || !wallSpanOk(e.band.W, cr, axis, Math.max(maxSeg, fdk.maxSeg), tolC)) return null;
+      const segC = Math.max(maxSeg, fdk.maxSeg);
+      if (!bandOnCone(e.band.W, cr, R, out, Hc, k, tolC, segC) || !wallSpanOk(e.band.W, cr, axis, segC, tolC)) return null;
       if (!circleOnDeck(cd, Rd, axis, e.deck.fd)) return null;
       const deckRim = mkCircleDesc(cd, Rd, axis);
       if (deckRim.rimKey === rims[r].rimKey || deckRim.rimKey === rims[1 - r].rimKey) return null;
@@ -2656,6 +2658,17 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!ringAngleUniform(ring, f.center, n)) return null;
     return { ...f, maxSeg };
   };
+  // Innenpunkte einer Wand-Fläche: das Region-Growing fasst Facetten bis 0.05 mm Unebenheit zusammen,
+  // Punkte im Inneren einer Fläche stehen in keinem Loop (eine 0.024 mm tiefe Delle mitten in der
+  // Facette einer Welle R10 blieb so unsichtbar). Darum zusätzlich die Ecken ihrer Original-Dreiecke
+  // (fd.src, falls vorhanden) prüfen — sie dürfen zwischen Sehnen-Polygon und Mantel liegen:
+  // ρ ∈ [ρ_Mantel·cos(maxSeg/2) − tol, ρ_Mantel + tol]. off(p) = true → Punkt außerhalb.
+  const srcPointsOk = (fd, off) => {
+    const s = fd.src;
+    if (!s || !s.verts || !s.tris) return true;
+    for (const t of s.tris) for (let j = 0; j < 3; j++) if (off(s.verts[t * 3 + j])) return false;
+    return true;
+  };
   // Verdrillungs-Schutz (Wand eines Zylinders/Kegels): Punkte auf dem Mantel allein reichen nicht —
   // ist der obere Rand gegen den unteren verdreht und die Wand verbindet i ↔ i, liegen alle Punkte
   // auf den Randkreisen, die Facetten aber auf einem Hyperboloid (Taille bis R·(1 − cos(φ/2)) innen;
@@ -2787,17 +2800,21 @@ export function buildVolumeStepBrepV2(analysis) {
   // Liegt das Band auf dem Kegel ρ(t) = R0 + k·t (t entlang zAx ab c0, 0 ≤ t ≤ H)? Jeder Punkt
   // innerhalb tol, jede Facetten-Normale nahe der Kegel-Normale (e_r − k·zAx)/√(1+k²) — radial nach
   // außen, zur schmalen Seite gekippt — an ihrem Schwerpunkt.
-  const bandOnCone = (W, c0, R0, zAx, H, k, tol) => {
-    const cn = 1 / Math.sqrt(1 + k * k);
+  const bandOnCone = (W, c0, R0, zAx, H, k, tol, maxSeg) => {
+    const cn = 1 / Math.sqrt(1 + k * k), cs = Math.cos(maxSeg / 2);
+    // dr(p) = Achsabstand − Kegelradius auf Höhe t (null außerhalb 0 … H)
+    const dr = (p) => {
+      const w = _sub3(p, c0), t = _dot3(w, zAx);
+      if (t < -tol || t > H + tol) return null;
+      const rc = R0 + k * t;
+      return { d: Math.hypot(w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t) - rc, rc };
+    };
+    const offLoop = (p) => { const q = dr(p); return !q || Math.abs(q.d) > tol; };
+    const offSrc = (p) => { const q = dr(p); return !q || q.d > tol || q.d < -q.rc * (1 - cs) - tol; };
     for (const fi of W) {
       const fd = faceDefs[fi];
-      for (const L of [fd.outer, ...fd.inner]) {
-        for (const p of L) {
-          const w = _sub3(p, c0), t = _dot3(w, zAx);
-          if (t < -tol || t > H + tol) return false;
-          if (Math.abs(Math.hypot(w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t) - (R0 + k * t)) > tol) return false;
-        }
-      }
+      for (const L of [fd.outer, ...fd.inner]) for (const p of L) if (offLoop(p)) return false;
+      if (!srcPointsOk(fd, offSrc)) return false;
       const w = _sub3(faceCentroid(fd), c0), t = _dot3(w, zAx);
       const er = _norm3([w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t]);
       const nc = [(er[0] - k * zAx[0]) * cn, (er[1] - k * zAx[1]) * cn, (er[2] - k * zAx[2]) * cn];
@@ -2826,8 +2843,9 @@ export function buildVolumeStepBrepV2(analysis) {
       if (!(H > tol) || !(Math.abs(R1 - R0) > tol)) return null;          // flach bzw. Zylinder
       const c1 = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
       if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return null; // koaxial
-      if (!bandOnCone(W, c0, R0, zAx, H, (R1 - R0) / H, tol)) return null;
-      if (!wallSpanOk(W, c0, zAx, Math.max(seed.maxSeg, f1.maxSeg), tol)) return null;  // verdrillte Wand
+      const seg = Math.max(seed.maxSeg, f1.maxSeg);
+      if (!bandOnCone(W, c0, R0, zAx, H, (R1 - R0) / H, tol, seg)) return null;
+      if (!wallSpanOk(W, c0, zAx, seg, tol)) return null;                 // verdrillte Wand
       if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0]) || !circleOnDeck(c1, R1, zAx, d1.fd)) return null;
       const rim0 = mkCircleDesc(c0, R0, zAx), rim1 = mkCircleDesc(c1, R1, zAx);
       if (rim0.rimKey === rim1.rimKey) return null;
@@ -2854,7 +2872,7 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!top || !(H > tol)) return null;
     const apex = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
     if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
-    if (!bandOnCone(W, c0, R0, zAx, H, -R0 / H, tol) || !wallSpanOk(W, c0, zAx, seed.maxSeg, tol)) return null;
+    if (!bandOnCone(W, c0, R0, zAx, H, -R0 / H, tol, seed.maxSeg) || !wallSpanOk(W, c0, zAx, seed.maxSeg, tol)) return null;
     if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0])) return null;
     const rim0 = mkCircleDesc(c0, R0, zAx);
     return {
