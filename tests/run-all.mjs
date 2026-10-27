@@ -14,6 +14,8 @@
 //                                             alle Samples Toggle AN und AUS
 //   orient       orientation-guard.mjs      — Orientierungs-Wächter: kein Fehlalarm, Verdrehungen
 //                                             gefangen, sauberer Rückfall
+//   schalen      shell-regression.mjs       — Hohlräume, invertierte Netze, Finnen, berührende Körper,
+//                                             offene Fremdteile, Freigang der Kreis-Umwandlung
 //
 // Jede Suite läuft als eigener Prozess (Ausgabe durchgereicht); es laufen ALLE,
 // auch wenn eine scheitert — am Ende Zusammenfassung mit Laufzeiten und
@@ -37,6 +39,7 @@ const SUITES = [
   { name: 'collinear',   args: ['tests/collinear-regression.mjs'] },
   { name: 'strict',      args: ['tests/step-strict.mjs'] },
   { name: 'orient',      args: ['tests/orientation-guard.mjs'] },
+  { name: 'schalen',     args: ['tests/shell-regression.mjs'] },
 ];
 
 const results = [];
