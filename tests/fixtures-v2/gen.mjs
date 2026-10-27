@@ -325,6 +325,19 @@ export function buildMesh(body) {
     for (const oi of outerIdx) for (const end of ['top', 'bottom']) caps.push({ up: end === 'top', outer: { c: oi, end }, holes: holeIdx.map((c) => ({ c, end })) });
   }
   for (const cap of caps) {
+    // Kegelspitze (Bohrspitze): statt Deckfläche ein Fächer vom Randkreis zur Apex
+    // (apexZ = Höhe der Apex). Die Normale zeigt wie bei den übrigen Deckflächen nach `cap.up`.
+    if (typeof cap.apexZ === 'number') {
+      const ring = ringAt(cap.outer), n = ring.length;
+      const prof = body.columns[cap.outer.c].profile;
+      const cx = prof.reduce((s, p) => s + p[0], 0) / prof.length, cy = prof.reduce((s, p) => s + p[1], 0) / prof.length;
+      const apex = [cx, cy, cap.apexZ];
+      for (let i = 0; i < n; i++) {
+        const a = ring[i], b = ring[(i + 1) % n];
+        tris.push(cap.up ? [a, b, apex] : [a, apex, b]);
+      }
+      continue;
+    }
     const outer = ringAt(cap.outer), holes = (cap.holes || []).map(ringAt);
     for (const [a, b, c] of triangulateWithHoles(outer, holes)) tris.push(cap.up ? [a, b, c] : [a, c, b]);
   }
@@ -409,6 +422,32 @@ export const bodyVolume = (body) => meshVolume(buildMesh(body));
 // Ziel, Bohrungs-Chamfer-Pfad = zulässig) siehe `boreChamfer`.
 const R = (r, N = 8) => ({ kind: 'round', r, N });
 const plate = (profile, H, cap, extra = {}) => ({ name: 'aussen', profile, z0: 0, z1: H, bottom: cap, top: cap, ...extra });
+// Sackloch-Körper: Platte W×D×H (scharf) mit Löchern entlang Z. Je Loch:
+// { x, y, R, seg, z0, z1?, kind: 'flat'|'tip'|'through', tipDeg?, bottom?, top? }
+//   z0 > 0 → Sackloch: eigener Boden bei z0 (flache Scheibe oder Kegelspitze mit Apex darunter);
+//   z0 = 0 → Durchgangsloch (Loch in beiden Deckflächen, kein eigener Boden).
+const blindPlate = (holes, W = 40, D = 30, H = 10, extra = {}) => {
+  const columns = [{ name: 'platte', profile: rectProfile(0, 0, W, D), z0: 0, z1: H, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } }];
+  const topHoles = [], botHoles = [], caps = [];
+  holes.forEach((h, k) => {
+    const c = columns.length;
+    columns.push({
+      name: h.name || 'loch' + (k + 1),
+      profile: circleProfile(h.x, h.y, h.R, h.seg, true),
+      z0: h.z0, z1: h.z1 ?? H,
+      bottom: h.bottom || { kind: 'sharp' }, top: h.top || { kind: 'sharp' },
+    });
+    topHoles.push({ c, end: 'top' });
+    if (h.z0 > 0) {
+      const cap = { up: true, outer: { c, end: 'bottom', rev: true } };   // Lochboden: Material liegt darunter
+      if (h.kind === 'tip') cap.apexZ = h.z0 - h.R / Math.tan(h.tipDeg / 2 * Math.PI / 180);
+      caps.push(cap);
+    } else botHoles.push({ c, end: 'bottom' });
+  });
+  caps.push({ up: true, outer: { c: 0, end: 'top' }, holes: topHoles });
+  caps.push({ up: false, outer: { c: 0, end: 'bottom' }, holes: botHoles });
+  return { columns, caps, ...extra };
+};
 
 export const BODIES = [
   {
@@ -944,6 +983,67 @@ export const BODIES = [
     ],
     expect: { mode: 'sharp', bores: 1 },
     countersinkBoth: [{ col: 1, R: 2.25, seg: 48, bottom: { depth: 0.5, ang: 90 }, top: { depth: 1, ang: 90 } }],
+  },
+  // ── Sacklöcher (blind holes): die Bohrung endet im Material — der Export muss daraus einen
+  //    Zylinder + flache Ebene (Lochboden) bzw. + Kegel (Bohrspitze) machen ──
+  {
+    id: 's1', extra: true, file: 'v2_x_sackloch_flach',
+    desc: 'Platte 40×30×10 (scharf) + Sackloch R4 (32 Seg.) von oben, Tiefe 6 (Lochboden z=4), flach',
+    ...blindPlate([{ x: 20, y: 15, R: 4, seg: 32, z0: 4, kind: 'flat' }]),
+    expect: { mode: 'sharp', bores: 1 },
+    holes: [{ col: 1, R: 4, seg: 32, kind: 'flat' }],
+  },
+  {
+    id: 's2', extra: true, file: 'v2_x_sackloch_spitze',
+    desc: 'wie (s1), aber mit 118°-Bohrspitze (Kegel mit Apex unter dem Zylinder)',
+    ...blindPlate([{ x: 20, y: 15, R: 4, seg: 32, z0: 4, kind: 'tip', tipDeg: 118 }]),
+    expect: { mode: 'sharp', bores: 1 },
+    holes: [{ col: 1, R: 4, seg: 32, kind: 'tip', tipDeg: 118 }],
+  },
+  {
+    id: 's3', extra: true, file: 'v2_x_sackloch_spitze120_N16',
+    desc: 'wie (s2), 120°-Spitze, R3 (16 Seg.)',
+    ...blindPlate([{ x: 20, y: 15, R: 3, seg: 16, z0: 5, kind: 'tip', tipDeg: 120 }]),
+    expect: { mode: 'sharp', bores: 1 },
+    holes: [{ col: 1, R: 3, seg: 16, kind: 'tip', tipDeg: 120 }],
+  },
+  {
+    id: 's4', extra: true, file: 'v2_x_sackloch_rund',
+    desc: 'wie (s1), aber mit konkav verrundetem Lochboden (r=1, N=8) — v2 soll die Rundung schärfen',
+    ...blindPlate([{ x: 20, y: 15, R: 4, seg: 32, z0: 4, kind: 'flat', bottom: { kind: 'concave', r: 1, N: 8 } }]),
+    expect: { mode: 'sharp', bands: 1 },
+    holes: [{ col: 1, R: 4, seg: 32, kind: 'flat' }],
+  },
+  {
+    id: 's5', extra: true, file: 'v2_x_sackloch_flach_gedreht',
+    desc: 'wie (s1), gedreht (17°/31°/47°) und verschoben',
+    ...blindPlate([{ x: 20, y: 15, R: 4, seg: 32, z0: 4, kind: 'flat' }]),
+    transform: { rot: [17, 31, 47], t: [5, -3, 2] },
+    expect: { mode: 'sharp', bores: 1 },
+    holes: [{ col: 1, R: 4, seg: 32, kind: 'flat' }],
+  },
+  {
+    id: 's6', extra: true, file: 'v2_x_sackloch_spitze_gedreht',
+    desc: 'wie (s2), gedreht (−23°/11°/67°) und verschoben',
+    ...blindPlate([{ x: 20, y: 15, R: 4, seg: 32, z0: 4, kind: 'tip', tipDeg: 118 }]),
+    transform: { rot: [-23, 11, 67], t: [12.5, -7.25, 3] },
+    expect: { mode: 'sharp', bores: 1 },
+    holes: [{ col: 1, R: 4, seg: 32, kind: 'tip', tipDeg: 118 }],
+  },
+  {
+    id: 's7', extra: true, file: 'v2_x_sackloch_mix',
+    desc: 'Platte 60×30×10 (scharf) + Sackloch flach (R4, z0=4) + Sackloch mit 118°-Spitze (R3, z0=5) + Durchgangsloch (R2.5)',
+    ...blindPlate([
+      { x: 12, y: 15, R: 4, seg: 32, z0: 4, kind: 'flat' },
+      { x: 30, y: 15, R: 3, seg: 32, z0: 5, kind: 'tip', tipDeg: 118 },
+      { x: 48, y: 15, R: 2.5, seg: 32, z0: 0, kind: 'through' },
+    ], 60, 30, 10),
+    expect: { mode: 'sharp', bores: 3 },
+    holes: [
+      { col: 1, R: 4, seg: 32, kind: 'flat' },
+      { col: 2, R: 3, seg: 32, kind: 'tip', tipDeg: 118 },
+      { col: 3, R: 2.5, seg: 32, kind: 'through' },
+    ],
   },
 ];
 
