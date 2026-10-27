@@ -98,9 +98,11 @@ const occtVolumeX = (step) => {
 const count = (s, re) => (s.match(re) || []).length;
 
 let failures = 0;
+const failedChecks = [];   // gesammelt für den Abschluss-Block (der CI-Log zeigt sonst nur die letzten 60 Zeilen)
+let curCase = '';
 const check = (label, cond) => {
   console.log(`    ${cond ? 'PASS' : 'FAIL'}  ${label}`);
-  if (!cond) failures++;
+  if (!cond) { failures++; failedChecks.push(`${curCase} → ${label}`); }
 };
 
 // Einen Fall exportieren und prüfen. want: { mantles, mantleCones, bores, cyl, cone, faces, wt, vol, volTol, volX,
@@ -108,16 +110,18 @@ const check = (label, cond) => {
 // sauber sein; volX: Volumen per Richardson-Extrapolation, s. Kopf)
 function runCase(name, groups, defeature, want) {
   const res = quiet(() => buildVolumeStepBrepV2({ normalGroups: groups, defeature }));
+  curCase = `${name} [${defeature ? 'AN' : 'AUS'}]`;
   console.log(`  ${name} [${defeature ? 'AN' : 'AUS'}]`);
   if (!res) { check('Export liefert ein Ergebnis', false); return; }
   const r = res.report;
   const cyl = count(res.step, /CYLINDRICAL_SURFACE\(/g), cone = count(res.step, /CONICAL_SURFACE\(/g);
   const st = checkStepStrict(res.step);
   const v = want.volX ? occtVolumeX(res.step) : occtVolume(res.step);
-  console.log(`      faces=${r.faceCount} wt=${r.watertight} mantles=${r.mantlesConverted} kegel=${r.mantleConesConverted} fasen=${r.mantleChamfersConverted} bores=${r.boresConverted} cyl=${cyl} cone=${cone} V(occt${want.volX ? ', extrapoliert' : ''})=${v.toFixed(4)} strict=${st.violations.length} fallback=${r.fallbackStage}/${r.stage1Tried}`);
+  console.log(`      faces=${r.faceCount} wt=${r.watertight} mantles=${r.mantlesConverted} kegel=${r.mantleConesConverted} fasen=${r.mantleChamfersConverted} bores=${r.boresConverted} cyl=${cyl} cone=${cone} V(occt${want.volX ? ', extrapoliert' : ''})=${v.toFixed(4)} strict=${st.violations.length} fallback=${r.fallbackStage}/${r.stage1Tried} kegelbänder=${r.coneBandsDefeatured ?? 0}`);
   if ('mantles' in want) check(`Mäntel umgewandelt = ${want.mantles}`, r.mantlesConverted === want.mantles);
   if ('mantleCones' in want) check(`Kegel-Mäntel umgewandelt = ${want.mantleCones}`, r.mantleConesConverted === want.mantleCones);
   if ('mantleChamfers' in want) check(`Mantel-Fasen umgewandelt = ${want.mantleChamfers}`, r.mantleChamfersConverted === want.mantleChamfers);
+  if ('coneBands' in want) check(`Kegel-Bänder geschärft = ${want.coneBands}`, (r.coneBandsDefeatured ?? 0) === want.coneBands);
   if ('bores' in want) check(`Bohrungen umgewandelt = ${want.bores}`, r.boresConverted === want.bores);
   if ('cyl' in want) check(`CYLINDRICAL_SURFACE × ${want.cyl}`, cyl === want.cyl);
   if ('cone' in want) check(`CONICAL_SURFACE × ${want.cone}`, cone === want.cone);
@@ -250,6 +254,26 @@ function revolveBody(profile, n = 64, transform = null) {
   const T = G.makeTransform(transform), memo = new Map();
   return out.map((tr) => tr.map((p) => { let q = memo.get(p); if (!q) { q = T.apply(p); memo.set(p, q); } return q; }));
 }
+// Profil mit verrundeten Ecken: corners = [[ρ, z, r?, N?], …] (r fehlt/0 → scharf; Anfang/Ende bleiben scharf).
+// Bogen tangential an beide Profilkanten, N Segmente (N+1 Punkte)
+function filletProfile(corners) {
+  const out = [], P = corners.map((c) => [c[0], c[1]]);
+  const nrm2 = (p) => { const l = Math.hypot(p[0], p[1]); return [p[0] / l, p[1] / l]; };
+  for (let i = 0; i < corners.length; i++) {
+    const [x, y, r = 0, N = 6] = corners[i];
+    if (!r || i === 0 || i === corners.length - 1) { out.push([x, y]); continue; }
+    const u = nrm2([P[i - 1][0] - x, P[i - 1][1] - y]), v = nrm2([P[i + 1][0] - x, P[i + 1][1] - y]);
+    const th = Math.acos(Math.max(-1, Math.min(1, u[0] * v[0] + u[1] * v[1]))), d = r / Math.tan(th / 2);
+    const t1 = [x + u[0] * d, y + u[1] * d], t2 = [x + v[0] * d, y + v[1] * d];
+    const bis = nrm2([u[0] + v[0], u[1] + v[1]]), h = r / Math.sin(th / 2), c = [x + bis[0] * h, y + bis[1] * h];
+    const a1 = Math.atan2(t1[1] - c[1], t1[0] - c[0]);
+    let da = Math.atan2(t2[1] - c[1], t2[0] - c[0]) - a1;
+    while (da > PI) da -= 2 * PI; while (da < -PI) da += 2 * PI;
+    for (let k = 0; k <= N; k++) { const a = a1 + da * k / N; out.push([c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)]); }
+  }
+  return out;
+}
+const sharpProfile = (corners) => corners.map((c) => [c[0], c[1]]);
 // Kegelstumpf/Zylinder (n Segmente) mit einem Innenpunkt je Wand-Facette (Fächer aus 4 Dreiecken), um `dent`
 // nach innen gedrückt — das Region-Growing hält die Facette bei kleiner Delle als EINE Ebene zusammen
 function dentedBody({ R0, R1, H, n = 16, dent = 0 }) {
@@ -302,7 +326,7 @@ for (const [name, body, vol, nCyl] of MANTLE_OK) {
 {
   const body = { columns: [col(circleProfile(0, 0, 5, 64), 0, 20, { bottom: { kind: 'round', r: 1, N: 8 }, top: { kind: 'round', r: 1, N: 8 } })] };
   const t = tris(body), groups = groupsOfMesh(meshOfTris(t));
-  runCase('Welle, Außenkanten r=1 verrundet', groups, true, { mantles: 1, cyl: 1, faces: 3, vol: PI * 25 * 20 });
+  runCase('Welle, Außenkanten r=1 verrundet', groups, true, { mantles: 1, cyl: 1, faces: 3, coneBands: 0, vol: PI * 25 * 20 });
   // (Verrundung = mehrere Facetten-Reihen → auch keine Mantel-Fase)
   runCase('Welle, Außenkanten r=1 verrundet', groups, false, { mantles: 0, mantleChamfers: 0, cyl: 0, cone: 0, vol: meshVol(t), volTol: 1e-5, strict: false });
 }
@@ -398,6 +422,11 @@ for (const [name, t, vol = meshVol(t)] of CONE_NO) {
 // Verrundungen (mehrere Reihen) bleiben ohne Toggle facettiert.
 console.log('\n── Mantel-Fasen und Kegelspitzen: umwandeln');
 const RD64 = 5 - 1 / Math.cos(PI / 64);   // gen.mjs-Fase: Profilkanten um 1 versetzt → Eckradius am Deck
+// Profile der flachen Fasen (0.5 radial × 2 hoch = 14°, 0.5 × 2.84 = 10°, beidseitig, Stufenwelle-Fuß)
+const pf = [[0, 0], [5, 0], [5, 18], [4.5, 20], [0, 20]];
+const P1 = [[0, 0], [5, 0], [5, 17.16], [4.5, 20], [0, 20]];
+const P2 = [[0, 0], [4.5, 0], [5, 2], [5, 18], [4.5, 20], [0, 20]];
+const P3 = [[0, 0], [10, 0], [10, 10], [5.5, 10], [5, 12], [5, 25], [0, 25]];
 const CHAMFER_OK = [
   // [Name, Dreiecke, Soll-Volumen, Mäntel, Fasen, Flächen, auch AUS?]
   ['Welle R5, beide Außenkanten 1×45° gefast', revolveBody([[0, 0], [4, 0], [5, 1], [5, 19], [4, 20], [0, 20]]), revolveVol([[0, 0], [4, 0], [5, 1], [5, 19], [4, 20], [0, 20]]), 1, 2, 5, true],
@@ -410,6 +439,12 @@ const CHAMFER_OK = [
   // Kegelspitze am Mantel („Bleistift“): Band ohne Deckfläche, Spitze auf der Achse → VERTEX_LOOP
   ['Bleistift: Welle R5 + Kegelspitze H8', revolveBody([[0, 0], [5, 0], [5, 20], [0, 28]]), revolveVol([[0, 0], [5, 0], [5, 20], [0, 28]]), 1, 1, 3, true],
   ['Bleistift, unten gefast', revolveBody([[0, 0], [4, 0], [5, 1], [5, 20], [0, 28]]), revolveVol([[0, 0], [4, 0], [5, 1], [5, 20], [0, 28]]), 1, 2, 4, false],
+  // flache Fasen: die Erkennung braucht eine Mindest-Neigung — 0.5 × 2 (14°) und 0.5 × 2.84 (10°)
+  ['Welle R5, flache Fase 0.5×2 (14°)', revolveBody(pf), revolveVol(pf), 1, 1, 4, true],
+  ['Welle R5, flache Fase 0.5×2.84 (10°)', revolveBody(P1), revolveVol(P1), 1, 1, 4, false],
+  ['Welle R5, flache Fasen 14° beidseitig', revolveBody(P2), revolveVol(P2), 1, 2, 5, false],
+  ['Welle, flache Fase 14°, 48 Seg., gedreht + weit weg', revolveBody(pf, 48, { rot: [17, 31, 47], t: [120, -80, 40] }), revolveVol(pf), 1, 1, 4, false],
+  ['Stufenwelle, flache Fuß-Fase 0.5×2 (14°)', revolveBody(P3), revolveVol(P3), 2, 1, 6, false],
 ];
 for (const [name, t, vol, nM, nF, faces, aus] of CHAMFER_OK) {
   const groups = groupsOfMesh(meshOfTris(t));
@@ -421,12 +456,41 @@ console.log('\n── Mantel-Fasen: facettiert lassen');
 const CHAMFER_NO = [
   ['Welle, Fase mit Knick (2 Facetten-Reihen)', revolveBody([[0, 0], [4, 0], [4.6, 0.4], [5, 1], [5, 20], [0, 20]])],
   ['Welle, Fase, Deckel 3° schräg', (() => { const b = Math.tan(3 * PI / 180); return revolveBody([[0, 0], [5, 0], [5, 19], [4, 20], [0, 20]]).map((tr) => tr.map((p) => (p[2] === 20 ? [p[0], p[1], 20 + b * p[0]] : p))); })()],
-  ['Welle, Fase zu flach für die Erkennung (0.5×2, 14°)', revolveBody([[0, 0], [5, 0], [5, 18], [4.5, 20], [0, 20]])],
+  ['Welle, Fase 0.1×0.4 (14°, liegt in der Wachstums-Toleranz)', revolveBody([[0, 0], [5, 0], [5, 19.6], [4.9, 20], [0, 20]])],
   ['Welle mit Halbkugel-Kuppe (16 Reihen, keine Spitze)', revolveBody([[0, 0], [5, 0], [5, 20], ...Array.from({ length: 16 }, (_, k) => { const a = (k + 1) * PI / 32; return [k === 15 ? 0 : 5 * Math.cos(a), 20 + 5 * Math.sin(a)]; })])],
   ['Doppelspitze (keine Deckfläche für die Achse)', revolveBody([[0, 0], [5, 6], [5, 20], [0, 26]])],
 ];
 for (const [name, t] of CHAMFER_NO) {
-  both(name, groupsOfMesh(meshOfTris(t)), { mantles: 0, mantleChamfers: 0, mantleCones: 0, cyl: 0, cone: 0, vol: meshVol(t), volTol: 1e-5 });
+  both(name, groupsOfMesh(meshOfTris(t)), { mantles: 0, mantleChamfers: 0, mantleCones: 0, cyl: 0, cone: 0, coneBands: 0, vol: meshVol(t), volTol: 1e-5 });
+}
+
+// ════ 3d. Kegel mit verrundeten Rändern ════
+// Toggle AN: das Rundungsband zwischen Kegelwand und Deckfläche bzw. Zylinder wird geschärft (Schnittkreis
+// exakt), danach wandelt der Kegel-Pfad die Wand in eine CONICAL_SURFACE. Toggle AUS: facettiert.
+console.log('\n── Kegel mit verrundeten Rändern (Toggle AN: v2 schärft → CONICAL_SURFACE)');
+const CONE_FILLET_OK = [
+  // [Name, Profil-Ecken [[ρ, z, r?, N?], …], Segmente, Transformation, Soll]
+  ['Kegelstumpf R10→R4 H15, beide Kanten r=1', [[0, 0], [10, 0, 1], [4, 15, 1], [0, 15]], 64, null, { mantles: 0, mantleCones: 1, cyl: 0, cone: 1, faces: 3, coneBands: 2 }],
+  ['Kegelstumpf R10→R4 H15, nur obere Kante r=1', [[0, 0], [10, 0], [4, 15, 1], [0, 15]], 64, null, { mantles: 0, mantleCones: 1, cyl: 0, cone: 1, faces: 3, coneBands: 1 }],
+  ['Kegelstumpf r=1.5 (N=8), 48 Seg., gedreht + weit weg', [[0, 0], [10, 0, 1.5, 8], [4, 15, 1.5, 8], [0, 15]], 48, { rot: [30, 20, 10], t: [500, 300, -200] }, { mantleCones: 1, cyl: 0, cone: 1, faces: 3, coneBands: 2 }],
+  ['Überhang R4→R10 H15, beide Kanten r=1', [[0, 0], [4, 0, 1], [10, 15, 1], [0, 15]], 64, null, { mantleCones: 1, cyl: 0, cone: 1, faces: 3, coneBands: 2 }],
+  ['Zylinder R10 H5 + Kegel bis R4 (H15), Übergang r=1, obere Kante r=1', [[0, 0], [10, 0], [10, 5, 1], [4, 15, 1], [0, 15]], 64, null, { cyl: 1, cone: 1, faces: 4, coneBands: 2 }],
+];
+for (const [name, corners, n, transform, want] of CONE_FILLET_OK) {
+  const t = revolveBody(filletProfile(corners), n, transform);
+  const groups = groupsOfMesh(meshOfTris(t));
+  const vol = revolveVol(sharpProfile(corners));
+  runCase(name, groups, true, { ...want, coneBands: want.coneBands, vol, volTol: 1e-5, volX: true });
+  runCase(name, groups, false, { mantleCones: 0, cone: 0, coneBands: 0, vol: meshVol(t), volTol: 1e-5, strict: false });
+}
+const CONE_FILLET_NO = [
+  // Kegel ↔ Kegel: das Rundungsband liegt zwischen zwei Kegelwänden, nicht an einer Deckfläche → bleibt facettiert
+  ['Kegel-Kette mit verrundetem Knick (Kegel↔Kegel bleibt)', [[0, 0], [10, 0], [7, 6, 1], [4, 15], [0, 15]]],
+];
+for (const [name, corners] of CONE_FILLET_NO) {
+  const t = revolveBody(filletProfile(corners));
+  const groups = groupsOfMesh(meshOfTris(t));
+  both(name, groups, { mantleCones: 0, cone: 0, coneBands: 0, vol: meshVol(t), volTol: 1e-5, strict: false });
 }
 
 // ════ 4. Review-Funde Bohrungen ════
@@ -530,5 +594,11 @@ console.log('\n── (f) Senkungs-Bohrungen in gedrehten Lagen: Achse aus den D
   }
 }
 
+// Abschluss: alle fehlgeschlagenen Assertions gesammelt (max. 45 Zeilen, damit der Log-Schwanz lesbar bleibt)
+if (failedChecks.length) {
+  console.log(`\n── fehlgeschlagene Assertions (${failedChecks.length})`);
+  for (const f of failedChecks.slice(0, 45)) console.log(`    FAIL  ${f}`);
+  if (failedChecks.length > 45) console.log(`    … und ${failedChecks.length - 45} weitere`);
+}
 console.log(`\n${failures === 0 ? '✅ alle Mantel-/Bohrungs-Regressionen grün' : `❌ ${failures} Assertion(en) fehlgeschlagen`}`);
 process.exit(failures === 0 ? 0 : 1);
