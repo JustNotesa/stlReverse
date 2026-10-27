@@ -1260,8 +1260,20 @@ export function buildVolumeStepBrepV2(analysis) {
         for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd) && circleClear(rim.center, rim.radius, rim.axis, fd, inner)) { hit = inner; break; } } if (hit) break; }
         if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
         // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX) — nur mit Defeaturing-Toggle
+        //     Kabelhalter-Befund „Kegel über Kreuz“: in einer dünnen Platte (3 mm) mit Senkung an
+        //     einem Ende und Fase am anderen griff der Rand am OBEREN Ende die Mündungs-Kreise am
+        //     UNTEREN Deck (dz zeigte zurück DURCH die Bohrung) und umgekehrt — beide Kegel
+        //     kreuzten die Bohrung, jeder Rand-Kreis war zweimal in derselben Richtung belegt
+        //     (Orientierungsfehler) → globaler Fallback, alles facettiert.
+        //     (a) Richtungsgate: der Flach-Kreis muss axial AUSSERHALB dieses Randes liegen, also
+        //         auf der vom Bohrungs-Weg abgewandten Seite: dz * dot(rim.center − other.center,
+        //         rim.axis) > 0. Bei rims.length ≠ 2 bleibt das alte Verhalten (kein Gate).
+        //     (b) Es zählt der NÄCHSTE gültige Kandidat (kleinstes |dz|), nicht der zuerst gefundene:
+        //         sonst reißt ein weiter entfernter Kreis dem Rand die eigentliche Fase weg.
         let cham = null;
         if (!DEFEATURE) return null;
+        const otherRim = rims.length === 2 ? rims.find(r => r !== rim) : null;
+        const outward = otherRim ? _dot3(_sub3(rim.center, otherRim.center), rim.axis) : 0;
         for (const fd of faceDefs) {
           for (const inner of fd.inner) {
             if (inner.circleRim || claimed.has(inner)) continue;
@@ -1274,11 +1286,11 @@ export function buildVolumeStepBrepV2(analysis) {
             // Chamfer-Pfad überall verhinderte.)
             const dz = circ.meanT;
             if (Math.abs(dz) < CHAMFER_MIN || Math.abs(dz) > CHAMFER_MAX) continue;
+            if (otherRim && !(dz * outward > 0)) continue;               // (a) außerhalb der Bohrung
             if (!circleOnDeck(circ.center, circ.radius, rim.axis, fd)) continue; // Flach-Kreis in der Deckebene
             if (!circleClear(circ.center, circ.radius, rim.axis, fd, inner)) continue; // … und mit Freigang
-            cham = { inner, circ, dz }; break;
+            if (!cham || Math.abs(dz) < Math.abs(cham.dz)) cham = { inner, circ, dz }; // (b) nächster Kandidat
           }
-          if (cham) break;
         }
         if (cham) { claimed.add(cham.inner); matched.push({ rim, inner: cham.inner, mode: 'chamfer', circ: cham.circ, dz: cham.dz }); continue; }
         return null;
@@ -3511,6 +3523,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // Emission in assemble() als eigener Block (s. dort): same_sense .T. (die STEP-Kegelnormale zeigt
   // beim konvexen Kegel aus dem Material), Fläche links vom Rand, Spitze als VERTEX_LOOP.
   let mantleConePlans = [];
+  let preSplitStats = null;         // Vorab-Zerlegung der unebenen Flächen (vor den Bohrungen)
   const CONE_APEX = true;           // Kegel mit Spitze umwandeln (VERTEX_LOOP an der Spitze)
   const CONE_TILT_TOL = 0.03;       // Wand-Flood: Achsanteil der Facetten-Normale wie die Saat (≈ ±1.7°)
   const CONE_NORMAL_COS = Math.cos(10 * Math.PI / 180); // Facetten-Normale ↔ Kegel-Normale
@@ -3812,6 +3825,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen, Mäntel, Kegel UND Kanäle neu bauen.
   const runPipeline = (withBores) => {
     finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set();
+    preSplitStats = null;
     filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; featureOps = [];
     if (!DEFEATURE) {
       // Toggle AUS — bisheriger Ablauf unverändert: Bohrungs-Pläne aus den Original-Dreiecken,
@@ -3850,6 +3864,15 @@ export function buildVolumeStepBrepV2(analysis) {
       } catch (_) { cornersDefeatured = 0; /* Guard: jede Ecke wird erst nach allen Prüfungen angewandt */ }
     }
     if (!withBores) return;
+    // VOR der Bohrungs-Umwandlung: die unebenen Flächen zerlegen. Deckflächen mit einem Kreis-Rand
+    // (Bohrungs-Mündung) lassen sich danach nicht mehr zerlegen (enforcePlanarity überspringt
+    // Kreis-Rand-Flächen) → die Fläche bliebe uneben (Kabelhalter-Befund: bis 1,5e-3 mm schief) und
+    // die Bohrungsachse nähme die schiefe Deckflächen-Normale. So sehen die Bohrungs-Pfade exakt
+    // ebene Deck-Teile; strikte Importer (vertex-surface) verwerfen die Fläche sonst.
+    markUntouched(faceDefs);
+    const pl0 = enforcePlanarity(faceDefs);
+    faceDefs = pl0.fds;
+    preSplitStats = pl0.st;
     const sharp = convertSharpBores();
     convertMantles();
     convertMantleCones();
@@ -5478,6 +5501,7 @@ export function buildVolumeStepBrepV2(analysis) {
         f.group = fd.group;
         f.ops = fd.ops;                                     // Rückfall je Merkmal: Marke vererben
         f.untouched = !!fd.untouched && !(moves && moves.size);   // Schalen-Analyse: Teil einer unveränderten Fläche
+        f.splitPart = true;                                // Teilfläche einer Zerlegung (keine eigene Herkunft)
         parts.push(f);
       }
     }
@@ -5554,6 +5578,7 @@ export function buildVolumeStepBrepV2(analysis) {
   const markUntouched = (fds) => {
     const same = (L, S) => { if (!S || L.circleRim || L.length !== S.length) return false; for (let i = 0; i < L.length; i++) if (L[i] !== S[i]) return false; return true; };
     for (const fd of fds) {
+      if (!fd.src && fd.splitPart) continue;   // Teilfläche: Marke aus splitPlanar behalten
       const s = fd.src;
       fd.untouched = !!s && fd.inner.length === s.inner.length && same(fd.outer, s.outer) && fd.inner.every((L, j) => same(L, s.inner[j]));
     }
@@ -5567,6 +5592,7 @@ export function buildVolumeStepBrepV2(analysis) {
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
+    if (preSplitStats) { pl.st.refits += preSplitStats.refits; pl.st.splits += preSplitStats.splits; pl.st.parts += preSplitStats.parts; }
     planarReport(a.report, pl.st);
     return a;
   };

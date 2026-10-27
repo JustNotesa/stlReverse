@@ -1065,6 +1065,28 @@ export const BODIES = [
     transform: { rot: [20, 35, 10], t: [50, -20, 7] },
     expect: { mode: 'skip', arcsOff: 12 },
   },
+  // Senkung + Fase an BEIDEN Enden der Bohrung (Kabelhalter-Befund: die Mündungs-Kegel wurden über
+  // Kreuz dem falschen Rand zugeordnet → Orientierungsfehler, alles facettiert)
+  {
+    id: 'k3', extra: true, file: 'v2_x_kabel_senkung_fase',
+    desc: 'Platte 40×30×3 (scharf), Bohrung R2.25 (48 Seg.) entlang Z, unten 90°-Senkung Tiefe 1, oben 45°-Fase 0.5 (Kabelhalter-Befund: Mündungs-Kegel wurden über Kreuz dem falschen Rand zugeordnet → Orientierungsfehler, alles facettiert). Ziel: Zylinder + 2 Kegel, scharf',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 3, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 2.25, 48, true), z0: 0, z1: 3, bottom: { kind: 'countersink', depth: 1, r: 0, N: 8 }, top: { kind: 'countersink', depth: 0.5, r: 0, N: 8 } },
+    ],
+    expect: { mode: 'sharp', bores: 1 },
+    countersinkBoth: [{ col: 1, R: 2.25, seg: 48, bottom: { depth: 1, ang: 90 }, top: { depth: 0.5, ang: 90 } }],
+  },
+  {
+    id: 'k4', extra: true, file: 'v2_x_kabel_senkung_fase_oben',
+    desc: 'wie (k3) gespiegelt: Senkung Tiefe 1 oben, Fase 0.5 unten',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 3, { kind: 'sharp' }),
+      { name: 'senkung', profile: circleProfile(20, 15, 2.25, 48, true), z0: 0, z1: 3, bottom: { kind: 'countersink', depth: 0.5, r: 0, N: 8 }, top: { kind: 'countersink', depth: 1, r: 0, N: 8 } },
+    ],
+    expect: { mode: 'sharp', bores: 1 },
+    countersinkBoth: [{ col: 1, R: 2.25, seg: 48, bottom: { depth: 0.5, ang: 90 }, top: { depth: 1, ang: 90 } }],
+  },
 ];
 
 // Stresskörper (Laufzeit, ~49k Dreiecke < 50k-Vereinfachungsgrenze); nicht als STL-Datei
