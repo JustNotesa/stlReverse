@@ -68,6 +68,7 @@ export const ARC_DEFAULTS = {
   surfTol: 5e-5,       // mm: exakter Bogen ↔ Bandfläche / Deckebene (strikte Importer)
   samples: 9,          // Abtastpunkte je Bogen für Prüfungen
   budgetMs: 2500,      // ms: Zeitbudget für findArcBands (Kettenverarbeitung stoppen)
+  maxAxes: 6,          // Achsen-Kandidaten je Export höchstens so viele - die mit den meisten Deckflächen-Punkten; ein feines Kugelnetz lieferte 49 Achsen und je Achse einen vollen Durchlauf aller Facetten
 };
 
 // Zeitmessung (Budget) — performance.now() mit Fallback auf Date.now()
@@ -1212,7 +1213,10 @@ export function findArcBands(fds, opts) {
   const vkey = vtxKeyOf(o);
   const list = fds || [];
   const index = buildEdgeIndex(list, o);
-  const axes = axisCandidates(list, o);
+  // nur die ersten o.maxAxes Achsen bearbeiten (Kandidaten sind nach Punktzahl
+  // absteigend sortiert → die mit den meisten Deckflächen-Punkten gewinnen)
+  const maxAxes = Number.isFinite(o.maxAxes) ? Math.max(0, o.maxAxes) : Infinity;
+  const axes = axisCandidates(list, o).slice(0, maxAxes);
   const bands = [];
   const stats = { axes: axes.length, candidates: 0, chains: 0, bands: 0, cyl: 0, cone: 0, budgetHit: false };
   const taken = new Set();                       // Facetten mit Band einer früheren Achse
