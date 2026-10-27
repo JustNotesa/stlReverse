@@ -882,10 +882,11 @@ export function buildVolumeStepBrepV2(analysis) {
 
   // Rand-Loops → 2 koaxiale Rand-Kreise auf dem Primitiv-Zylinder (gemeinsamer Kern von
   // attemptBore und attemptBoreCurrent). null bei jeder Abweichung (Fallback: facettiert).
+  const BORE_RIM_TOL = (R) => Math.max(0.08, 0.06 * R); // Form-Toleranz Rand-Loops ↔ Primitiv (Bestandspfad)
   const rimsFromLoops = (loops, prim) => {
     if (loops.length !== 2) return null; // v1: nur Durchgangslöcher
     const axis = _norm3(prim.axis), ap = prim.axisPoint, R = prim.radius;
-    const tol = Math.max(0.08, 0.06 * R);
+    const tol = BORE_RIM_TOL(R);
     const refDir = computeRefDir(axis);
     const meas = [];
     for (const loop of loops) {
@@ -900,7 +901,7 @@ export function buildVolumeStepBrepV2(analysis) {
         sr += perp;
       }
       if (!ringAngleUniform(loop, center, axis)) return null; // D-Loch (Sehne) → kein Zylinder
-      meas.push({ center, meanT, loopR: sr / loop.length });
+      meas.push({ center, meanT, loopR: sr / loop.length, ring: loop, maxSeg: ringMaxSeg(loop, center, axis) });
     }
     // Radius der Kreiskanten: der GEMESSENE Rand-Radius (Mittel der Achsabstände beider Ringe), wenn
     // beide Ringe übereinstimmen — die Ecken eines tessellierten Kreises liegen exakt auf ihm. Der
@@ -910,23 +911,76 @@ export function buildVolumeStepBrepV2(analysis) {
     // Direkt-Abgleich.
     const rTol = Math.max(0.01, 0.002 * R);
     const Rc = Math.abs(meas[0].loopR - meas[1].loopR) <= rTol ? (meas[0].loopR + meas[1].loopR) / 2 : R;
-    const rims = meas.map(({ center, meanT, loopR }) => ({
-      center, axis, radius: Rc, refDir, meanT, loopR,
+    // ring/maxSeg: Rand-Polygon und sein größter Segmentwinkel — für die Wand-Prüfung (boreWallOk) und
+    // die Achs-Verfeinerung an den Deckebenen (refineBoreRims)
+    const rims = meas.map(({ center, meanT, loopR, ring, maxSeg }) => ({
+      center, axis, radius: Rc, refDir, meanT, loopR, ring, maxSeg,
       rimKey: `${fixZero(center[0], 3)},${fixZero(center[1], 3)},${fixZero(center[2], 3)}|${fixZero(Rc, 3)}`,
     }));
     rims.sort((a, b) => a.meanT - b.meanT); // [unten, oben]
     if (rims[0].rimKey === rims[1].rimKey) return null; // null-Höhe / kollabiert
     return rims;
   };
+  // Größter Segmentwinkel (rad) eines Rand-Polygons um die Achse (deckungsgleiche Punkte zählen nicht)
+  const ringMaxSeg = (ring, center, axis) => {
+    let m = 0;
+    const rad = (p) => { const w = _sub3(p, center), t = _dot3(w, axis); return [w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t]; };
+    for (let i = 0; i < ring.length; i++) {
+      const a = rad(ring[i]), b = rad(ring[(i + 1) % ring.length]);
+      m = Math.max(m, Math.abs(Math.atan2(_dot3(_cross3(a, b), axis), _dot3(a, b))));
+    }
+    return m;
+  };
+  // Wand einer Bohrung gegen den Zylinder aus ihren beiden Rand-Kreisen prüfen (gemeinsam für den scharfen
+  // Pfad und den Bestandspfad attemptBore/attemptBoreCurrent; Gegenstück zur Mantel-Prüfung):
+  //   - jeder Wand-Punkt (Ecken der Polygone `loops` und Zusatzpunkte `pts`, z. B. Original-Dreiecke einer
+  //     Fläche) liegt axial zwischen den Rändern und radial zwischen Sehnen-Polygon und Mantel:
+  //     ρ ∈ [R·cos(maxSeg/2) − tol, R + tol];
+  //   - keine Wand-Kante überspannt um die Achse mehr als einen Randsegment-Winkel (loopsSpanOk) — sonst ist
+  //     die Wand verdrillt (Hyperboloid, Taille innen): verdrillte Bohrung 30° wurde als Zylinder exportiert,
+  //     wasserdicht und strikt sauber, aber 17 mm³ zu viel Loch.
+  // rims = [unten, oben] (gleicher Radius, gleiche Achse). tol: Form-Toleranz des Pfads — scharfer Pfad
+  // max(0.01, 0.002·R); der Bestandspfad behält seine Rand-Toleranz BORE_RIM_TOL (sein Primitiv-Kern
+  // enthält an verrundeten Mündungen die erste Verrundungsreihe: washer_filleted Kern ρ 5.000 … 5.034,
+  // Ränder bei 5.034 — strenger würde die bisherige Umwandlung mit Kegel-Fasen verlieren). → bool
+  const boreWallOk = (rims, loops, pts, tol) => {
+    const axis = rims[0].axis, c0 = rims[0].center, R = rims[0].radius;
+    const H = _dot3(_sub3(rims[1].center, c0), axis);
+    const maxSeg = Math.max(rims[0].maxSeg || 0, rims[1].maxSeg || 0);
+    if (!(maxSeg > 0) || !(H > 0) || !(tol > 0)) return false;
+    const rLo = R * Math.cos(maxSeg / 2) - tol, rHi = R + tol;
+    const off = (p) => {
+      const w = _sub3(p, c0), t = _dot3(w, axis);
+      if (t < -tol || t > H + tol) return true;
+      const rho = Math.hypot(w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t);
+      return !(rho >= rLo && rho <= rHi);
+    };
+    for (const L of loops) for (const p of L) if (off(p)) return false;
+    for (const p of pts) if (off(p)) return false;
+    return loopsSpanOk(loops, c0, axis, maxSeg, tol);
+  };
+  // Wand aus faceDefs-Indizes: Loops der aktuellen Flächen + Ecken ihrer Original-Dreiecke (Innenpunkte,
+  // s. srcPointsOk) → { loops, pts } für boreWallOk
+  const wallOfFaces = (fis) => {
+    const loops = [], pts = [];
+    for (const fi of fis) {
+      const fd = faceDefs[fi];
+      loops.push(fd.outer, ...fd.inner);
+      const s = fd.src;
+      if (s && s.verts && s.tris) for (const t of s.tris) for (let j = 0; j < 3; j++) pts.push(s.verts[t * 3 + j]);
+    }
+    return { loops, pts };
+  };
 
   // Rand-Geometrie aus der Vereinigung der Facetten extrahieren: Randkanten (genau 1× genutzt)
   // → geschlossene Loops. Durchgangsloch = genau 2 koaxiale Rand-Kreise; sonst Fallback (null).
   const attemptBore = (entry) => {
-    const ec = new Map();
+    const ec = new Map(), tris = [];
     for (const g of entry.groups) {
       const vs = g.vertices, tc = Math.floor(vs.length / 3);
       for (let t = 0; t < tc; t++) {
         const tri = [vs[t * 3], vs[t * 3 + 1], vs[t * 3 + 2]];
+        tris.push(tri);
         for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
           const k = edgeKeyFn(a, b); const e = ec.get(k) || { c: 0, a, b }; e.c++; ec.set(k, e);
         }
@@ -935,7 +989,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const bnd = []; for (const e of ec.values()) if (e.c === 1) bnd.push({ v0: e.a, v1: e.b });
     const rims = rimsFromLoops(chainEdges(bnd), entry.prim);
     if (!rims) return null;
-    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center };
+    const wall = { loops: tris, pts: [] };                       // Wand = Original-Dreiecke
+    if (!boreWallOk(rims, wall.loops, wall.pts, BORE_RIM_TOL(rims[0].radius))) return null;     // verdrillt / Delle → facettiert
+    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall };
   };
 
   // Wie attemptBore, aber die Ränder kommen aus den AKTUELLEN Wand-faceDefs statt aus den
@@ -964,7 +1020,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const bnd = []; for (const e of ec.values()) if (e.c === 1) bnd.push({ v0: e.a, v1: e.b });
     const rims = rimsFromLoops(chainEdges(bnd), entry.prim);
     if (!rims) return null;
-    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center };
+    const wall = wallOfFaces(fis);
+    if (!boreWallOk(rims, wall.loops, wall.pts, BORE_RIM_TOL(rims[0].radius))) return null;     // verdrillt / Delle → facettiert
+    return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall };
   };
 
   // Innen-Loop einer Flachfläche rein GEOMETRISCH einem Rand zuordnen (simplifyLoop kann die
@@ -1115,19 +1173,75 @@ export function buildVolumeStepBrepV2(analysis) {
   // Gruppen, deren Facetten eine Chamfer-Zone verdrängt hat (filterChamferZones) —
   // Beweismaterial für den Orientierungs-Wächter der Kegel-Flächen (assemble).
   let chamferDroppedGroups = new Set();
+  // Achs-Verfeinerung an den Deckebenen (Bestandspfad): rimsFromLoops nimmt Achse und Zentrum aus dem
+  // Primitiv-Fit. Schon 2.6e-6 rad Kippung oder 2 µm Versatz (Senkung r=1/rw=0.3, gedrehte Lagen, weit vom
+  // Ursprung) lassen den Kreis neben der Deckebene liegen → circleOnDeck (1e-5 mm) lehnt Bohrungen ab, die v2
+  // exakt geschärft hat. Wie im scharfen Pfad: Achse = Normale der Deckfläche(n), an denen die Ränder enden
+  // (Direkt-Treffer: Innen-Loop am Rand; Fase: koaxialer Flach-Kreis), Zentren und Radius = Kreis-Fit der
+  // Rand-Polygone in der Deckebene. Danach dieselben harten Gates: Ränder eben und auf dem Kreis, koaxial,
+  // gleicher Radius, Wand auf dem Zylinder (boreWallOk). → verfeinerte Ränder | null (dann bleibt der Fit)
+  const DECK_AXIS_COS = Math.cos(1 * Math.PI / 180);   // Deck-Normale ↔ Primitiv-Achse (≤ 1°)
+  const refineBoreRims = (plan) => {
+    const rims = plan.rims, ax0 = rims[0].axis;
+    if (!plan.wall || rims.length !== 2 || !rims[0].ring || !rims[1].ring) return null;
+    const normals = [];
+    for (const rim of rims) {
+      for (const fd of faceDefs) {
+        const n = _norm3(fd.normal);
+        if (Math.abs(_dot3(n, ax0)) < DECK_AXIS_COS) continue;
+        for (const inner of fd.inner) {
+          if (inner.circleRim) continue;
+          let deck = innerMatchesRim(inner, fd.normal, rim);
+          if (!deck && DEFEATURE) {
+            const circ = loopAsCircle(inner, fd.normal, rim.axis, rim.center);
+            deck = !!circ && circ.radius > rim.radius + 0.02 && circ.radius <= rim.radius + CHAMFER_MAX && Math.abs(circ.meanT) >= CHAMFER_MIN && Math.abs(circ.meanT) <= CHAMFER_MAX;
+          }
+          if (deck) normals.push(n);
+        }
+      }
+    }
+    if (!normals.length) return null;
+    // alle Kandidaten-Deckebenen parallel (wie sharpBorePlan), sonst keine eindeutige Achse
+    if (normals.some((n) => Math.abs(_dot3(n, normals[0])) < 0.9999)) return null;
+    const n0 = normals[0], axis = _dot3(n0, ax0) >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
+    const f0 = fitCircleInPlane(rims[0].ring, axis), f1 = fitCircleInPlane(rims[1].ring, axis);
+    if (!f0 || !f1) return null;
+    const R = (f0.radius + f1.radius) / 2, tol = Math.max(0.01, 0.002 * R);
+    if (Math.abs(f0.radius - f1.radius) > tol) return null;
+    const c0 = f0.center, H = _dot3(_sub3(f1.center, c0), axis);
+    if (!(H > tol)) return null;
+    const c1 = [c0[0] + axis[0] * H, c0[1] + axis[1] * H, c0[2] + axis[2] * H];
+    if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return null; // koaxial
+    const out = [];
+    for (const [r, c] of [[0, c0], [1, c1]]) {
+      const ring = rims[r].ring;
+      let sr = 0;
+      for (const p of ring) {
+        const w = _sub3(p, c), t = _dot3(w, axis), rho = Math.hypot(w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t);
+        if (Math.abs(t) > tol || Math.abs(rho - R) > tol) return null; // Rand eben in der Deckebene, auf dem Kreis
+        sr += rho;
+      }
+      const d = mkCircleDesc(c, R, axis);
+      out.push({ ...d, meanT: rims[r].meanT, loopR: sr / ring.length, ring, maxSeg: ringMaxSeg(ring, c, axis) });
+    }
+    if (out[0].rimKey === out[1].rimKey) return null;
+    if (!boreWallOk(out, plan.wall.loops, plan.wall.pts, BORE_RIM_TOL(R))) return null;
+    return out;
+  };
   const matchBorePlans = (tentative, restore) => {
-    for (const plan of tentative) {
-      const matched = []; const claimed = new Set(); let okAll = true;
-      for (const rim of plan.rims) {
-        // (1) direkter Treffer — der Kreis muss zudem IN der Ebene der Deckfläche liegen (die
-        // Kreis-Achse ist hier die des Primitiv-Fits; ein leicht gekippter Fit stünde sonst neben
-        // der Deckfläche → strikte Importer verwerfen die Fläche)
+    // Ränder eines Plans den Deckflächen zuordnen → matched | null (ohne Seiteneffekte)
+    const matchRims = (rims) => {
+      const matched = []; const claimed = new Set();
+      for (const rim of rims) {
+        // (1) direkter Treffer — der Kreis muss zudem IN der Ebene der Deckfläche liegen (ohne
+        // Verfeinerung ist die Kreis-Achse die des Primitiv-Fits; ein leicht gekippter Fit stünde sonst
+        // neben der Deckfläche → strikte Importer verwerfen die Fläche)
         let hit = null;
         for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd) && circleClear(rim.center, rim.radius, rim.axis, fd, inner)) { hit = inner; break; } } if (hit) break; }
         if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
         // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX) — nur mit Defeaturing-Toggle
         let cham = null;
-        if (!DEFEATURE) { okAll = false; break; }
+        if (!DEFEATURE) return null;
         for (const fd of faceDefs) {
           for (const inner of fd.inner) {
             if (inner.circleRim || claimed.has(inner)) continue;
@@ -1147,9 +1261,20 @@ export function buildVolumeStepBrepV2(analysis) {
           if (cham) break;
         }
         if (cham) { claimed.add(cham.inner); matched.push({ rim, inner: cham.inner, mode: 'chamfer', circ: cham.circ, dz: cham.dz }); continue; }
-        okAll = false; break;
+        return null;
       }
-      if (!okAll) { restore(plan); continue; }
+      return matched;
+    };
+    for (const plan of tentative) {
+      // erst mit den an den Deckebenen verfeinerten Rändern, sonst mit denen aus dem Primitiv-Fit
+      let matched = null;
+      const refined = refineBoreRims(plan);
+      if (refined) {
+        matched = matchRims(refined);
+        if (matched) { plan.rims = refined; plan.surfCenter = refined[0].center; }
+      }
+      if (!matched) matched = matchRims(plan.rims);
+      if (!matched) { restore(plan); continue; }
       plan.coneRims = [];
       for (const m of matched) {
         if (m.mode === 'direct') { m.inner.circleRim = m.rim; continue; }
@@ -2732,6 +2857,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const cyl = (p) => { const w = _sub3(p, c0), t = _dot3(w, axis); return { t, rho: Math.hypot(w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t), w }; };
     // Ränder: eben (in ihrer Deckebene), auf dem Kreis, fein genug und einmal ganz um die Achse
     const ringAt = [0, H];
+    let maxSeg = 0;
     for (let r = 0; r < 2; r++) {
       const ring = decks[r].ring;
       let turn = 0;
@@ -2742,7 +2868,7 @@ export function buildVolumeStepBrepV2(analysis) {
         const rb = _sub3(b.w, [axis[0] * b.t, axis[1] * b.t, axis[2] * b.t]);
         const ang = Math.atan2(_dot3(_cross3(ra, rb), axis), _dot3(ra, rb));
         if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return null;
-        turn += ang;
+        turn += ang; maxSeg = Math.max(maxSeg, Math.abs(ang));
       }
       if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return null;
       if (!ringAngleUniform(ring, c0, axis)) return null; // D-Loch (Sehnen-Abflachung) → kein Zylinder
@@ -2763,6 +2889,9 @@ export function buildVolumeStepBrepV2(analysis) {
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) >= 0) return null; // konvex → keine Bohrung
     }
+    // Innenpunkte der Wandflächen (Original-Dreiecke) und Verdrillung wie beim Mantel (boreWallOk)
+    const wall = wallOfFaces(W);
+    if (!boreWallOk([{ center: c0, axis, radius: R, maxSeg }, { center: c1, axis, radius: R, maxSeg }], wall.loops, wall.pts, tol)) return null;
     if (!circleOnDeck(c0, R, axis, decks[0].fd) || !circleOnDeck(c1, R, axis, decks[1].fd)) return null;
     const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
     if (rim0.rimKey === rim1.rimKey) return null;
@@ -3135,23 +3264,27 @@ export function buildVolumeStepBrepV2(analysis) {
   // 30°-verdrillte Welle R5: Netz 1.7 % kleiner als der Zylinder). Eine echte Teilung verläuft
   // entlang der Mantellinien: jede Wand-Kante überspannt um die Achse höchstens einen Randsegment-
   // Winkel (Mantellinie 0, Sehne/Diagonale ≤ maxSeg). Kanten an der Spitze (Radius < rMin) zählen nicht.
-  const wallSpanOk = (W, c, axis, maxSeg, rMin) => {
+  // loopsSpanOk: dieselbe Prüfung für beliebige geschlossene Polygone (Flächen-Loops, Original-Dreiecke —
+  // gemeinsam mit dem Bohrungs-Pfad, s. boreWallOk)
+  const loopsSpanOk = (loops, c, axis, maxSeg, rMin) => {
     const lim = maxSeg * 1.05 + 1e-9;
-    for (const fi of W) {
-      const fd = faceDefs[fi];
-      for (const L of [fd.outer, ...fd.inner]) {
-        for (let i = 0; i < L.length; i++) {
-          const wa = _sub3(L[i], c), wb = _sub3(L[(i + 1) % L.length], c);
-          const ta = _dot3(wa, axis), tb = _dot3(wb, axis);
-          const ra = [wa[0] - axis[0] * ta, wa[1] - axis[1] * ta, wa[2] - axis[2] * ta];
-          const rb = [wb[0] - axis[0] * tb, wb[1] - axis[1] * tb, wb[2] - axis[2] * tb];
-          if (Math.hypot(ra[0], ra[1], ra[2]) < rMin || Math.hypot(rb[0], rb[1], rb[2]) < rMin) continue;
-          const x = _cross3(ra, rb);
-          if (Math.atan2(Math.hypot(x[0], x[1], x[2]), _dot3(ra, rb)) > lim) return false;
-        }
+    for (const L of loops) {
+      for (let i = 0; i < L.length; i++) {
+        const wa = _sub3(L[i], c), wb = _sub3(L[(i + 1) % L.length], c);
+        const ta = _dot3(wa, axis), tb = _dot3(wb, axis);
+        const ra = [wa[0] - axis[0] * ta, wa[1] - axis[1] * ta, wa[2] - axis[2] * ta];
+        const rb = [wb[0] - axis[0] * tb, wb[1] - axis[1] * tb, wb[2] - axis[2] * tb];
+        if (Math.hypot(ra[0], ra[1], ra[2]) < rMin || Math.hypot(rb[0], rb[1], rb[2]) < rMin) continue;
+        const x = _cross3(ra, rb);
+        if (Math.atan2(Math.hypot(x[0], x[1], x[2]), _dot3(ra, rb)) > lim) return false;
       }
     }
     return true;
+  };
+  const wallSpanOk = (W, c, axis, maxSeg, rMin) => {
+    const loops = [];
+    for (const fi of W) { const fd = faceDefs[fi]; loops.push(fd.outer, ...fd.inner); }
+    return loopsSpanOk(loops, c, axis, maxSeg, rMin);
   };
   const faceCentroid = (fd) => {
     let cx = 0, cy = 0, cz = 0, k = 0;
