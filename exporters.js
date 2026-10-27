@@ -12,7 +12,7 @@ import {
   mapOutlinePointToDxf, mapOutlinePointToStep,
   defaultBounds, rectangleFromBounds
 } from './utils.js';
-import { matchTubeMouths } from './tube-sweep.js?v=2';
+import { matchTubeMouths } from './tube-sweep.js?v=3';
 
 export function buildOutlinesDxf(outlines) {
   const lines = [];
