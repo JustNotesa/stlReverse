@@ -137,6 +137,14 @@ Kreis-Kanten teilen.
   x6 (Außenfase mit beidseitig verrundeten Kanten) bleibt gerundet. Braucht „Kegel zwischen zwei Rundungen“
   bzw. ein Band, das an einem Kegel beginnt. Offene Bänder: mehrere getrennte verrundete Abschnitte je Loop.
   `node tests/fixtures-v2/check.mjs --only x3,x5,x6`.
+- [ ] **Echtes Teil „Kabelhalter“ (User-STL, ~/Downloads/under_desk_cable_holder_vcd.stl — nicht ins Repo, fremde
+  Lizenz): „Verrundungen entfernen“ fällt komplett in den Rückfall.** Erkennung: 9 Verrundungen, 1 Bohrung; v1 entfernt
+  genau 1 Kanten-Verrundung an einem 0,5 mm dünnen Steg (x ≈ −39…−35, y 2,5…3,0) und setzt die neue Ecke auf
+  (−39,385 | −3,425) — die Steg-Seitenflächen werden nicht nachgezogen → 24 offene Kanten, 2 Orientierungsfehler,
+  auch ohne Bohrung (Stufe 1) → alles facettiert. Zwei Aufgaben (nach Agent F2, der gerade in defeatureBands arbeitet):
+  (1) v1-Fehler an kurzen Verrundungen dünner Stege beheben bzw. dort sicher überspringen; (2) gezielter Rückfall je
+  Merkmal (nur die Operation weglassen, an deren Flächen die offenen Kanten liegen) statt alles zu facettieren;
+  (3) warum v1/v2 die übrigen 8 Verrundungen überspringen (Gate-Gründe je Rundung) — Abdeckung bei echten Teilen.
 - [ ] **Ebenheit nur am Rand geprüft (AUS-Modus, feine Rundungen)** — m32/m64 AUS: eine Fläche ist randeben, ihr
   Inneres leicht gewölbt (flachste Bandschicht in der Deckgruppe) → B-Rep-Volumen weicht 3,6/0,9 mm³ vom Netz ab.
   Abhilfe: auch innere Dreiecksecken unveränderter Flächen prüfen.
