@@ -2,6 +2,7 @@
 // extrudierten Profilen. Eigener Generator, keine Projektdateien als Quelle.
 import {
   ARC_DEFAULTS, findArcBands, fitCircle2d, makeFrame, toLocal, axisCandidates,
+  validateArcBands, applyArcBands, edgeCanonKey,
 } from '../profile-arcs.js';
 
 const vtxKey = (p) => p.map((x) => (+x.toFixed(4) || 0).toFixed(4)).join(',');
@@ -318,6 +319,70 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(axes.length).toBe(1);
     expect(axes[0][2]).toBeCloseTo(1, 9);
     expect(ARC_DEFAULTS.minSegs).toBe(3);
+  });
+
+  // ── Nachbar-Prüfung (validate) + Anwendung (apply) ────────────────────────
+  // Fall 3: Rundrechteck 40×30, Ecken R5 (8 Seg.), 0,5-Fasen oben/unten
+  const fall3 = () => {
+    const full = roundedRect(40, 30, [5, 5, 5, 5], 8);
+    const ins = roundedRect(39, 29, [4.5, 4.5, 4.5, 4.5], 8);
+    return extrude([
+      { z: 0, pts2d: ins }, { z: 0.5, pts2d: full },
+      { z: 9.5, pts2d: full }, { z: 10, pts2d: ins },
+    ]);
+  };
+
+  test('11: Fall 3 — validate: 12 Bänder, 8 capEdits, 16 Bögen; apply: 96 Facetten weg', () => {
+    const fds = fall3();
+    const det = run(fds);
+    expect(det.bands.length).toBe(12);
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(12);
+    expect(det.stats.valid).toBe(12);
+    expect(det.capEdits.length).toBe(8);
+    expect(det.arcs.size).toBe(16);
+    // je Deckfläche 4 Bögen (je Ecke), je Bogen 9 Punkte (7 innere)
+    const perFace = new Map();
+    for (const ce of det.capEdits) perFace.set(ce.fi, (perFace.get(ce.fi) || 0) + 1);
+    expect(perFace.size).toBe(2);
+    expect([...perFace.values()].sort()).toEqual([4, 4]);
+    expect(det.capEdits.every((ce) => ce.pts.length === 9)).toBe(true);
+    expect(det.capEdits.every((ce) => ce.a && ce.b && ce.arcKey && ce.li === 0)).toBe(true);
+
+    // apply: alle 12×8 Band-Facetten entfernen, Deckflächen glätten
+    const res = applyArcBands(fds, det, { vtxKey });
+    expect(res.removed.size).toBe(96);
+    expect(res.fds.length).toBe(fds.length - 96);
+    const caps = res.fds.filter((fd) => fd.arcEdges instanceof Map && fd.arcEdges.size);
+    expect(caps.length).toBe(2);
+    for (const c of caps) {
+      expect(c.arcEdges.size).toBe(4);                      // 4 Bogen-Kanten je Deckfläche
+      expect(c.outer.length).toBe(36 - 4 * 7);              // 28 innere Punkte entfernt
+      expect(c.untouched).toBe(false);
+      for (const k of c.arcEdges.keys()) expect(k).toContain('||');
+    }
+    // Original unverändert
+    expect(fds[fds.length - 1].outer.length).toBe(36);
+    expect(fds[fds.length - 2].outer.length).toBe(36);
+  });
+
+  test('12: obere Deckfläche entfernt → validate lässt alle Bänder fallen (0)', () => {
+    const fds = fall3();
+    const fds2 = fds.slice(0, -1);                          // obere Deckfläche weg
+    const det = run(fds2);
+    expect(det.bands.length).toBe(12);
+    validateArcBands(fds2, det, { vtxKey });
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.valid).toBe(0);
+    expect(det.capEdits.length).toBe(0);
+    expect(det.arcs.size).toBe(0);
+  });
+
+  test('13: edgeCanonKey — richtungsunabhängig, zwei Striche', () => {
+    const a = [1, 2, 3], b = [4, 5, 6];
+    expect(edgeCanonKey(vtxKey, a, b)).toBe(edgeCanonKey(vtxKey, b, a));
+    expect(edgeCanonKey(vtxKey, a, b)).toContain('||');
+    expect(edgeCanonKey(vtxKey, a, b).split('||').length).toBe(2);
   });
 });
 
