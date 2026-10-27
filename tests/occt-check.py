@@ -86,8 +86,14 @@ def check(path):
     free = 0
     for i in range(1, m.Extent() + 1):
         faces = m.FindFromIndex(i)                       # Extent/First statt list(): 100× schneller in OCP
-        if faces.Extent() == 1 and not BRep_Tool.IsClosed_s(TopoDS.Edge_s(m.FindKey(i)), TopoDS.Face_s(faces.First())):
-            free += 1
+        if faces.Extent() != 1:
+            continue
+        e = TopoDS.Edge_s(m.FindKey(i))
+        # Naht (Zylinder-/Kegel-Mantel) und degenerierte Kanten (Kegelspitze aus VERTEX_LOOP:
+        # Länge 0, keine 3D-Kurve) sind keine echten Randkanten
+        if BRep_Tool.Degenerated_s(e) or BRep_Tool.IsClosed_s(e, TopoDS.Face_s(faces.First())):
+            continue
+        free += 1
     out['freeEdges'] = free
     g = GProp_GProps(); BRepGProp.VolumeProperties_s(s, g)
     out['volume'] = g.Mass()
