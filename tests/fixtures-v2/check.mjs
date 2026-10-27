@@ -438,6 +438,54 @@ function cskVariant(body, c, step, others) {
   };
 }
 
+// Senkung an BEIDEN Enden (body.countersinkBoth): die Bohrung wird Zylinder Rc (zLo … zHi) + ZWEI
+// Kegel — unten vom Mündungskreis (unten) auf den Rand, oben vom Rand auf den Mündungskreis (oben).
+// Ziel: beide Enden scharf (die Kegel bleiben, nur die Kanten-Rundung fällt weg). Parameter aus der
+// emittierten STEP lesen, Volumen exakt nachrechnen; Platte = Körper ohne Senkungs-Säule (äußere
+// Rundungen scharf, `others`).
+function cskBothVariant(body, c, step, others) {
+  const ent = new Map();
+  for (const line of step.split('\n')) { const m = line.match(/^#(\d+)=(.*);$/); if (m) ent.set(+m[1], m[2]); }
+  const pt = (i) => ent.get(i).match(/,\(([^()]*)\)\)$/)[1].split(',').map(Number);
+  const plac = (ref) => { const m = ent.get(+ref.slice(1)).match(/AXIS2_PLACEMENT_3D\('',(#\d+),(#\d+),(#\d+)\)/); return { loc: pt(+m[1].slice(1)), axis: pt(+m[2].slice(1)) }; };
+  const col = body.columns[c.col];
+  const cx = col.profile.reduce((s, p) => s + p[0], 0) / col.profile.length, cy = col.profile.reduce((s, p) => s + p[1], 0) / col.profile.length;
+  let Rc = null; const circles = [];
+  for (const e of ent.values()) {
+    let m;
+    if ((m = e.match(/^CYLINDRICAL_SURFACE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05 && Math.abs(+m[2] - c.R) < 0.05) Rc = +m[2]; }
+    if ((m = e.match(/^CIRCLE\('',(#\d+),([\d.]+)\)/))) { const p = plac(m[1]); if (Math.hypot(p.loc[0] - cx, p.loc[1] - cy) < 0.05) circles.push({ r: +m[2], z: p.loc[2] }); }
+  }
+  if (Rc === null) return null;                                   // Bohrung nicht umgewandelt → planare Varianten
+  const fail = (why) => ({ label: `Senkung beidseitig→Zylinder+2 Kegel: ${why}`, sharpCount: others, bores: 1, cones: 2, planar: false, volume: NaN, tol: tolAnalytic, target: false });
+  const rim = circles.filter((k) => Math.abs(k.r - Rc) < 1e-6).map((k) => k.z).sort((x, y) => x - y);
+  const mouth = circles.filter((k) => k.r > Rc + 0.02).sort((x, y) => x.z - y.z);
+  if (rim.length !== 2 || mouth.length !== 2) return fail(`Kreise ${rim.length}/${mouth.length}`);
+  const [zLo, zHi] = rim;
+  const cosn = Math.cos(Math.PI / c.seg);
+  // Soll-Mündungsradius: das Mündungs-Polygon des Generators ist umschrieben (Kegelmantel berührt
+  // die Polygonecken) → Radius = (R + Tiefe·tan β) / cos(π/Seg), wie R2sharp in cskVariant.
+  const R2nom = (e) => c.R + e.depth * Math.tan((e.ang / 2) * Math.PI / 180) / cosn;
+  const R2b = R2nom(c.bottom), R2t = R2nom(c.top);
+  const chk = (t) => Math.abs(Rc - c.R) < t
+    && Math.abs(mouth[0].z - col.z0) < t && Math.abs(mouth[1].z - col.z1) < t
+    && Math.abs(zLo - (col.z0 + c.bottom.depth)) < t && Math.abs(zHi - (col.z1 - c.top.depth)) < t
+    && Math.abs(mouth[0].r - R2b) < t && Math.abs(mouth[1].r - R2t) < t;
+  const plaus = chk(0.02), exact = chk(0.01);
+  const frustum = (r1, r2, h) => (Math.PI * h / 3) * (r1 * r1 + r1 * r2 + r2 * r2);
+  const plateBody = { ...body, columns: body.columns.filter((_, i) => i !== c.col) };
+  const v = meshVolume(buildMesh(sharpen(plateBody))) - Math.PI * Rc * Rc * (zHi - zLo)
+    - frustum(Rc, mouth[0].r, zLo - mouth[0].z) - frustum(Rc, mouth[1].r, mouth[1].z - zHi);
+  const aLat = 2 * Math.PI * Rc * (zHi - zLo)
+    + Math.PI * (Rc + mouth[0].r) * Math.hypot(mouth[0].r - Rc, zLo - mouth[0].z)
+    + Math.PI * (Rc + mouth[1].r) * Math.hypot(mouth[1].r - Rc, mouth[1].z - zHi);
+  return {
+    label: `Senkung beidseitig scharf → Zylinder R${Rc.toFixed(3)} (z ${zLo.toFixed(3)}..${zHi.toFixed(3)}) + 2 Kegel auf R${mouth[0].r.toFixed(3)}/R${mouth[1].r.toFixed(3)}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    sharpCount: others, bores: 1, cones: 2, planar: false, volume: plaus ? v : NaN,
+    tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: exact && body.expect.mode === 'sharp',
+  };
+}
+
 // Ergebnis einer Variante zuordnen: exakt, sonst ≤ STEP_UNC (Toleranz-Stufe), sonst null
 function matchVariants(r, vs, ctx) {
   const { heights, inv, heavy } = ctx;
@@ -531,6 +579,9 @@ async function checkBody(body, occt) {
   if (body.expect.mode === 'skip' && (on.bands || iso.bands)) out.problems.push(`v2 hat ${Math.max(on.bands, iso.bands)} Band/Bänder entfernt, Soll ist Überspringen`);
   // v1-Soll (Anzahl entfernter Kanten-Verrundungen): weniger = Rückfall/Fehlschlag, mehr = unerwartet
   if (body.expect.fillets !== undefined && on.exported && on.fillets !== body.expect.fillets) out.problems.push(`AN: v1 entfernt ${on.fillets} Verrundung(en), Soll ${body.expect.fillets} (fallbackStage ${on.fallbackStage})`);
+  // Soll-Bohrungszahl: die Bohrung muss umgewandelt werden (Zylinder + Kegel) — sonst Orientierungs-
+  // fehler (Mündungs-Kegel über Kreuz dem falschen Rand zugeordnet → alles facettiert).
+  if (body.expect.bores !== undefined && on.exported && on.bores !== body.expect.bores) out.problems.push(`AN: ${on.bores} Bohrung(en) umgewandelt, Soll ${body.expect.bores} (fallbackStage ${on.fallbackStage})`);
   // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert
   if (iso.watertight && iso.bands > 0 && on.bands === 0 && on.bores === 0 && on.fillets === 0) {
     out.problems.push(`Fallback verwirft v2: v2 allein entfernt ${iso.bands} Band/Bänder wasserdicht, volle Pipeline liefert alles facettiert (Ursache außerhalb defeatureBands: ein anderer Schritt öffnet die Hülle → globaler Fallback)`);
@@ -564,6 +615,9 @@ async function checkBody(body, occt) {
     if (tag === 'AN' && !body.boreChamfer) { const mv = mantleSharpVariant(body, r.step); if (mv) vs.push(mv); }
     if (tag === 'AN' && body.countersink) {
       for (const c of body.countersink) { const cv = cskVariant(body, c, r.step, roundedPairs(body).filter((p) => p.c !== c.col).length); if (cv) vs.push(cv); }
+    }
+    if (tag === 'AN' && body.countersinkBoth) {
+      for (const c of body.countersinkBoth) { const cv = cskBothVariant(body, c, r.step, roundedPairs(body).filter((p) => p.c !== c.col).length); if (cv) vs.push(cv); }
     }
     const m = matchVariants(r, vs, ctx);
     const res = { match: m.hit ? m.hit.label : null, tier: m.tier, target: m.hit ? m.hit.target : false, dV: m.dV, maxDist: m.maxDist };
