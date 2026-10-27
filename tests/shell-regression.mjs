@@ -16,6 +16,7 @@
 import { createRequire } from 'module';
 import { parseStl } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -100,7 +101,7 @@ export const CASES = [
 // ---- Pipeline wie im Worker
 export function groupsOfTris(tris) {
   const buf = G.toBinaryStl(tris, 'schalen');
-  const mesh = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
+  const mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh;
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   quiet(() => recognizePrimitives(groups));
   quiet(() => detectTubes(groups));

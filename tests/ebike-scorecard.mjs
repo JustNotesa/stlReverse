@@ -22,6 +22,7 @@ import { dirname, join } from 'path';
 import { createRequire } from 'module';
 import { parseStl } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -36,7 +37,7 @@ const REFERENCE = 'fischerEbike - FahrradLicht - mount unter sattel(ohne rundung
 const origLog = console.log;
 const quiet = async (fn) => { console.log = () => {}; try { return await fn(); } finally { console.log = origLog; } };
 
-const load = (f) => { const buf = readFileSync(join(SAMPLES, f)); return parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {}); };
+const load = (f) => { const buf = readFileSync(join(SAMPLES, f)); return cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh; };
 const volume = (tris) => { let v = 0; for (const [a, b, c] of tris) v += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6; return Math.abs(v); };
 // Netto-Schnittfläche eines geschlossenen Netzes mit der Ebene y = y0
 const sliceArea = (tris, y0) => {

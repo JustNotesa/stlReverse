@@ -9,7 +9,7 @@
 // (Bug-Historie: sphere_full lief 101 s statt 62 ms, der Worker bricht nach 60 s ab).
 //
 // Läuft die ECHTE Worker-Pipeline (gleiche Module, gleiche Reihenfolge wie analysis-worker.js):
-//   parseStl → simplifyMesh (>50k) → buildNormalGroups → unifyCoplanarGroups →
+//   parseStl → cleanMesh → simplifyMesh (>50k) → buildNormalGroups → unifyCoplanarGroups →
 //   recognizePrimitives → detectTubes → buildVolumeStepBrepV2 (Defeaturing-Toggle AN und AUS)
 //
 // Ausführen:   npm run test:golden            (Exit 0 = alles wie erwartet, 1 = Abweichung)
@@ -21,6 +21,7 @@ import { dirname, join } from 'path';
 import { createRequire } from 'module';
 import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -41,6 +42,7 @@ const origLog = console.log;
 const quiet = async (fn) => { console.log = () => {}; try { return await fn(); } finally { console.log = origLog; } };
 
 function pipeline(mesh) {
+  mesh = cleanMesh(mesh).mesh;   // Netz-Bereinigung wie im Worker
   if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified
     .sort((a, b) => b.vertices.length - a.vertices.length);

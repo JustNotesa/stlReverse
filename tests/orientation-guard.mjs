@@ -28,6 +28,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -47,6 +48,7 @@ const origLog = console.log;
 const quiet = (fn) => { console.log = () => {}; try { return fn(); } finally { console.log = origLog; } };
 
 function groupsOf(mesh) {
+  mesh = cleanMesh(mesh).mesh;   // Netz-Bereinigung wie im Worker
   if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   recognizePrimitives(groups);

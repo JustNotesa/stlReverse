@@ -34,6 +34,7 @@ import {
   projectOutline
 } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -56,7 +57,7 @@ const loadStl = (name) => {
 const recognitionCache = new Map();
 function runRecognition(file) {
   if (recognitionCache.has(file)) return recognitionCache.get(file);
-  let mesh = parseStl(loadStl(file), () => {});
+  let mesh = cleanMesh(parseStl(loadStl(file), () => {})).mesh;   // Netz-Bereinigung wie im Worker
   if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
   let groups = buildNormalGroups(mesh);
   groups = unifyCoplanarGroups(groups).unified

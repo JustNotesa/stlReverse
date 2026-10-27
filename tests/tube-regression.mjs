@@ -23,6 +23,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { createRequire } from 'module';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -221,7 +222,7 @@ const isMain = process.argv[1] && process.argv[1].endsWith('tube-regression.mjs'
 let fails = 0;
 const check = (ok, msg) => { console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${msg}`); if (!ok) fails++; };
 for (const cs of isMain ? cases : []) {
-  const mesh = channelBlock(cs.mesh);
+  const mesh = cleanMesh(channelBlock(cs.mesh)).mesh;   // Netz-Bereinigung wie im Worker
   if (process.env.DIAG) {
     const k = (p) => p.map((x) => x.toFixed(4)).join(','), ec = new Map();
     for (const f of mesh.faces) for (let i = 0; i < 3; i++) { const a = k(f.vertices[i]), b = k(f.vertices[(i + 1) % 3]); const e = a < b ? a + '|' + b : b + '|' + a; ec.set(e, (ec.get(e) || 0) + 1); }

@@ -32,6 +32,7 @@ import { dirname, join, basename } from 'path';
 import { createRequire } from 'module';
 import { parseStl, simplifyMesh } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
+import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
@@ -100,7 +101,7 @@ const occtVolume = (step) => {
   return v;
 };
 const groupsOfStl = (buf) => {
-  let mesh = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
+  let mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh;
   if (mesh.faces.length > 50000) mesh = simplifyMesh(mesh, 50000, () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   quiet(() => recognizePrimitives(groups));
