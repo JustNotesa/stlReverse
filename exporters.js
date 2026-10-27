@@ -1271,10 +1271,22 @@ export function buildVolumeStepBrepV2(analysis) {
       const defeatureOne = (entry) => {
         const prim = entry.prim;
         const fAxis = _norm3(prim.axis), fAp = prim.axisPoint, rf = prim.radius;
-        const own = new Set(entry.groups);
+        const tolM = Math.max(0.1, 0.06 * rf);
+        const radDev = (v) => {
+          const w = _sub3(v, fAp), al = _dot3(w, fAxis);
+          return Math.abs(Math.hypot(w[0] - fAxis[0] * al, w[1] - fAxis[1] * al, w[2] - fAxis[2] * al) - rf);
+        };
+        // Streifen = nur die Gruppen, die WIRKLICH auf dem Verrundungs-Zylinder liegen. Die Erkennung
+        // schlägt dem Primitiv mitunter die tangential anschließende Ebene zu (Kabelhalter: Deckfläche
+        // mit 1586 Dreiecken in der r=1-Rundung, Taschenwände in den r=0,3-Ecken) — die würde v1 sonst
+        // als Teil der Rundung entfernen bzw. ihre Nachbarn für die Seiten-Ebenen halten. Solche
+        // Gruppen sind hier Nachbarn (Seiten-Ebene) wie jede andere.
+        const strip = entry.groups.filter((g) => g.vertices.every((v) => radDev(v) <= tolM));
+        if (!strip.length) return false;
+        const own = new Set(strip);
         // Rand-Kanten des Streifens → Nachbar-Gruppen (Gewicht = geteilte Kanten)
         const ec = new Map();
-        for (const g of entry.groups) {
+        for (const g of strip) {
           const vs = g.vertices, tc = Math.floor(vs.length / 3);
           for (let t = 0; t < tc; t++) {
             const tri = [vs[t * 3], vs[t * 3 + 1], vs[t * 3 + 2]];
@@ -1304,6 +1316,19 @@ export function buildVolumeStepBrepV2(analysis) {
         }
         if (clusters.length !== 2) return false; // gekrümmte Umgebung (viele Orientierungen) → v2
         const [A, B] = clusters;
+        // Seiten = ECHTE Ebenen: alle Gruppen eines Clusters liegen in der Ebene seiner größten Gruppe
+        // (≤ 1 µm; das Region-Growing fasst bis 2° Knick zusammen — eine „Wand“ aus Facetten eines
+        // flachen Bogens wäre sonst eine Ebene, deren mittlere Lage neben der Rundung liegt).
+        const FLAT_TOL = 1e-3;
+        for (const cl of [A, B]) {
+          cl.n = _norm3(cl.ref.normal);
+          const vs = cl.ref.vertices; let s = 0; for (const v of vs) s += _dot3(cl.n, v);
+          cl.off = s / vs.length;
+          for (const [g] of nbWeight) {
+            if (Math.abs(_dot3(_norm3(g.normal), cl.n)) < 0.99) continue;              // anderer Cluster / Kappe
+            for (const v of g.vertices) if (Math.abs(_dot3(cl.n, v) - cl.off) > FLAT_TOL) return false;
+          }
+        }
         if (Math.abs(_dot3(A.n, B.n)) > Math.cos(20 * Math.PI / 180)) return false; // fast koplanar
         // Scharfe Kante = Schnittlinie der beiden Ebenen (Richtung ≈ Fillet-Achse)
         const d0 = _cross3(A.n, B.n);
@@ -1316,16 +1341,23 @@ export function buildVolumeStepBrepV2(analysis) {
         // verschiedenen t, also neben der Wand (Trapez mit verrundeter Ober-/Unterkante: Stirnwand
         // 0.47 mm uneben, ΔV +25 mm³ bei dichter Hülle). Solche Rundungen bleiben v2 (offenes Band).
         for (const n of caps) if (Math.abs(_dot3(n, dir)) < Math.cos(Math.PI / 180)) return false;
-        const planeOff = (cl) => { const vs = cl.ref.vertices; let s = 0; for (const v of vs) s += _dot3(cl.n, v); return s / vs.length; };
+        const planeOff = (cl) => cl.off;
+        // Verrundung = TANGENTIALER Übergang: beide Seiten-Ebenen berühren den Verrundungs-Zylinder,
+        // ihr Abstand zur Achse ist genau r (CAD-Netze: Abweichung ~0). Sonst sind die „Seiten“ keine
+        // Ebenen, an die die Rundung anschließt, sondern z.B. einzelne Facetten benachbarter gebogener
+        // Wände (Kabelhalter: r = 0,3 in der Logo-Tasche, Abstand 0,37/0,66 statt 0,3 — der Schnitt
+        // zweier Facetten lag 0,8 mm neben der Rundung, die Hülle riss auf und ALLES fiel in den
+        // facettierten Rückfall). Solche Bereiche bleiben facettiert.
+        const tangTol = Math.max(0.005, 0.01 * rf);
+        for (const cl of [A, B]) if (Math.abs(Math.abs(_dot3(cl.n, fAp) - planeOff(cl)) - rf) > tangTol) return false;
         const p0 = solve3(A.n, planeOff(A), B.n, planeOff(B), dir, _dot3(dir, fAp));
         if (!p0) return false;
         // Streifen-Ausdehnung entlang der Linie
         let tLo = Infinity, tHi = -Infinity;
-        for (const g of entry.groups) for (const v of g.vertices) {
+        for (const g of strip) for (const v of g.vertices) {
           const t = _dot3(_sub3(v, p0), dir); if (t < tLo) tLo = t; if (t > tHi) tHi = t;
         }
         if (!(tHi > tLo)) return false;
-        const tolM = Math.max(0.1, 0.06 * rf);
         const onStrip = (v) => {
           const w = _sub3(v, fAp), al = _dot3(w, fAxis);
           const perp = Math.hypot(w[0] - fAxis[0] * al, w[1] - fAxis[1] * al, w[2] - fAxis[2] * al);
@@ -1378,7 +1410,7 @@ export function buildVolumeStepBrepV2(analysis) {
           }
           loop.length = 0; loop.push(...out);
         }
-        for (const g of entry.groups) defeaturedGroups.add(g);
+        for (const g of strip) defeaturedGroups.add(g);
         return true;
       };
       for (const entry of filletById.values()) {
