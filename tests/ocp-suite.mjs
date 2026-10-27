@@ -65,19 +65,11 @@ origLog(`OCP-Prüfer: ${py.join(' ')} tests/occt-check.py`);
 
 // ---- Erwartete Befunde je Datei (Schlüssel: Dateiname wie unten erzeugt). bop = BRepAlgoAPI_Check,
 // sa = ShapeAnalysis (Anzahl Flächen). Alles nicht Aufgeführte muss befundfrei sein.
-const EBIKE_PLAIN = 'fischerEbike - FahrradLicht - mount unter sattel(ohne rundungen).stl';
-const EBIKE = 'fischerEbike - FahrradLicht - mount unter sattel.stl';
 const EXPECT = {
   // dino: zwei Körper durchdringen sich schon im NETZ (44 Kanten-Durchstöße zwischen den Komponenten
   // mit 2176 und 1048 Dreiecken, gemessen am STL) plus Selbstberührungen innerhalb der Körper
   'dino_clip_v3_04-strong-closing.stl [AN]': { bop: { BOPAlgo_SelfIntersect: 51 } },
   'dino_clip_v3_04-strong-closing.stl [AUS]': { bop: { BOPAlgo_SelfIntersect: 51 } },
-  // eBike: Übergangskurven der Kanal-SURFACE_OF_REVOLUTION liegen neben deren Naht — OCCT teilt sie
-  // beim Lesen (Kanal-Bereich, bekannte Ausnahme, nicht hier zu beheben)
-  [`${EBIKE_PLAIN} [AN]`]: { sa: { gaps3d: 2 } },
-  [`${EBIKE_PLAIN} [AUS]`]: { sa: { gaps3d: 2 } },
-  [`${EBIKE} [AN]`]: { sa: { gaps3d: 2 } },
-  [`${EBIKE} [AUS]`]: { sa: { gaps3d: 2 } },
 };
 for (const cs of CASES) if (cs.ocpBop) for (const t of ['AN', 'AUS']) EXPECT[`${cs.name} [${t}]`] = { bop: cs.ocpBop };
 
