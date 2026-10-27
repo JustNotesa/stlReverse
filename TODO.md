@@ -63,9 +63,6 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
     Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
   - **Fasen-Erkennung flacher als ~15°** (AXIS_PERP 0,26 in primitive-recognition.js) verhindert die Zylinder-
     Erkennung — Rest aus Runde J (B), betrifft die gemeinsame Erkennung + Golden, daher bewusst offen.
-  - **Kabelhalter: Bohrung/Senkung** — Kreiskanten (-19,1,0|2.25 / -19,2.5,0|2.25) mit Orientierungsfehler →
-    fallbackStage 1, ~700 Flächen facettiert. Primitiv-Erkennung hängt Gruppen schon bei 1 passenden Dreieck an
-    (acceptPrim) — dieselbe „Verschmutzung“, die K bei v1 behoben hat.
   - **Profil-Bögen als Teil-Zylinder + Fasen-Kegel** — Hauptmasse der Kabelhalter-Datei (Haken-Biegungen r 3–9 mm,
     Logo-Bögen). Größter Hebel für kleinere Dateien (User 2026-10-27: „7 MB zu groß, 0,0001 mm muss nicht
     abgebildet werden“).
@@ -200,6 +197,11 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Kabelhalter-Senkung (2026-10-27, `wt/senkung-kabel`, Lead Claude + Code MiniMax)** — Fasen-Pfad (matchRims)
+  ordnete Mündungskreise über Kreuz zu (Suchfenster CHAMFER_MAX 3 mm = Plattendicke) → Kegel quer durch die Bohrung,
+  Kreiskanten doppelt gleichsinnig, Stufe 1. Jetzt nur Kreise axial außerhalb des eigenen Randes, nächster gewinnt;
+  enforcePlanarity vor convertSharpBores (AN mit Bohrungen). Kabelhalter AN: 5163 → 4076 Flächen, 5,8 → 4,55 MB,
+  Stufe 0, Zylinder + 2 Kegel, OCP gültig. Härtetest k3/k4. Offen: Rückfall je Merkmal auch für Bohrungen.
 - [x] **Runde J (2026-10-27): Mindest-Detailgröße, Kabelhalter-Verrundungen, Bohrungs-Pfad** —
   (A) `mesh-clean.js`: Kanten < τ werden vor dem Region-Growing kollabiert (Ecken/scharfe Kanten geschützt,
   Ebenen-Treue 1e-5, keine Durchdringung); UI „Kleinste Detailgröße“ aus/0,01/**0,02**/0,05/0,1 mm; STEP-Kopf
