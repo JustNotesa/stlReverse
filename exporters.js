@@ -12,7 +12,7 @@ import {
   mapOutlinePointToDxf, mapOutlinePointToStep,
   defaultBounds, rectangleFromBounds
 } from './utils.js';
-import { matchTubeMouths } from './tube-sweep.js?v=3';
+import { matchTubeMouths } from './tube-sweep.js?v=4';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
