@@ -16,6 +16,12 @@
 // `wallSteps` (Wand in Z unterteilt); je Körper: `transform` (gedreht/verschoben), `caps` (eigene
 // Deckflächen, z. B. Taschenboden). BODIES (a)–(i) = Pflichtkörper, `extra: true` = gezielte
 // Angriffe; STRESS = Laufzeitkörper (~49k Dreiecke, wird nicht als Datei geschrieben).
+// Profile mit echten Bögen: `filletedPolygon` (Eckrundung je Ecke, konvex wie einspringend) und
+// die Blech-Profile L/U/Z (konstante Wandstärke, Innen-/Außenbogen konzentrisch). Solche Bögen
+// wandelt der Exporter in Teil-Zylinder/-Kegel um — `expect.arcsOff` zählt die erwarteten
+// Bogen-Flächen (Zylinder + Kegel) im AUS-Export. `expect.anFree` (p1–p3, p5): im AN-/v2-Lauf
+// schärfen v1/v2 die Biegungen bzw. Taschenecken — dort wird KEINE Variante verlangt, nur
+// wasserdicht/occt/strikt; AUS bleibt voll geprüft (Bögen, Volumen).
 //
 // Aufruf:  node tests/fixtures-v2/gen.mjs [zielordner]   (Default: tests/fixtures-v2/stl)
 //          → schreibt je Körper eine binäre STL + prüft Manifold/Orientierung.
@@ -100,6 +106,87 @@ export const sharpenCorners = (pts, ranges) => {
 };
 
 export const polyArea = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; s += p[0] * q[1] - q[0] * p[1]; } return s / 2; };
+
+// ── Profil-Eckrundungen (echte Bögen im Profil) ─────────────────────────────
+// filletInfo: je Ecke der Bogen (Radius r, Mittelpunkt C, Öffnungswinkel phi = Drehwinkel der
+// Ecke, Startwinkel a1 der Sehne C→T1). Konvexe Ecke (phi > 0): der Bogenmittelpunkt liegt
+// LINKS der beiden Kanten (im Material), Abstand r/sin(θ/2) auf der Winkelhalbierenden.
+// Einspringende Ecke (phi < 0): der Mittelpunkt liegt RECHTS der Kanten (im Ausschnitt),
+// derselbe Abstand r/sin(θ/2). T1 = Berührpunkt auf der einlaufenden, T2 auf der auslaufenden
+// Kante (Bogen tangential an beide).
+export function filletInfo(pts, radii) {
+  const n = pts.length, out = [];
+  for (let i = 0; i < n; i++) {
+    const r = radii[i] || 0;
+    if (!(r > 0)) { out.push(null); continue; }
+    const p = pts[(i - 1 + n) % n], v = pts[i], q = pts[(i + 1) % n];
+    let a = [v[0] - p[0], v[1] - p[1]]; const la = Math.hypot(a[0], a[1]); a = [a[0] / la, a[1] / la];
+    let b = [q[0] - v[0], q[1] - v[1]]; const lb = Math.hypot(b[0], b[1]); b = [b[0] / lb, b[1] / lb];
+    const cr = a[0] * b[1] - a[1] * b[0];
+    if (Math.abs(cr) < 1e-12) throw new Error(`Ecke ${i} ist kollinear — keine Rundung möglich`);
+    const na = [-a[1], a[0]], nb = [-b[1], b[0]];                 // Linke-Normalen der Kanten
+    const phi = Math.atan2(cr, a[0] * b[0] + a[1] * b[1]);      // Drehwinkel der Ecke (positiv = konvex)
+    const s = phi > 0 ? 1 : -1;                                  // konvex: Mitte links, einspringend: rechts
+    // Die um s·r verschobenen Kantenlinien schneiden sich im Bogenmittelpunkt:
+    //   v + s·r·na + λ·a  =  v + s·r·nb + μ·b   →   λ·a − μ·b = s·r·(nb − na)
+    const wx = s * r * (nb[0] - na[0]), wy = s * r * (nb[1] - na[1]);
+    const det = -cr;
+    const lam = (-wx * b[1] + b[0] * wy) / det;
+    const C = [v[0] + s * r * na[0] + lam * a[0], v[1] + s * r * na[1] + lam * a[1]];
+    const T1 = [C[0] - s * r * na[0], C[1] - s * r * na[1]];      // Berührpunkt einlaufende Kante
+    out.push({ C, r, phi, s, convex: s > 0, a1: Math.atan2(T1[1] - C[1], T1[0] - C[0]) });
+  }
+  return out;
+}
+// Polygon (CCW) mit Eckrundung je Ecke: radii[i] = Radius an pts[i] (0 = scharf), seg Segmente
+// je Bogen (unabhängig vom Winkel). Konvexe UND einspringende Ecken: Bogen tangential an beide
+// Kanten, Mittelpunkt auf der Winkelhalbierenden im Abstand r/sin(θ/2) (θ = Innenwinkel).
+// Ergebnis CCW (die Grad-Profile der Bleche).
+export const filletedPolygon = (pts, radii, seg) => {
+  const info = filletInfo(pts, radii), out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const f = info[i];
+    if (!f) { out.push([pts[i][0], pts[i][1]]); continue; }
+    for (let k = 0; k <= seg; k++) {
+      const a = f.a1 + f.phi * k / seg;
+      out.push([f.C[0] + f.r * Math.cos(a), f.C[1] + f.r * Math.sin(a)]);
+    }
+  }
+  return out;
+};
+// Biege-Paare (Blech-Profil): die einspringende Ecke (Radius ri) und die gegenüberliegende konvexe
+// Ecke (Radius ri+t) müssen denselben Bogenmittelpunkt haben (konzentrisch) — sonst wäre die
+// Wandstärke ungleichmäßig. Rückgabe: größte Abweichung der Mittelpunkte (mm).
+export function bendsConcentric(pts, radii, t) {
+  const info = filletInfo(pts, radii), inner = [], outer = [];
+  for (const c of info) { if (!c) continue; (c.convex ? outer : inner).push(c); }
+  if (inner.length !== outer.length) throw new Error(`Biege unpaarig: ${inner.length} Innen-, ${outer.length} Außenbögen`);
+  let worst = 0; const used = new Set();
+  for (const c of inner) {
+    let best = null, bd = Infinity;
+    for (const o of outer) {
+      if (used.has(o) || Math.abs(o.r - (c.r + t)) > 1e-12) continue;
+      const d = Math.hypot(o.C[0] - c.C[0], o.C[1] - c.C[1]);
+      if (d < bd) { bd = d; best = o; }
+    }
+    if (!best) throw new Error(`kein Außenbogen (Radius r+t) zur Innenecke r=${c.r}`);
+    used.add(best); worst = Math.max(worst, bd);
+  }
+  if (worst > 1e-9) throw new Error(`Bogenmittelpunkte nicht konzentrisch (max. Abweichung ${worst.toExponential(3)} mm)`);
+  return worst;
+}
+// Blech-Profile konstanter Wandstärke t, Innenradius ri, Außenradius ri+t (konzentrisch), CCW:
+// L-Profil (Schenkel a×t und t×b), U-Profil (w×h), Z-Haken (Flansch unten links, Steg, Flansch
+// oben rechts — zwei GEGENläufige Biegungen). `*Raw` = die Eckpunkte vor der Rundung (Rohkontur).
+export const sheetLRadii = (ri, t) => [ri + t, 0, 0, ri, 0, 0];
+export const sheetLRaw = (a, b, t) => [[0, 0], [a, 0], [a, t], [t, t], [t, b], [0, b]];
+export const sheetLProfile = (a, b, t, ri, seg) => filletedPolygon(sheetLRaw(a, b, t), sheetLRadii(ri, t), seg);
+export const sheetURadii = (ri, t) => [ri + t, ri + t, 0, 0, ri, ri, 0, 0];
+export const sheetURaw = (w, h, t) => [[0, 0], [w, 0], [w, h], [w - t, h], [w - t, t], [t, t], [t, h], [0, h]];
+export const sheetUProfile = (w, h, t, ri, seg) => filletedPolygon(sheetURaw(w, h, t), sheetURadii(ri, t), seg);
+export const sheetZRadii = (ri, t) => [0, ri + t, ri, 0, 0, ri + t, ri, 0];
+export const sheetZRaw = (a, H, t) => [[-a, 0], [t, 0], [t, H - t], [a, H - t], [a, H], [0, H], [0, t], [-a, t]];
+export const sheetZProfile = (a, H, t, ri, seg) => filletedPolygon(sheetZRaw(a, H, t), sheetZRadii(ri, t), seg);
 
 // ── Gehrungs-Versatz: Kante i (pts[i]→pts[i+1]) um off[i] nach LINKS (ins Material) ──
 export function offsetRing(pts, off) {
@@ -923,6 +1010,61 @@ export const BODIES = [
       expect: { mode: 'sharp', fillets: 4 },
     };
   })(),
+  // ── Profil-Bögen: Bleche mit echten Biege-Bögen, Taschenecken ───────────────
+  // Der Exporter wandelt facettierte Bögen extrudierter Profile in echte Teil-Zylinder/-Kegel um
+  // (CYLINDRICAL_SURFACE / CONICAL_SURFACE). Die Bögen müssen dabei UNVERÄNDERT bleiben: v2 hat
+  // hier nichts zu schärfen (expect.mode 'skip') — nur der Exporter darf sie analytisch machen.
+  // arcsOff = erwartete Zahl der Bogen-Flächen im AUS-Export (Zylinder + Kegel).
+  {
+    id: 'p1', extra: true, file: 'v2_x_bogen_l',
+    desc: 'L-Profil als Blech (Schenkel 30×2 und 2×20, Wandstärke 2, Bogen-Innenradius 3, 8 Seg. je Bogen), 15 hoch, Kanten scharf — zwei Biege-Bögen (ein Zylinder innen, einer außen)',
+    columns: [plate(sheetLProfile(30, 20, 2, 3, 8), 15, { kind: 'sharp' })],
+    bends: { pts: sheetLRaw(30, 20, 2), radii: sheetLRadii(3, 2), t: 2 },
+    expect: { mode: 'skip', arcsOff: 2, anFree: true },
+  },
+  {
+    id: 'p2', extra: true, file: 'v2_x_bogen_u',
+    desc: 'U-Profil als Blech (30×20, Wandstärke 2, Bogen-Innenradius 4, 8 Seg. je Bogen), 15 hoch, Kanten scharf — vier Biege-Bögen (zwei Biegungen)',
+    columns: [plate(sheetUProfile(30, 20, 2, 4, 8), 15, { kind: 'sharp' })],
+    bends: { pts: sheetURaw(30, 20, 2), radii: sheetURadii(4, 2), t: 2 },
+    expect: { mode: 'skip', arcsOff: 4, anFree: true },
+  },
+  {
+    id: 'p3', extra: true, file: 'v2_x_bogen_s',
+    desc: 'Z-Haken als Blech (Flansch 15 unten links, Steg, Flansch 15 oben rechts, Wandstärke 2, Bogen-Innenradius 3, 8 Seg. je Bogen), 17 hoch, Kanten scharf — vier Biege-Bögen (zwei gegenläufige Biegungen)',
+    columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'sharp' })],
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
+    expect: { mode: 'skip', arcsOff: 4, anFree: true },
+  },
+  {
+    id: 'p4', extra: true, file: 'v2_x_bogen_s_fase',
+    desc: 'wie (p3), Stirnseiten oben+unten 0.5×45° gefast (Kabelhalter-Fall: die Fase läuft als Kegel um die Biegungen) — je Bogen 1 Zylinder + 2 Kegel',
+    columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'chamfer', r: 0.5 })],
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
+    expect: { mode: 'skip', arcsOff: 12 },
+  },
+  {
+    id: 'p5', extra: true, file: 'v2_x_bogen_taschenecke',
+    desc: 'Platte 30×20×5 (scharf), Tasche 12×8 Tiefe 1 von oben, Kontur mit senkrechten Eckrundungen r=0.3 (6 Seg.) — vier Bogen-Flächen an den Taschenecken',
+    columns: [
+      { name: 'platte', profile: rectProfile(0, 0, 30, 20), z0: 0, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'tasche', profile: roundedRectProfile(12, 8, 0.3, 6).map(([x, y]) => [x + 9, y + 6]).reverse(), z0: 4, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [] },
+      { up: true, outer: { c: 1, end: 'bottom', rev: true }, holes: [] }, // Taschenboden (z=4)
+    ],
+    expect: { mode: 'skip', arcsOff: 4, anFree: true },
+  },
+  {
+    id: 'p6', extra: true, file: 'v2_x_bogen_s_fase_gedreht',
+    desc: 'wie (p4), schräg im Raum gedreht (20°/35°/10°) und verschoben — die Bögen stehen schräg, die Kegel der Fase ebenso',
+    columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'chamfer', r: 0.5 })],
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
+    transform: { rot: [20, 35, 10], t: [50, -20, 7] },
+    expect: { mode: 'skip', arcsOff: 12 },
+  },
 ];
 
 // Stresskörper (Laufzeit, ~49k Dreiecke < 50k-Vereinfachungsgrenze); nicht als STL-Datei
@@ -945,6 +1087,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   mkdirSync(OUT, { recursive: true });
   for (const body of BODIES) {
     const tris = buildMesh(body);
+    if (body.bends) {
+      // Biege-Paare: Innen- und Außenbogen müssen konzentrisch sein (sonst ungleiche Wandstärke)
+      try { bendsConcentric(body.bends.pts, body.bends.radii, body.bends.t); }
+      catch (e) { console.error(`${body.file}: ${e.message}`); process.exitCode = 1; }
+    }
     const m = checkManifold(tris);
     if (!m.ok) { console.error(`${body.file}: NICHT manifold (${m.badEdges} Kanten, ${m.degenerate} entartet)`); process.exitCode = 1; }
     const buf = toBinaryStl(tris, body.file);
