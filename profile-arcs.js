@@ -791,6 +791,135 @@ function cutCycle(chain, k) {
 }
 
 /**
+ * Herkunft eines Bands merken (Kontext, Kette, Facettenbereich) — nicht aufzählbar,
+ * damit validate/apply es ignorieren.
+ */
+function setBandSrc(band, ctx, chain, i, j) {
+  Object.defineProperty(band, '_src', {
+    value: { ctx, chain, i, j }, enumerable: false, writable: true, configurable: true,
+  });
+  return band;
+}
+
+/**
+ * Teilbänder eines Band-Bereichs [a..b] bauen (tryBand + makeBand, inkl. blocked).
+ * Scheitert die Prüfung oder hat der Bereich zu wenige Segmente → kein Band
+ * (die Facetten bleiben facettiert).
+ */
+function pushBand(ctx, chain, a, b, out) {
+  const chk = tryBand(ctx, chain, a, b);
+  if (!chk || chk.nSegs < ctx.o.minSegs) return;
+  const made = makeBand(ctx, chain, a, b, chk, out.length);
+  if (!made) return;
+  setBandSrc(made.band, ctx, chain, a, b);
+  out.push(made.band);
+}
+
+/**
+ * Teilungsstellen eines Bandes: Facettengrenzen (Index s in der Kette), an denen ein
+ * Bogen des Bandes einen inneren Punkt hat, der Bogen-ENDpunkt eines anderen Bandes ist.
+ * Für das lo-Seg zählt der lo-Punkt der Seitenkante, für das hi-Seg der hi-Punkt.
+ * → aufsteigend sortierte Liste der Grenzindizes (i < s ≤ j).
+ */
+function cutsOfBand(X, chain, i, j, breaks, vkey) {
+  const cuts = new Set();
+  for (const seg of (X.segs || [])) {
+    if (seg.type !== 'arc' || !seg.pts || seg.pts.length < 3) continue;
+    const useLo = seg.level === 'lo';
+    for (let k = 1; k + 1 < seg.pts.length; k++) {
+      const kk = vkey(seg.pts[k]);
+      if (!breaks.has(kk)) continue;
+      for (let s = i + 1; s <= j; s++) {
+        const side = chain.sides[s];
+        if (!side) continue;
+        if (vkey(useLo ? side[0] : side[1]) === kk) { cuts.add(s); break; }
+      }
+    }
+  }
+  return [...cuts].sort((a, b) => a - b);
+}
+
+/**
+ * alignBands — gemeinsame Teilungsstellen der Bänder übereinanderliegender Ebenen.
+ *
+ * Zylinder-Band und das darüberliegende Fasen-Kegel-Band werden je Kette (Ebene)
+ * UNABHÄNGIG gierig geteilt → ihre Teilungsstellen können verschieden liegen. Dann
+ * grenzt der Bogen des einen Bandes halb an das andere Band, halb an eine Facette →
+ * validateArcBands verwirft beide.
+ *
+ * Vorgehen: `breaks` = alle Endpunkte aller Bogen-Segs aller Bänder. Hat ein Band X
+ * einen Bogen, dessen INNERER Punkt ein Endpunkt eines anderen Bandes ist, so liegt
+ * dort eine Teilungsstelle: X wird an dieser Facettengrenze in Teilbänder zerlegt
+ * (Bereiche [i..s1−1], [s1..s2−1], …, [sk..j]; jeder Bereich neu prüfen — Bereiche,
+ * die scheitern, entfallen → ihre Facetten bleiben facettiert). Wiederholen bis nichts
+ * mehr kippt (höchstens 20 Durchgänge).
+ *
+ * `taken` bleibt unberührt (wirkt nur zwischen Achsen).
+ * → { bands, arcs, stats }  (Ids fortlaufend neu vergeben, arcs neu gebaut)
+ */
+function alignBands(bands, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  const vkey = vtxKeyOf(o);
+  let cur = (bands || []).slice();
+  let aligned = 0;
+
+  for (let pass = 0; pass < 20; pass++) {
+    // breaks: Endpunkte ALLER Bogen-Segs ALLER Bänder
+    const breaks = new Set();
+    for (const b of cur) {
+      for (const s of (b.segs || [])) {
+        if (s.type !== 'arc' || !s.pts || s.pts.length < 2) continue;
+        breaks.add(vkey(s.pts[0]));
+        breaks.add(vkey(s.pts[s.pts.length - 1]));
+      }
+    }
+    let changed = false;
+    const next = [];
+    for (const X of cur) {
+      const src = X._src;
+      if (!src || !src.chain || !src.chain.sides) { next.push(X); continue; }
+      const { ctx, chain } = src;
+      const i = src.i, j = src.j;
+      const cuts = cutsOfBand(X, chain, i, j, breaks, vkey);
+      if (!cuts.length) { next.push(X); continue; }
+      changed = true;
+      aligned += cuts.length;
+      let a = i;
+      for (const s of cuts) {
+        if (s - 1 >= a) pushBand(ctx, chain, a, s - 1, next);
+        a = s;
+      }
+      if (j >= a) pushBand(ctx, chain, a, j, next);
+    }
+    cur = next;
+    if (!changed) break;
+  }
+
+  // Ids fortlaufend neu vergeben, arcs neu bauen, stats zählen
+  for (let k = 0; k < cur.length; k++) cur[k].id = k;
+  const arcs = new Map();
+  let cyl = 0, cone = 0;
+  for (const band of cur) {
+    if (band.kind === 'cyl') cyl++; else cone++;
+    const segs = band.segs || [];
+    segs.forEach((seg, si) => {
+      if (seg.type !== 'arc') return;
+      const key = seg.arcKey;
+      let rec = arcs.get(key);
+      if (!rec) {
+        rec = {
+          key, pts: seg.pts, d: band.d, frame: band.frame,
+          level: band.levels[seg.level], owners: [],
+        };
+        arcs.set(key, rec);
+      }
+      rec.owners.push({ band: band.id, seg: si });
+    });
+  }
+  return { bands: cur, arcs, stats: { bands: cur.length, cyl, cone, aligned } };
+}
+
+/**
  * Bänder suchen (Schritte 1–5 ohne Nachbar-Prüfung).
  * fds: Array ebener Flächen { outer, inner, normal, centroid }
  * opts: { ...ARC_DEFAULTS, vtxKey (Pflicht), blocked (Set von Signaturen, optional) }
@@ -803,7 +932,6 @@ export function findArcBands(fds, opts) {
   const index = buildEdgeIndex(list, o);
   const axes = axisCandidates(list, o);
   const bands = [];
-  const arcs = new Map();
   const stats = { axes: axes.length, candidates: 0, chains: 0, bands: 0, cyl: 0, cone: 0 };
   const taken = new Set();                       // Facetten mit Band einer früheren Achse
 
@@ -838,19 +966,9 @@ export function findArcBands(fds, opts) {
           const made = makeBand(ctx, work, i, j, chk, bands.length);
           if (made) {
             const band = made.band;
+            setBandSrc(band, ctx, work, i, j);
             bands.push(band);
             for (const fi of band.facets) taken.add(fi);
-            for (const a of made.arcs) {
-              let rec = arcs.get(a.key);
-              if (!rec) {
-                rec = {
-                  key: a.key, pts: a.pts, d: frame.d, frame,
-                  level: band.levels[a.level], owners: [],
-                };
-                arcs.set(a.key, rec);
-              }
-              rec.owners.push({ band: band.id, seg: a.seg });
-            }
             stats.bands++;
             if (band.kind === 'cyl') stats.cyl++; else stats.cone++;
           }
@@ -861,7 +979,14 @@ export function findArcBands(fds, opts) {
       }
     }
   }
-  return { bands, arcs, stats };
+
+  // Teilungsstellen der Bänder angleichen (Bänder übereinanderliegender Ebenen)
+  const al = alignBands(bands, o);
+  stats.bands = al.stats.bands;
+  stats.cyl = al.stats.cyl;
+  stats.cone = al.stats.cone;
+  stats.aligned = al.stats.aligned;
+  return { bands: al.bands, arcs: al.arcs, stats };
 }
 
 // ── Nachbar-Prüfung (Schritt 5) ─────────────────────────────────────────────
