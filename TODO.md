@@ -155,10 +155,30 @@ Kreis-Kanten teilen.
   - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
   - eBike rechts: Modell-Restfehler im Bogen bis 0.037 mm (Profil-Neigung dort ~1° anders) — prüfen.
   - Restlaufzeit detectTubes auf großen Freiform-Kanälen ~2–3 s (score/marchNormal, linear).
-- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten.
-- [ ] **Add-on signieren (AMO, unlisted)** — wartet auf Bestätigung der Add-on-ID (Vorschlag
-  `stl-reverse@ava-innovation.com`, heute Platzhalter `stlreverse@example.com`) und JWT-Schlüssel in
-  `~/.config/amo.env`. Release v0.2.0 enthält noch den alten STEP-Kantenfehler → v0.2.1 (nur mit Zustimmung).
+- [ ] **Review 2026-10-27 — drei bestätigte Funde (in Arbeit, Branch `wt/schalen-freigang`)**:
+  - HOCH, Regression aus 1c9905c: jede Zusammenhangskomponente wird ein eigener Volumenkörper — auch Hohlräume
+    (Würfel mit innerem Hohlraum: occt 9000 statt 7000 mm³), innen-außen vertauschte Netze und Null-Volumen-Finnen.
+    dino: die 5 Zusatz-Schalen sind 4 winzige Hohlräume im Hauptkörper + 1 flache Finne. Abhilfe: Volumen je Schale,
+    Hohlräume als BREP_WITH_VOIDS, invertierte Eingabe umdrehen, Finnen nicht als Körper.
+  - HOCH: Kreis-Umwandlung ohne Freigangsprüfung — der Kreis durch die Polygon-Ecken ragt um die Pfeilhöhe über das
+    Netz; bei dünnem Steg schneiden sich Bohrungen/Mantel → selbstdurchdringender Körper (occt −33 %), step-strict ok.
+  - MITTEL: Wasserdicht-Urteil global statt je Schale — ein loses Dreieck macht alle Körper zu offenen Hüllen und
+    wirft ihre Bohrungen/Mäntel weg; an einer Kante/Ecke berührende Körper teilen Topologie.
+  - Dazu: OpenCascade (OCP, in `~/Library/Python/3.9`) als zweiter, unabhängiger Prüfer (BRepCheck +
+    Selbstdurchdringung) — findet, was `step-strict` nicht sieht.
+- [ ] **Kanal-Übergangskreise: Startpunkt knapp neben der Naht** (OCP-Befund 2026-10-27) — eBike (beide Varianten):
+  BRepCheck gültig, aber BRepAlgoAPI_Check 34× TooSmallEdge + 17× Vertex/Vertex. Die VERTEX der Übergangskreise auf
+  den SURFACE_OF_REVOLUTION liegen 2e-8…4e-7 mm neben der Flächennaht; OCCT fügt beim Lesen die Naht ein und teilt
+  die Kreise → 18 Mikro-Bögen (81 → 129 Kanten). Abhilfe nach dem Merge von T: Kreis-Startpunkt entweder EXAKT auf
+  die Naht (gleicher Richtungsvektor wie die Fläche, so ist es bei Zylindern — dort sauber) oder deutlich daneben
+  (z.B. 90° versetzt), auch für Tori; OCP-Check als Abnahme.
+- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten. Bekannt (OCP):
+  `dino-freiform-facettiert.step` — 5 Zusatz-Schalen fehlerhaft (Review-Fund oben); beide eBike-Dateien — Mikro-
+  Bögen an den Kanal-Übergängen (s. oben). Würfel, Bohrung, Zylinder, Scheibe, Platte, Kugel: OCP-sauber.
+- [ ] **Release 0.2.2** (nach CST-Rückmeldung zum Kabelhalter + Merge der laufenden Agenten): Version in
+  `manifest.json`/`package.json` hochzählen, `updates.json` um den neuen Eintrag ergänzen, `npm run build:xpi`,
+  bei AMO „Neue Version hochladen“ (Datei wählt der User — AMOs CSP blockt Skript-Uploads), Prüfer-Hinweise wie
+  bei 0.2.1, signierte Datei laden, als `stl-reverse-<version>.xpi` ans GitHub-Release hängen.
 - [ ] **Review der Etappen 05fb3c3…6d67e62 abschließen** — Workflow-Lauf `wf_a998fde1-33d` wurde durch einen
   Absturz unterbrochen (Bereiche: Erkennung, Fasen-Export, Defeaturing, STEP-Gültigkeit, Integration).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
@@ -176,6 +196,16 @@ Kreis-Kanten teilen.
 ---
 
 ## Erledigt
+
+- [x] **v0.2.1 von Mozilla signiert + GitHub-Release (2026-10-27)** — Add-on-ID `{0f69a2ea-bf50-42ba-8055-dba7d55e509f}`
+  (neutrale GUID, User wollte keine Firmen-Domain), Selbstvertrieb (unlisted) über AMO, freigeschaltet nach ~20 min.
+  `update_url` → `updates.json` im Repo (automatische Updates). Paket per `npm run build:xpi` (nur Laufzeit-Dateien,
+  Lizenztexte LGPL von occt-import-js). Release: https://github.com/JustNotesa/stlReverse/releases/tag/v0.2.1
+- [x] **STEP-Genauigkeit für ACIS (2026-10-27, bfa2d6d)** — Kabelhalter des Users fehlten in CST Flächen (Winkel ok):
+  LINE-Richtung aus ungerundeten Koordinaten, Punkte auf 6 Stellen gerundet → Kanten-Enden bis 1,2e-6 mm neben
+  der Linie, OCCT mit 1e-6: 479 Flächen mit Selbstschnitt, 138 mit Lücken. Jetzt Richtung aus den geschriebenen
+  Punkten, 9 Nachkommastellen, Eckpunkte auf ihre Ebenen (snapToPlanes). Rest: Eckpunkte, an denen ≥ 4 nicht exakt
+  durch einen Punkt laufende Ebenen zusammenkommen, bleiben bis 4,6e-5 mm neben der Ebene.
 
 - [x] **STEP für strikte Importer — CST CAD Navigator/ACIS (2026-10-26)** — User-Befund: Fusion 360 ok, CST verliert
   Flächen. occt und Fusion heilen beim Lesen still, CST nimmt die Datei wörtlich. Neuer Prüfer ohne Heilung
