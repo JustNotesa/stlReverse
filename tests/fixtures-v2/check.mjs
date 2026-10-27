@@ -35,7 +35,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
-import { BODIES, STRESS, buildMesh, checkManifold, toBinaryStl, meshVolume, sharpen, polyArea, triVolume, makeTransform } from './gen.mjs';
+import { BODIES, STRESS, buildMesh, checkManifold, toBinaryStl, meshVolume, sharpen, polyArea, triVolume, makeTransform, sharpenCorners } from './gen.mjs';
 import { parseStl, simplifyMesh } from '../../analysis-core.js';
 import { buildNormalGroups } from '../../region-growing.js';
 import { cleanMesh } from '../../mesh-clean.js';
@@ -238,6 +238,18 @@ function variantsFor(body, vMeshParsed, heavy) {
       volume: m === 0 ? vMeshParsed : meshVolume(tris), tol: tolPlanar,
       target: body.expect.mode === 'sharp' ? m === all : m === 0,
     });
+  }
+  // v1 an senkrechten Eckrundungen (body.cornerVariants, Körper ohne Deck-Rundungen): jede Teilmenge der
+  // Ecken scharf (Schnittpunkt der angrenzenden Kanten, s. gen.mjs sharpenCorners); Ziel = alle Ecken.
+  if (body.cornerVariants) {
+    const { col, corners } = body.cornerVariants;
+    for (const v of vs) v.target = false;
+    for (let m = 1; m < (1 << corners.length); m++) {
+      const sel = corners.filter((_, i) => m & (1 << i));
+      const bodyC = { ...body, columns: body.columns.map((c, i) => (i === col ? { ...c, profile: sharpenCorners(c.profile, sel) } : c)) };
+      const tris = f32(buildMesh(bodyC));
+      vs.push({ label: `${sel.length} von ${corners.length} Eckrundungen scharf (v1)`, sharpCount: 0, planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: sel.length === corners.length });
+    }
   }
   // v2b (seit 2026-10-24): nach den Deck-Bändern werden auch die senkrechten Profil-Eckrundungen
   // geschärft (eBike-Referenz „ohne rundungen“ hat dort scharfe Ecken) → zusätzliche Ziel-Variante.
@@ -491,7 +503,7 @@ async function checkBody(body, occt) {
     return {
       exported: true, exportMs, faces: r.faceCount, watertight: r.watertight,
       boundaryEdges: r.boundaryEdges, nonManifoldEdges: r.nonManifoldEdges, orientationDefects: r.orientationDefects,
-      bores: r.boresConverted, fillets: r.filletsDefeatured ?? 0, bands: r.bandsDefeatured ?? 0,
+      bores: r.boresConverted, fillets: r.filletsDefeatured ?? 0, bands: r.bandsDefeatured ?? 0, fallbackStage: r.fallbackStage,
       cyl: (res.step.match(/CYLINDRICAL_SURFACE\(/g) || []).length,
       cones: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
       occt: !!parsed.success, occtMeshes: (parsed.meshes || []).length,
@@ -517,6 +529,8 @@ async function checkBody(body, occt) {
   const limit = Math.max(EXPORT_LIMIT_MS, 3 * (off.exportMs || 0));
   if (on.exported && on.exportMs > limit) out.problems.push(`AN: Export ${Math.round(on.exportMs)} ms > ${Math.round(limit)} ms`);
   if (body.expect.mode === 'skip' && (on.bands || iso.bands)) out.problems.push(`v2 hat ${Math.max(on.bands, iso.bands)} Band/Bänder entfernt, Soll ist Überspringen`);
+  // v1-Soll (Anzahl entfernter Kanten-Verrundungen): weniger = Rückfall/Fehlschlag, mehr = unerwartet
+  if (body.expect.fillets !== undefined && on.exported && on.fillets !== body.expect.fillets) out.problems.push(`AN: v1 entfernt ${on.fillets} Verrundung(en), Soll ${body.expect.fillets} (fallbackStage ${on.fallbackStage})`);
   // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert
   if (iso.watertight && iso.bands > 0 && on.bands === 0 && on.bores === 0 && on.fillets === 0) {
     out.problems.push(`Fallback verwirft v2: v2 allein entfernt ${iso.bands} Band/Bänder wasserdicht, volle Pipeline liefert alles facettiert (Ursache außerhalb defeatureBands: ein anderer Schritt öffnet die Hülle → globaler Fallback)`);

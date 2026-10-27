@@ -63,6 +63,42 @@ export const slotProfile = (len, R, seg) => {
   return pts;
 };
 
+// Taschen-Kontur wie die Logo-Tasche am Kabelhalter: Rechteck w×h ab (x0, y0), Unterseite als flacher
+// Kreisbogen (Stich f nach außen, arcSeg Sehnen), alle vier Ecken senkrecht mit rc gerundet (seg
+// Segmente; unten tangential an Bogen und Seite). CCW. corners = Punkt-Indexbereiche [von, bis] der
+// vier Eckbögen (einlaufende Kante endet in `von`, auslaufende beginnt in `bis`) — für die Varianten
+// „Ecke scharf“ (s. sharpenCorners).
+export const archPocketProfile = (x0, y0, w, h, f, arcSeg, rc, seg) => {
+  const Rb = ((w / 2) ** 2 + f * f) / (2 * f), cx = x0 + w / 2, cy = y0 + Rb - f;
+  const ex = x0 + rc, ey = cy - Math.sqrt((Rb - rc) ** 2 - (ex - cx) ** 2);  // Eckmittelpunkt unten links
+  const aT = Math.atan2(ey - cy, ex - cx);                                     // Tangentenpunkt am Bogen (links)
+  const pts = [], corners = [];
+  const arc = (mx, my, a0, a1) => { corners.push([pts.length, pts.length + seg]); for (let k = 0; k <= seg; k++) { const a = a0 + (a1 - a0) * k / seg; pts.push([mx + rc * Math.cos(a), my + rc * Math.sin(a)]); } };
+  arc(ex, ey, PI, aT + 2 * PI);                                                 // unten links: Seite → Bogen
+  for (let k = 1; k < arcSeg; k++) { const a = aT + (-PI - 2 * aT) * k / arcSeg; pts.push([cx + Rb * Math.cos(a), cy + Rb * Math.sin(a)]); }
+  arc(x0 + w - rc, ey, PI - aT, 2 * PI);                                        // unten rechts: Bogen → Seite
+  arc(x0 + w - rc, y0 + h - rc, 0, PI / 2);
+  arc(x0 + rc, y0 + h - rc, PI / 2, PI);
+  return { pts, corners };
+};
+// Eckbögen (Indexbereiche [von, bis], ohne Umlauf-Überlauf) durch den Schnittpunkt der einlaufenden
+// und der auslaufenden Kante ersetzen — so schärft v1 (defeatureFillets) eine senkrechte Eckrundung:
+// Seiten-Ebenen = die angrenzenden Facetten.
+export const sharpenCorners = (pts, ranges) => {
+  const n = pts.length, rep = new Map(), skip = new Set();
+  for (const [a, b] of ranges) {
+    const p = pts[(a - 1 + n) % n], q = pts[a], r = pts[b], s = pts[(b + 1) % n];
+    const d1 = [q[0] - p[0], q[1] - p[1]], d2 = [s[0] - r[0], s[1] - r[1]];
+    const cr = d1[0] * d2[1] - d1[1] * d2[0];
+    const t = ((r[0] - p[0]) * d2[1] - (r[1] - p[1]) * d2[0]) / cr;
+    rep.set(a, [p[0] + t * d1[0], p[1] + t * d1[1]]);
+    for (let i = a + 1; i <= b; i++) skip.add(i);
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) { if (rep.has(i)) out.push(rep.get(i)); else if (!skip.has(i)) out.push(pts[i]); }
+  return out;
+};
+
 export const polyArea = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; s += p[0] * q[1] - q[0] * p[1]; } return s / 2; };
 
 // ── Gehrungs-Versatz: Kante i (pts[i]→pts[i+1]) um off[i] nach LINKS (ins Material) ──
@@ -852,6 +888,41 @@ export const BODIES = [
     columns: [plate(circleProfile(0, 0, 5, 48), 12, null, { bottom: { kind: 'sharp' }, top: R(2.5) })],
     expect: { mode: 'sharp', bands: 1 },
   },
+  // ── v1 (defeatureFillets) an kurzen Verrundungen dünner Stege (Kabelhalter-Befund) ──
+  (() => {
+    // Kontur CW (Tasche = Loch in der Platte) → Eck-Indexbereiche umrechnen
+    const { pts, corners } = archPocketProfile(10, 8, 12, 8, 2, 12, 0.5, 16);
+    const n = pts.length, prof = pts.slice().reverse();
+    return {
+      id: 'k1', extra: true, file: 'v2_x_kabel_flache_tasche',
+      desc: 'Platte 40×30×5, Tasche 0.5 tief (Kontur 12×8, Unterseite flacher Bogen R10 mit 12 Sehnen, alle Ecken senkrecht r=0.5 / 16 Seg.) — die Wände sind 0.5 mm hohe Stege, jede Eckrundung so lang wie der Steg dick. Die Erkennung schlägt der Eck-Rundung angrenzende Wand-Facetten zu; v1 entfernte sie mit und riss die Hülle auf → früher ALLES facettiert (Kabelhalter: 6361 Flächen, 7.6 MB). Ziel: alle vier Ecken scharf (an Seite bzw. erster Bogen-Sehne), Rest unverändert',
+      columns: [
+        { name: 'platte', profile: rectProfile(0, 0, 40, 30), z0: 0, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+        { name: 'tasche', profile: prof, z0: 4.5, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      ],
+      caps: [
+        { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'top' }] },
+        { up: false, outer: { c: 0, end: 'bottom' }, holes: [] },
+        { up: true, outer: { c: 1, end: 'bottom', rev: true }, holes: [] }, // Taschenboden (z=4.5)
+      ],
+      // v1-Varianten: jede Teilmenge der Ecken scharf (sharpenCorners); Ziel = alle vier
+      cornerVariants: { col: 1, corners: corners.map(([a, b]) => [n - 1 - b, n - 1 - a]) },
+      expect: { mode: 'sharp', fillets: 4 },
+      sections: [2.5, 4.75],
+    };
+  })(),
+  // Kanten-Verrundung, an deren Enden die Fase der Stirnfläche um die Rundung läuft (Kabelhalter:
+  // r=1-Kanten der Platte, Stirnseiten 0.5×45° gefast) — v1 schärft die Rundung, die Fase wird zur Gehrung
+  (() => {
+    const prof = roundedRectProfile(40, 30, 1, 32);
+    return {
+      id: 'k2', extra: true, file: 'v2_x_kabel_ecken_gefast',
+      desc: 'Platte 40×30×16, senkrechte Eckrundungen r=1 (32 Seg.), Stirnseiten oben/unten 0.5×45° gefast (Fase läuft als Kegel um die Rundungen) — Ziel: Ecken scharf, Fasen auf Gehrung, Fasen bleiben',
+      columns: [{ name: 'aussen', profile: prof, z0: 0, z1: 16, bottom: { kind: 'chamfer', r: 0.5 }, top: { kind: 'chamfer', r: 0.5 } }],
+      cornerVariants: { col: 0, corners: [0, 1, 2, 3].map((k) => [k * 33, k * 33 + 32]) },
+      expect: { mode: 'sharp', fillets: 4 },
+    };
+  })(),
 ];
 
 // Stresskörper (Laufzeit, ~49k Dreiecke < 50k-Vereinfachungsgrenze); nicht als STL-Datei
