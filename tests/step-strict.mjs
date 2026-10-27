@@ -20,7 +20,9 @@
 //   orient-plane     Ebene: Außenrand gegen den Uhrzeigersinn um die effektive Normale
 //                    (Normale × same_sense), Löcher im Uhrzeigersinn; FACE_OUTER_BOUND = Außenrand
 //   orient-curved    gekrümmte Fläche mit ≥ 2 Rändern: die Fläche liegt LINKS vom Rand
-//                    (effektive Normale × Laufrichtung zeigt zu den anderen Rändern); Drehflächen-
+//                    (effektive Normale × Laufrichtung zeigt zu den anderen Rändern; ein
+//                    VERTEX_LOOP — Kegelspitze — zählt als Rand aus einem Punkt, der beim Kegel
+//                    genau in der Spitze liegen muss: vertex-surface); Drehflächen-
 //                    Band (Torus/Rotationsfläche, 2 Ränder konstanten Drehwinkels): beide Ränder
 //                    legen die Fläche in entgegengesetzte Drehrichtung (auch bei Bögen ≥ 180°);
 //                    tangentiale Kante zwischen zwei gekrümmten Flächen: keine Faltung (beide
@@ -175,7 +177,8 @@ export function checkStepStrict(text, opts = {}) {
     if (e.type === 'CONICAL_SURFACE') {
       const ax = axis2(e.args[1]), R = e.args[2], al = e.args[3];
       const parts = (p) => { const w = sub(p, ax.o), h = dot(w, ax.z); const q = sub(w, mul(ax.z, h)); return { h, q, rho: len(q) }; };
-      return { kind: 'cone', ax, normal: (p) => { const { q } = parts(p); return norm(sub(mul(norm(q), Math.cos(al)), mul(ax.z, Math.sin(al)))); },
+      return { kind: 'cone', ax, apex: add(ax.o, mul(ax.z, -R / Math.tan(al))),
+        normal: (p) => { const { q } = parts(p); return norm(sub(mul(norm(q), Math.cos(al)), mul(ax.z, Math.sin(al)))); },
         dist: (p) => { const { h, rho } = parts(p); return Math.abs(rho - (R + h * Math.tan(al))) * Math.cos(al); } };
     }
     if (e.type === 'TOROIDAL_SURFACE') {
@@ -268,6 +271,16 @@ export function checkStepStrict(text, opts = {}) {
       const outer = be.type === 'FACE_OUTER_BOUND';
       const bflag = be.args[2]?.en === 'F' ? -1 : 1;
       const le = E(be.args[1]);
+      if (le.type === 'VERTEX_LOOP' && surf.kind !== 'plane') {
+        // Spitze eines Kegels: Rand aus EINEM Punkt ohne Kante — der Punkt muss auf der Fläche
+        // liegen (beim Kegel: IN der Spitze); für die Umlauf-Prüfung der übrigen Ränder zählt er
+        // als „andere Seite“.
+        const p = vtx(le.args[1]), d = surf.apex ? len(sub(p, surf.apex)) : surf.dist(p);
+        stats.maxVertexSurface = Math.max(stats.maxVertexSurface, d);
+        if (d > TOL) flag('vertex-surface', `#${fid} (${surf.kind}): Punkt-Rand #${be.args[1].ref} ${d.toExponential(2)} mm neben ${surf.apex ? 'der Kegelspitze' : 'der Fläche'}`, { face: fid, d });
+        loops.push({ bref: bref.ref, outer, pts: [p], vertexLoop: true });
+        continue;
+      }
       if (le.type !== 'EDGE_LOOP') { flag('unsupported', `#${fid}: Bound ohne EDGE_LOOP`, { face: fid }); continue; }
       let oes = le.args[1].map((o) => E(o));
       if (bflag < 0) oes = oes.slice().reverse();
@@ -332,6 +345,7 @@ export function checkStepStrict(text, opts = {}) {
       if (band) {
         if (band[0] === band[1]) flag('orient-curved', `#${fid} (${surf.kind}): beide Ränder #${loops[0].bref}/#${loops[1].bref} legen die Fläche auf dieselbe Seite (u ${band[0] > 0 ? '+' : '−'}) — einer läuft verkehrt herum`, { face: fid });
       } else loops.forEach((L, i) => {
+        if (L.vertexLoop) return;                       // Punkt-Rand (Spitze): keine Laufrichtung
         // Bezug „zur Fläche hin“: der NÄCHSTE Punkt der anderen Ränder (nicht deren Mittelpunkt —
         // der liegt bei breiten Fasen-Kegeln auf der Achse und zeigt schräg nach innen)
         const others = loops.filter((_, k) => k !== i).flatMap((o) => o.pts);
@@ -422,6 +436,15 @@ if (isMain) {
       const res = { on: buildVolumeStepBrepV2({ normalGroups: g, defeature: true }), off: buildVolumeStepBrepV2({ normalGroups: g, defeature: false }) };
       console.log = log;
       for (const k of ['on', 'off']) if (res[k]) bad += summarize(`${f} [${k === 'on' ? 'AN' : 'AUS'}]`, checkStepStrict(res[k].step));
+      // Selbsttest VERTEX_LOOP: Kegelspitze 0.5 mm verschoben → muss als vertex-surface auffallen
+      const vl = res.on && res.on.step.match(/VERTEX_LOOP\('',#(\d+)\)/);
+      if (vl) {
+        const vp = res.on.step.match(new RegExp(`#${vl[1]}=VERTEX_POINT\\('',#(\\d+)\\)`))[1];
+        const moved = res.on.step.replace(new RegExp(`(#${vp}=CARTESIAN_POINT\\('',\\()([-0-9.eE]+)`), (_, a, x) => `${a}${(+x + 0.5).toFixed(6)}`);
+        const hit = checkStepStrict(moved).violations.filter((v) => v.kind === 'vertex-surface').length;
+        console.log(`${hit ? '✅' : '❌'} ${`Selbsttest Kegelspitze verschoben (${f})`.padEnd(64)} vertex-surface: ${hit}`);
+        if (!hit) bad++;
+      }
     }
     // Selbsttest OPEN_SHELL-Regel (kein Sample ist offen): Würfel ohne Deckel → offene Hülle mit
     // 4 erlaubten Randkanten; dieselbe Datei als CLOSED_SHELL deklariert → 4 edge-use-Verstöße.
