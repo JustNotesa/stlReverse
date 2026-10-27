@@ -432,6 +432,38 @@ document.getElementById('defeature-toggle')?.addEventListener('change', () => {
   } catch (e) { console.warn('Defeaturing-Toggle: Verdikt-Update fehlgeschlagen:', e.message); }
 });
 
+// Warum blieb ein gebogener Kanal facettiert? Aus den verworfenen tube-sweep-Kandidaten
+// die echten Ablehnungsgründe heraussuchen (Bohrungs-Pfade & Co. zählen nicht als Kanal).
+function tubeRejectNote(rejected) {
+  if (!Array.isArray(rejected) || !rejected.length) return null;
+  const map = {
+    'Bahn nicht eben': 'Bahn nicht eben (3D)',
+    'Profilkreis nicht in Bahn-Ebene': 'Profil schräg zur Bahn-Ebene',
+    'Bahn-Fit gescheitert': 'Bahn nicht annäherbar',
+    'Bahn-Vereinfachung zu aufwendig': 'Bahn zu komplex',
+    'Bogen zu eng': 'Bogen zu eng',
+    'Bahn-Abweichung zu groß': 'Bahn weicht ab',
+    'Anfangs-Stück erreicht Mündung A nicht': 'Mündung nicht erreicht',
+    'End-Stück erreicht Mündung B nicht': 'Mündung nicht erreicht',
+    'Mündungskurve nicht bestimmbar': 'Mündung passt nicht',
+    'Mündungs-Loop passt nicht': 'Mündung passt nicht',
+    'Übergangskreis schneidet Mündungsebene': 'Mündung passt nicht',
+    'Profil kippt gegen die Bahn': 'Profil kippt gegen die Bahn',
+    'Netz weicht vom Modell ab': 'Netz weicht vom Modell ab',
+    'Facette quer zur Bahn zu breit (ebene Abflachung?)': 'unregelmäßige Facetten'
+  };
+  const reasons = [];
+  let n = 0;
+  for (const r of rejected) {
+    const txt = map[String(r?.why)];
+    if (!txt) continue;
+    n++;
+    if (!reasons.includes(txt)) reasons.push(txt);
+  }
+  if (!n) return null;
+  return `${n} ${n === 1 ? 'Kanal' : 'Kanäle'} facettiert gelassen: ${reasons.join(', ')}`;
+}
+
 // Wasserdichtigkeits-Verdikt unter Panel 4 setzen (aus dem V2-Export-Befund).
 function setStepWatertightStatus(report) {
   const el = document.getElementById('step-watertight-status');
@@ -458,6 +490,11 @@ function setStepWatertightStatus(report) {
     if (n(report.mantleConesConverted)) done.push(`${report.mantleConesConverted} ${report.mantleConesConverted === 1 ? 'Kegelmantel' : 'Kegelmäntel'} als echter Kegel`);
     if (n(report.mantleChamfersConverted)) done.push(`${report.mantleChamfersConverted} ${report.mantleChamfersConverted === 1 ? 'Fase/Spitze' : 'Fasen/Spitzen'} am Außenmantel als echter Kegel`);
     if (n(report.tubesConverted)) done.push(`${report.tubesConverted} gebogene${report.tubesConverted === 1 ? 'r Kanal' : ' Kanäle'} als exakte Fläche (${report.tubePieces} Stück)`);
+    // Warum blieb ein Kanal facettiert? Nur wenn der Rückfall nicht schon alles facettiert hat.
+    if (!report.fallbackStage) {
+      const tubeNote = tubeRejectNote(lastAnalysis?.tubeStats?.rejected);
+      if (tubeNote) done.push(tubeNote);
+    }
     // Schalen-Befunde (assembleSolids): Hohlräume, umgestülpte Eingabe, verworfene Finnen
     if (n(report.voids)) done.push(report.voids === 1 ? '1 innerer Hohlraum als echter Hohlraum im Körper' : `${report.voids} innere Hohlräume als echte Hohlräume im Körper`);
     if (n(report.invertedShells)) done.push('Eingabe-Netz war innen-außen gestülpt — Flächen umgedreht');
