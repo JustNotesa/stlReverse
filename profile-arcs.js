@@ -200,10 +200,16 @@ export function fitCircle2d(pts) {
  * bekannt) und liefert eine viel bessere Mitte.
  *
  * Algebraisch (linear): u² + v² = 2·cu·u + 2·cv·v + k_l  (k_l = r_l² − |c|²)
- * → kleinste Quadrate über (cu, cv, k_1..k_L) per Normalgleichungen (die
- * Punkte vorher um den Gesamtschwerpunkt verschoben und skaliert wie in
- * fitCircle2d). Danach 4 Gauss-Newton-Schritte geometrisch (Residuen
- * |p − c| − r_l, Unbekannte (cu, cv, r_1..r_L)).
+ * → kleinste Quadrate über (2cu, 2cv, k_1..k_L) mit der Design-Matrix
+ *   [u, v, e_l] (die Punkte vorher um den Gesamtschwerpunkt verschoben und
+ *   skaliert wie in fitCircle2d), gelöst per Householder-QR. Die QR ist stabiler
+ *   als die Normalgleichungen — bei kurzen Bögen ist das System stark
+ *   konditioniert (quadrierte Kondition), die Normalgleichungen verlieren dort
+ *   alle Genauigkeit.
+ * Danach bis zu 12 Gauss-Newton-Schritte geometrisch (Residuen |p − c| − r_l,
+ * Unbekannte (cu, cv, r_1..r_L)); ein Schritt wird nur übernommen, wenn er die
+ * Quadratsumme der Residuen verkleinert — sonst bleibt die algebraische
+ * Schätzung stehen.
  *
  * levels: [[ [u,v],… ], …] (je Ebene ≥ 2 Punkte)
  * → { c:[u,v], r:[r_l], maxRes } | null (zu wenig Punkte, singulär, unbrauchbare Radien)
@@ -229,68 +235,81 @@ export function fitCoaxial2d(levels) {
   if (!(scale > 0) || !Number.isFinite(scale)) return null;
   const N = Lv.map((lv) => lv.map((p) => [(p[0] - mx) / scale, (p[1] - my) / scale]));
 
-  // ── algebraisch: Normalgleichungen für (cu, cv, k_1..k_L) ──────────────────
+  // ── algebraisch: kleinste Quadrate über (2cu, 2cv, k_1..k_L) ───────────────
+  //    |p|² = 2·cu·p_x + 2·cv·p_y + k_l  →  [p_x, p_y, e_l] · (2cu, 2cv, k_l)
   const dim = 2 + L;
-  const M = [], B = new Array(dim).fill(0);
-  for (let i = 0; i < dim; i++) M.push(new Array(dim).fill(0));
+  const A = [], B = [];
   for (let l = 0; l < L; l++) {
     for (const p of N[l]) {
-      const x = p[0], y = p[1];
-      const idx = [0, 1, 2 + l];
-      const val = [2 * x, 2 * y, 1];
-      const yv = x * x + y * y;
-      for (let a = 0; a < 3; a++) {
-        if (!val[a]) continue;
-        B[idx[a]] += val[a] * yv;
-        for (let b = 0; b < 3; b++) M[idx[a]][idx[b]] += val[a] * val[b];
-      }
+      const row = new Array(dim).fill(0);
+      row[0] = p[0]; row[1] = p[1]; row[2 + l] = 1;
+      A.push(row);
+      B.push(p[0] * p[0] + p[1] * p[1]);
     }
   }
-  const sol = solveLin(M, B);
+  const sol = lstsqQr(A, B, 1e-15);
   if (!sol) return null;
   let cu = sol[0] / 2, cv = sol[1] / 2;
-  const rr = new Array(L);
+  if (!Number.isFinite(cu) || !Number.isFinite(cv)) return null;
+  let rr = new Array(L);
+  let algOk = true;
   for (let l = 0; l < L; l++) {
     const r2 = sol[2 + l] + cu * cu + cv * cv;
-    if (!(r2 > 0) || !Number.isFinite(r2)) return null;
+    if (!(r2 > 0) || !Number.isFinite(r2)) { algOk = false; break; }
     rr[l] = Math.sqrt(r2);
   }
+  if (!algOk) {
+    // Radius imaginär → die algebraische Schätzung ist unbrauchbar (Zentrum zu
+    // weit vom Bogen). Radien aus den Abständen zum Zentrum schätzen und dem
+    // Gauss-Newton die Korrektur überlassen.
+    for (let l = 0; l < L; l++) {
+      let s = 0;
+      for (const p of N[l]) s += Math.hypot(cu - p[0], cv - p[1]);
+      const r = s / N[l].length;
+      if (!(r > 0) || !Number.isFinite(r)) return null;
+      rr[l] = r;
+    }
+  }
 
-  // ── 4 Gauss-Newton-Schritte (geometrisch: ‖p − c‖ − r_l minimieren) ────────
-  for (let it = 0; it < 4; it++) {
-    const G = [], GG = new Array(dim).fill(0);
-    for (let i = 0; i < dim; i++) G.push(new Array(dim).fill(0));
-    const sjx = new Array(L).fill(0), sjy = new Array(L).fill(0);
-    const sres = new Array(L).fill(0), cnt = new Array(L).fill(0);
-    let m00 = 0, m01 = 0, m11 = 0, g0 = 0, g1 = 0, bad = false;
+  // ── Gauss-Newton (geometrisch: ‖p − c‖ − r_l minimieren) ───────────────────
+  const cost = (cx, cy, rad) => {
+    let s = 0;
+    for (let l = 0; l < L; l++) {
+      for (const p of N[l]) {
+        const d = Math.hypot(cx - p[0], cy - p[1]);
+        if (!Number.isFinite(d)) return Infinity;
+        const e = d - rad[l];
+        s += e * e;
+      }
+    }
+    return s;
+  };
+  let costNow = cost(cu, cv, rr);
+  for (let it = 0; it < 12; it++) {
+    const J = [], res = [];
+    let bad = false;
     for (let l = 0; l < L; l++) {
       for (const p of N[l]) {
         const dx = cu - p[0], dy = cv - p[1];
         const dist = Math.hypot(dx, dy);
         if (!(dist > 0)) { bad = true; break; }
-        const res = dist - rr[l];
-        const jx = dx / dist, jy = dy / dist;
-        m00 += jx * jx; m01 += jx * jy; m11 += jy * jy;
-        sjx[l] += jx; sjy[l] += jy; sres[l] += res; cnt[l]++;
-        g0 += jx * res; g1 += jy * res;
+        const row = new Array(dim).fill(0);
+        row[0] = dx / dist; row[1] = dy / dist; row[2 + l] = -1;
+        J.push(row);
+        res.push(-(dist - rr[l]));         // Ziel: J·δ = −Residuum
       }
       if (bad) break;
     }
-    if (bad) return null;
-    G[0][0] = m00; G[0][1] = m01; G[1][0] = m01; G[1][1] = m11;
-    for (let l = 0; l < L; l++) {
-      G[0][2 + l] = -sjx[l]; G[2 + l][0] = -sjx[l];
-      G[1][2 + l] = -sjy[l]; G[2 + l][1] = -sjy[l];
-      G[2 + l][2 + l] = cnt[l];
-    }
-    GG[0] = g0; GG[1] = g1;
-    for (let l = 0; l < L; l++) GG[2 + l] = -sres[l];
-    const ds = solveLin(G, GG);
+    if (bad) break;
+    const ds = lstsqQr(J, res, 1e-15);
     if (!ds) break;                       // singulär: algebraische Schätzung behalten
-    cu -= ds[0]; cv -= ds[1];
-    for (let l = 0; l < L; l++) rr[l] -= ds[2 + l];
-    if (!Number.isFinite(cu) || !Number.isFinite(cv)) return null;
-    for (let l = 0; l < L; l++) if (!(rr[l] > 0) || !Number.isFinite(rr[l])) return null;
+    const cu2 = cu - ds[0], cv2 = cv - ds[1];
+    const rr2 = rr.map((r, l) => r - ds[2 + l]);
+    if (!Number.isFinite(cu2) || !Number.isFinite(cv2)) break;
+    if (!rr2.every((r) => r > 0 && Number.isFinite(r))) break;
+    const c2 = cost(cu2, cv2, rr2);
+    if (!(c2 < costNow)) break;            // Schritt verschlechtert → stehen bleiben
+    cu = cu2; cv = cv2; rr = rr2; costNow = c2;
   }
 
   // zurück in die Ausgangskoordinaten
@@ -309,32 +328,56 @@ export function fitCoaxial2d(levels) {
 }
 
 /**
- * lineares System M·x = b (n×n) per Gauß-Elimination mit Spaltenpivot —
- * null bei singulärer Matrix (Pivot < 1e-12 · größter Startwert)
+ * Kleinste Quadrate A·x ≈ b (A: m×n, m ≥ n) per Householder-QR.
+ * Die Spalten werden nicht umgeordnet; die Matrix gilt als singulär, wenn ein
+ * R-Diagonalelement kleiner als tol·|R₀₀| ist (relativ, Standard 1e-15) oder
+ * eine Spalte Null ist. Gegenüber den Normalgleichungen bleibt die Genauigkeit
+ * auch bei stark konditionierten Systemen erhalten (kein Quadrieren der
+ * Konditionszahl).
+ * → x (Länge n) | null
  */
-function solveLin(M, b) {
-  const n = b.length;
-  const A = M.map((row, i) => row.slice().concat([b[i]]));
+function lstsqQr(A, b, tol = 1e-15) {
+  const m = A.length;
+  if (!m || !b || b.length !== m) return null;
+  const n = A[0].length;
+  if (m < n || !n) return null;
+  const R = new Array(m);
+  for (let i = 0; i < m; i++) {
+    if (!A[i] || A[i].length !== n) return null;
+    R[i] = A[i].slice();
+  }
+  const y = b.slice();
   let ref = 0;
-  for (const row of A) for (const v of row) ref = Math.max(ref, Math.abs(v));
-  if (!(ref > 0)) return null;
-  for (let c = 0; c < n; c++) {
-    let piv = c;
-    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
-    if (!(Math.abs(A[piv][c]) > 1e-12 * ref)) return null;      // singulär
-    if (piv !== c) { const t = A[c]; A[c] = A[piv]; A[piv] = t; }
-    const d = A[c][c];
-    for (let r = c + 1; r < n; r++) {
-      const f = A[r][c] / d;
-      if (f === 0) continue;
-      for (let k = c; k <= n; k++) A[r][k] -= f * A[c][k];
+  for (let k = 0; k < n; k++) {
+    let nrm = 0;
+    for (let i = k; i < m; i++) nrm += R[i][k] * R[i][k];
+    nrm = Math.sqrt(nrm);
+    if (!(nrm > 0)) return null;                    // Null-Spalte
+    if (k === 0) ref = nrm;
+    const alpha = R[k][k] > 0 ? -nrm : nrm;
+    const v = new Array(m - k);
+    for (let i = k; i < m; i++) v[i - k] = R[i][k];
+    v[0] -= alpha;
+    let vv = 0;
+    for (let i = k; i < m; i++) vv += v[i - k] * v[i - k];
+    if (!(vv > 0)) continue;                       // Householder trivial
+    for (let j = k; j < n; j++) {
+      let s = 0;
+      for (let i = k; i < m; i++) s += v[i - k] * R[i][j];
+      const f = (2 * s) / vv;
+      for (let i = k; i < m; i++) R[i][j] -= f * v[i - k];
     }
+    let s = 0;
+    for (let i = k; i < m; i++) s += v[i - k] * y[i];
+    const f = (2 * s) / vv;
+    for (let i = k; i < m; i++) y[i] -= f * v[i - k];
+    if (!(Math.abs(R[k][k]) > tol * ref)) return null;   // singulär (relativ)
   }
   const x = new Array(n);
   for (let r = n - 1; r >= 0; r--) {
-    let s = A[r][n];
-    for (let k = r + 1; k < n; k++) s -= A[r][k] * x[k];
-    x[r] = s / A[r][r];
+    let s = y[r];
+    for (let k = r + 1; k < n; k++) s -= R[r][k] * x[k];
+    x[r] = s / R[r][r];
     if (!Number.isFinite(x[r])) return null;
   }
   return x;
