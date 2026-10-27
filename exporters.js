@@ -12,7 +12,7 @@ import {
   mapOutlinePointToDxf, mapOutlinePointToStep,
   defaultBounds, rectangleFromBounds
 } from './utils.js';
-import { matchTubeMouths } from './tube-sweep.js?v=2';
+import { matchTubeMouths } from './tube-sweep.js?v=3';
 
 export function buildOutlinesDxf(outlines) {
   const lines = [];
@@ -211,7 +211,9 @@ export function buildVolumeStepBrepV2(analysis) {
   const DEFEATURE = analysis?.defeature !== false;
 
   // ---- Test-Hooks (nur Tests/Node, tests/orientation-guard.mjs): STLREV_TEST_FLIP='bore'|'mantle'|
-  // 'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen ABSICHTLICH um,
+  // 'mantlecone'|'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen
+  // ABSICHTLICH um ('mantlecone' = konvexe Kegel-Mäntel und Mantel-Fasen, 'cone' = Fasen-Kegel der
+  // Bohrungen),
   // 'tubecurve' die mittlere Übergangskurve jedes Kanals (beide Nutzungen). Die Kanten-Bilanz
   // (fwd/rev) bleibt dabei ausgeglichen, das Wasserdicht-Verdikt sieht nichts — genau diese Fälle
   // muss der Orientierungs-Wächter (assemble) fangen. STLREV_TEST_GUARD_REPORT_ONLY=1: Wächter
@@ -319,9 +321,12 @@ export function buildVolumeStepBrepV2(analysis) {
     entities.push(`#${sid}=CYLINDRICAL_SURFACE('',#${placId},${toStep(radius)});`);
     return sid;
   };
+  // Halbwinkel mit 12 Nachkommastellen (wie Richtungen): mit 6 lag der Rand eines langen Kegels
+  // allein durch die Rundung des Winkels neben der Fläche (Fehler ≈ Mantellänge · 5e-7 / cos²α —
+  // ab ~150 mm über der Toleranz strikter Importer, tests/step-strict.mjs).
   const addConicalSurface = (placId, radius, semiAngle) => {
     const sid = id++;
-    entities.push(`#${sid}=CONICAL_SURFACE('',#${placId},${toStep(radius)},${toStep(semiAngle)});`);
+    entities.push(`#${sid}=CONICAL_SURFACE('',#${placId},${toStep(radius)},${toStepDir(semiAngle)});`);
     return sid;
   };
   const addAdvancedFace = (boundIds, surfId, sameSense) => {
@@ -826,8 +831,9 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   const isConcaveBore = (entry) => radialScore(entry) < -0.5; // Wand: −1 (zur Achse), konvexer Mantel: +1
   // KONVEXE Voll-Zylinder (Score deutlich positiv) kommen in den Mantel-Pfad (eigene Umwandlung
-  // unten: Außenwand → CYLINDRICAL_SURFACE, Ränder = AUSSEN-Loops der Deckflächen). Uneindeutige
-  // (dazwischen) bleiben facettiert.
+  // unten: Außenwand → CYLINDRICAL_SURFACE, Ränder = Loops der Deckflächen — meist Außen-Loops, beim
+  // Zapfen/der Stufenwelle auch ein Innen-Loop — oder Fasen/Kegelspitzen). Uneindeutige (dazwischen)
+  // bleiben facettiert.
   const mantleById = new Map();
   for (const [k, e] of boreById) {
     const sc = radialScore(e);
@@ -1235,12 +1241,12 @@ export function buildVolumeStepBrepV2(analysis) {
         }
         // Seiten-Nachbarn (Normale ⊥ Fillet-Achse) in Orientierungs-Cluster; Kappen (∥ Achse)
         // sind erlaubt; SCHRÄGE Nachbarn dazwischen → unsauberer Fall → skip.
-        const clusters = [];
+        const clusters = [], caps = [];
         for (const [g, w] of nbWeight) {
           const ng = _norm3(g.normal);
           const dAx = Math.abs(_dot3(ng, fAxis));
           if (dAx > 0.3 && dAx < 0.8) return false;
-          if (dAx >= 0.8) continue; // Kappe
+          if (dAx >= 0.8) { caps.push(ng); continue; } // Kappe
           let cl = null;
           for (const c of clusters) if (Math.abs(_dot3(c.n, ng)) >= 0.99) { cl = c; break; }
           if (!cl) { cl = { n: ng, w: 0, ref: g }; clusters.push(cl); }
@@ -1255,6 +1261,11 @@ export function buildVolumeStepBrepV2(analysis) {
         if (dl < 1e-6) return false;
         const dir = [d0[0] / dl, d0[1] / dl, d0[2] / dl];
         if (Math.abs(_dot3(dir, fAxis)) < Math.cos(15 * Math.PI / 180)) return false;
+        // Kappen müssen SENKRECHT auf der scharfen Kante stehen (≤ 1°): ihre Bogen-Punkte kollabieren
+        // unten über den Kanten-Parameter t auf die Linie — an einer SCHRÄGEN Stirnwand landeten sie an
+        // verschiedenen t, also neben der Wand (Trapez mit verrundeter Ober-/Unterkante: Stirnwand
+        // 0.47 mm uneben, ΔV +25 mm³ bei dichter Hülle). Solche Rundungen bleiben v2 (offenes Band).
+        for (const n of caps) if (Math.abs(_dot3(n, dir)) < Math.cos(Math.PI / 180)) return false;
         const planeOff = (cl) => { const vs = cl.ref.vertices; let s = 0; for (const v of vs) s += _dot3(cl.n, v); return s / vs.length; };
         const p0 = solve3(A.n, planeOff(A), B.n, planeOff(B), dir, _dot3(dir, fAp));
         if (!p0) return false;
@@ -1336,14 +1347,18 @@ export function buildVolumeStepBrepV2(analysis) {
   // Bandkante entlang dieser Normale auf P schieben, ohne die Wand zu verlassen. Die neue Kontur
   // von P ist exakt der Wandquerschnitt in P's Ebene (= die scharfe Kante, die der Konstrukteur
   // verrundet hat), für gerade UND gekrümmte Konturabschnitte. Die Band-Facetten entfallen.
-  // Konservativ: nur geschlossene Ringbänder (Loop von P komplett verrundet) oder EIN verrundeter
-  // Abschnitt des Loops, der an zwei Stirnwänden endet (offenes Band, Rest des Loops scharf). Das
+  // Konservativ: nur geschlossene Ringbänder (Loop von P komplett verrundet) oder verrundete
+  // Abschnitte des Loops, die je an zwei Stirnwänden enden (offene Bänder, Rest des Loops scharf;
+  // mehrere getrennte Abschnitte nur an Flächen, deren Loop schon im Netz so aussieht, s. evalLoop;
+  // P und Seitenwände reichen deutlich über die Rundung hinaus — keine Zylinder-Facetten). Das
   // Band grenzt nur an P und Wände, schließt an P UND an die Wände tangential an (Verrundung —
   // keine Fase, keine Senkung), ist im Querschnitt ein Kreisbogen und schmal (Bandform, s.
   // evaluateBand); die neue Kontur muss einfach sein. Liegt zwischen Rundung und Wand ein Kegel/
   // eine Fase (Senkung mit verrundeter Kante), wird nur die Rundung geschärft, der Kegel bleibt
-  // (schräge Wand, s. splitTiltedWall). Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt
-  // + der globale Fallback.
+  // (schräge Wand, s. splitTiltedWall). Liegt der Kegel/die Fase ZWISCHEN zwei Rundungen (beide
+  // Kanten verrundet) oder direkt an P (nur die Kante zur Wand verrundet), werden die Rundungen
+  // geschärft und Kegel/Fase exakt bis P und bis zur Wand verlängert (s. splitMiddleLayer).
+  // Jede Unsauberkeit fängt zusätzlich das Wasserdicht-Verdikt + der globale Fallback.
   // (Aufruf in runPipeline() unten.)
   let bandsDefeatured = 0;
   function defeatureBands() {
@@ -1358,6 +1373,23 @@ export function buildVolumeStepBrepV2(analysis) {
     // Rundungen (m32: erste/letzte Schicht in P bzw. Wand, ≤ 1.3°) ab; eine flache Zone weicht um
     // ≥ 20° ab (Senkung, verrundete Fase)
     const PROFILE_TOL_DEG = 3;
+    // Kegel/Fase zwischen zwei Rundungen (s. splitMiddleLayer): Neigung der Lage, ihr Flächenanteil am
+    // Band (billiger Vorfilter gegen Kugel-/Torus-Stücke), Mindestlänge, Treff-Toleranz
+    const MID_TC_MIN = 12, MID_TC_MAX = 78;   // Grad — Mantellinie ≥ 12° gegen P (vgl. |g·d| ≥ 0.2), Rundung zur Wand ≥ 12°
+    const MID_MIN_SHARE = 0.1;
+    // Länge(C) / (Knick an C · Bogenradius), je Seite: echte Fase/Kegel (Knick = halber Bogenschritt)
+    // = 2 × Länge in Bogenschritten — gemessen 17 (N=2) … 107; eine Facette einer STETIGEN Rundung
+    // (Knick = ganzer Schritt), die f-mal so lang ist wie ihre Nachbarn: ≈ f — gemessen 3.1 … 13.4 für
+    // f = 3 … 10. Ab 12 gilt die Zone als flach (Facette ≥ 12× länger = Krümmungsradius ≥ 12× größer).
+    // Grenzfall bewusst konservativ: Rundung N=2, r = 1 an 1.3 mm Fase (6.6) bleibt unverändert.
+    const MID_LEN_FACTOR = 12;
+    // mm — Wandkante ∩ Mantellinie je Station (gemessen ≤ 1e-6 mm; die Nachbar-Station liegt R·sin(Δφ)
+    // daneben: Bohrung R4/32 Seg. 0.78 mm, R1/128 Seg. 0.05 mm); trifft mehr als eine Station → keine Umwandlung
+    const MID_MATCH_TOL = 2e-3;
+    // offenes Band: Ausdehnung quer zur Rundung / Bandtiefe (s. (5)) — P ≥ 1, Seitenwände ≥ 0.5 (dünne
+    // Platte mit Rundung oben UND unten: Steg (t − 2r)/r; Zylinder-/Bogen-Facette ≤ 0.43)
+    const OPEN_MIN_DECK = 1, OPEN_MIN_SIDE = 0.5;
+    const FOLD_TOL = 1e-4;          // mm — Spitze der Breite 0 (s. foldTip; = Prüf-Toleranz strikter Importer)
     const SNAP_MAX = 0.01;          // mm — größte Korrektur auf die exakten Ebenen (s. truePlane)
     const SNAP_NOISE = 5e-5;        // mm — darunter wird nicht korrigiert (float32-Rauschen, < Prüf-Toleranz 1e-4)
     const fds = faceDefs;
@@ -1437,12 +1469,22 @@ export function buildVolumeStepBrepV2(analysis) {
     // Kandidat wird nur dann neu bewertet, wenn eine zuvor angewendete Änderung seine Flächen
     // (P, Band, Wände) berührt hat. Eine weitere Runde fängt Kandidaten, die erst durch andere
     // möglich wurden. (Vorher: nach JEDER Anwendung alles neu bewerten — eBike ~1 s langsamer.)
+    // Ein Loop mit MEHREREN getrennten verrundeten Abschnitten (offene Bänder) liefert den ersten
+    // anwendbaren Abschnitt; die übrigen folgen gleich danach (s. unten). Nur in Runde 0, also an den
+    // Flächen, deren Loop schon im Netz so aussieht (Deckfläche mit mehreren verrundeten Kanten): erst
+    // NACH dem Schärfen der Deck-Bänder bekommt eine Seitenwand zwei Abschnitte (links und rechts die
+    // senkrechten Profil-Eckrundungen) — die bleiben v2b (defeatureProfileCorners).
+    const evalLoop = (pi, L, multiOk) => {
+      const info = { runs: 1 };
+      for (let run = 0; run < info.runs; run++) { const plan = evaluateBand(pi, L, run, info, multiOk); if (plan) return plan; }
+      return null;
+    };
     let done = 0;
     for (let round = 0; round < 16; round++) {
       const cands = [];
       for (let pi = 0; pi < fds.length; pi++) {
         if (removed.has(pi)) continue;
-        for (const L of loopsOf(fds[pi])) { const plan = evaluateBand(pi, L); if (plan) cands.push({ pi, L, plan }); }
+        for (const L of loopsOf(fds[pi])) { const plan = evalLoop(pi, L, round === 0); if (plan) cands.push({ pi, L, plan }); }
       }
       if (!cands.length) break;
       cands.sort((a, b) => b.plan.walls.size - a.plan.walls.size);
@@ -1453,22 +1495,29 @@ export function buildVolumeStepBrepV2(analysis) {
         if (removed.has(c.pi)) continue;
         let plan = c.plan;
         if (touched.has(c.pi) || hit(plan.band) || hit(plan.walls)) {
-          plan = evaluateBand(c.pi, c.L);                  // Umgebung hat sich geändert → neu bewerten
+          plan = evalLoop(c.pi, c.L, round === 0);         // Umgebung hat sich geändert → neu bewerten
           if (!plan) continue;
         }
-        applyBand(plan);
-        buildOwners();
-        done++; applied++;
-        touched.add(c.pi);
-        for (const fi of plan.band) touched.add(fi);
-        for (const fi of plan.walls) touched.add(fi);
+        for (;;) {
+          applyBand(plan);
+          buildOwners();
+          done++; applied++;
+          touched.add(c.pi);
+          for (const fi of plan.band) touched.add(fi);
+          for (const fi of plan.walls) touched.add(fi);
+          if (!plan.multi) break;
+          plan = evalLoop(c.pi, c.L, true);                // weitere getrennte Abschnitte desselben Loops
+          if (!plan) break;
+        }
       }
       if (!applied) break;
     }
     if (removed.size) faceDefs = faceDefs.filter((_, i) => !removed.has(i));
     return done;
 
-    function evaluateBand(pi, L) {
+    // run: welcher der getrennten verrundeten Abschnitte von L (offene Bänder); info.runs ← Anzahl;
+    // multiOk: mehrere Abschnitte zulässig (s. evalLoop)
+    function evaluateBand(pi, L, run = 0, info = null, multiOk = false) {
       const P = fds[pi], d = nrm[pi];
       if (Math.hypot(d[0], d[1], d[2]) < 0.5) return null;
       // Ebenen-Offset von P (Mittel über die Loop-Punkte)
@@ -1485,6 +1534,11 @@ export function buildVolumeStepBrepV2(analysis) {
         const seeds = new Set();
         const lNb = [];                // je Kante von L: Nachbarfläche, Band-Kante?
         let ok = true, lenL = 0;
+        // Nicht tangentiale Nachbarn (Knick > 25°): nur als Kegel-/Fasenlage direkt an P zulässig (scharfe
+        // Senkungs-/Fasenkante oben, Rundung erst zur Wand hin, s. splitMiddleLayer) — dann grenzt der
+        // GANZE Loop an Facetten EINER Neigung (± 0.5°, höchstens MID_TC_MAX); sonst Abbruch an der
+        // ersten unpassenden Kante (wie bisher an der ersten nicht tangentialen).
+        let layerN = 0, layerLo = 90, layerHi = 0;
         for (let i = 0; i < L.length && ok; i++) {
           const a = L[i], b = L[(i + 1) % L.length];
           const k = edgeKeyFn(a, b);
@@ -1492,28 +1546,51 @@ export function buildVolumeStepBrepV2(analysis) {
           if (others.length !== 1 || removed.has(others[0].fi)) { ok = false; break; }
           const ni = others[0].fi, c = Math.abs(_dot3(nrm[ni], d));
           const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-          if (c >= TANGENT_COS && c < PARALLEL_COS) { Ledges.add(k); seeds.add(ni); lNb.push({ ni, band: true }); lenL += len; }
-          else if (c <= WALL_COS) lNb.push({ ni, band: false });
-          else { ok = false; break; }
+          if (c >= TANGENT_COS && c < PARALLEL_COS) {
+            if (layerN) { ok = false; break; }
+            Ledges.add(k); seeds.add(ni); lNb.push({ ni, band: true, k, len }); lenL += len;
+          } else if (c <= WALL_COS) {
+            if (layerN) { ok = false; break; }
+            lNb.push({ ni, band: false });
+          } else if (c < TANGENT_COS && i === layerN) {
+            const ang = Math.acos(c) * 180 / Math.PI;
+            layerN++; layerLo = Math.min(layerLo, ang); layerHi = Math.max(layerHi, ang);
+            if (layerHi > MID_TC_MAX || layerHi - layerLo > 1) { ok = false; break; }
+            Ledges.add(k); seeds.add(ni); lNb.push({ ni, band: true }); lenL += len;
+          } else { ok = false; break; }
         }
         if (!ok || !seeds.size) return null;
-        // Offenes Band: genau ein Abschnitt (zyklisch) von Band-Kanten; A/B = Anfangs-/Endpunkt auf L,
-        // endA/endB = Stirnwände (Nachbarn der scharfen Kanten davor/danach)
+        const atP = layerN > 0;        // Kegel-/Fasenlage direkt an P
+        if (atP && layerN !== L.length) return null;
+        // Offenes Band: ein Abschnitt (zyklisch) von Band-Kanten; A/B = Anfangs-/Endpunkt auf L,
+        // endA/endB = Stirnwände (Nachbarn der scharfen Kanten davor/danach). Mehrere getrennte
+        // Abschnitte: je Aufruf der Abschnitt `run` — Saat, Kanten und Länge nur dieses Abschnitts; ein
+        // Band, das über eine fremde Kante wieder an P stößt, scheitert in (2) (Abschnitte verbunden).
         let open = null;
         if (lNb.some((x) => !x.band)) {
           const n = L.length;
           const starts = [];
           for (let i = 0; i < n; i++) if (lNb[i].band && !lNb[(i - 1 + n) % n].band) starts.push(i);
-          if (starts.length !== 1) return null;
-          let e = starts[0]; while (lNb[(e + 1) % n].band) e = (e + 1) % n;
-          open = { s: starts[0], e, A: L[starts[0]], B: L[(e + 1) % n], endA: lNb[(starts[0] - 1 + n) % n].ni, endB: lNb[(e + 1) % n].ni };
-        }
+          if (info) info.runs = starts.length;
+          if (run >= starts.length || (starts.length > 1 && !multiOk)) return null;
+          const s = starts[run];
+          let e = s; while (lNb[(e + 1) % n].band) e = (e + 1) % n;
+          if (starts.length > 1) {
+            seeds.clear(); Ledges.clear(); lenL = 0;
+            for (let i = s; ; i = (i + 1) % n) { seeds.add(lNb[i].ni); Ledges.add(lNb[i].k); lenL += lNb[i].len; if (i === e) break; }
+          }
+          open = { s, e, A: L[s], B: L[(e + 1) % n], endA: lNb[(s - 1 + n) % n].ni, endB: lNb[(e + 1) % n].ni, multi: starts.length > 1 };
+        } else if (run > 0) return null;
         // Laufzeit-Vorfilter: die Saat (erste Bandschicht) einer Verrundung ist ein schmaler Streifen
         // entlang L. Ist sie größer als 3× P, ist P keine Deckfläche, sondern ein Stück einer fein
         // tessellierten Kugel/eines Torus (Nachbarn so groß wie P) → verwerfen, ohne zu wachsen.
         let seedArea = 0;
         for (const fi of seeds) seedArea += fdArea(fi);
         if (seedArea > 3 * fdArea(pi)) return null;
+        // Offenes Band, billige Vorstufe der Ausdehnungs-Schranke in (5): die erste Rundungsschicht ist
+        // höchstens 2·sin(22.5°) = 0.77 × Bandtiefe breit (N ≥ 2), P mindestens 1 × → Saat ≤ 0.77·P.
+        // Zylinder-Facette: Nachbar = gleich groß (1.0) → ohne Bandwachstum verwerfen.
+        if (open && seedArea > 0.9 * fdArea(pi)) return null;
         // Bandform (ersetzt die groben Schranken „Bandfläche ≤ 3× P“ und „Tiefe ≤ min(5 mm, 0.45·
         // Teilhöhe)“): eine Verrundung ist ein SCHMALES Band entlang der Kontur von P, die Kontur
         // ist mindestens doppelt so lang wie der Rundungsbogen: |L| ≥ 2·(π/2)·r → Bandtiefe ≤ |L|/π.
@@ -1522,6 +1599,10 @@ export function buildVolumeStepBrepV2(analysis) {
         // winziger Polfläche auf einem Zylinder (Tiefe = Kugelradius), Flächenstück einer Kugel/
         // eines Torus — die Tiefensuche bricht ab, sobald ein Punkt tiefer liegt (früh, billig).
         const H_MAX = lenL / Math.PI;
+        // Offenes Band: tiefer als Fläche(P)/Abschnittslänge darf es nach der Ausdehnungs-Schranke in
+        // (5) ohnehin nicht werden — so bricht die Suche an Bogen-Facetten (Bohrung mit abwechselnd
+        // langen/kurzen Facetten: Saat-Vorstufe greift nicht) nach wenigen Facetten ab.
+        const H_GROW = open ? Math.min(H_MAX, fdArea(pi) / (OPEN_MIN_DECK * lenL)) : H_MAX;
         // (2) Band wachsen: Nachbarn sind Band (schräg + nah an P), Wand (⊥ P) oder P (nur über L)
         let band = new Set(seeds);
         const queue = [...seeds];
@@ -1530,7 +1611,7 @@ export function buildVolumeStepBrepV2(analysis) {
         while (queue.length && ok) {
           const fi = queue.pop();
           const fd = fds[fi];
-          for (const p of fd.outer) if (Math.abs(_dot3(d, p) - off) > H_MAX) { ok = false; break; }
+          for (const p of fd.outer) if (Math.abs(_dot3(d, p) - off) > H_GROW) { ok = false; break; }
           if (!ok) break;
           for (const Lb of loopsOf(fd)) {
             for (let i = 0; i < Lb.length && ok; i++) {
@@ -1593,6 +1674,12 @@ export function buildVolumeStepBrepV2(analysis) {
         // Kegel-/Fasen-Lage liegt (Senkung mit verrundeter Kante) — die wird zur schrägen Wand.
         let tilt = null, wallAng = 90;
         if (nonTangent && open) return null;
+        // (3c) Kegel-/Fasenlage direkt an P: nur die Rundung zwischen ihr und der Wand ist ein Band
+        if (atP) {
+          if (nonTangent || open) return null;
+          const mid = splitMiddleLayer(pi, L, band, wallEdges, seeds, d, off, true);
+          return mid ? finishPlan(pi, L, mid.newLoop, mid.walls, mid.band, mid.proj, mid.planes) : null;
+        }
         if (nonTangent) {
           tilt = splitTiltedWall(pi, band, wallEdges, Ledges, d);
           if (!tilt) return null;
@@ -1630,13 +1717,30 @@ export function buildVolumeStepBrepV2(analysis) {
         // Höhe über P (= Verrundungsradius). Schwankt sie (Deck-Rundung vs. Eckradius), ist P eine
         // Seitenwand, um die zufällig auch ein Band läuft → nicht diese Fläche entrunden.
         if (hHi - hLo > Math.max(0.01, 0.02 * hHi)) return null;
+        // Offenes Band: P und die Seitenwände müssen über die Rundung hinaus reichen (echte Flächen des
+        // Profils). Eine Bogen-Facette (Bohrung, Zapfen, Langloch- oder Halbkreis-Ende) hat tangentiale
+        // Nachbarn; ihr „Band“ endet an der Facette 90° weiter, die als Wand gilt — und ein Viertelbogen
+        // IST im Querschnitt ein tangentialer Kreisbogen: ohne diese Schranke wurde z.B. ein hohes
+        // Halbkreis-Profil OHNE jede Rundung eckig (Basis 69260ed: ΔV +1719 mm³ bei dichter Hülle), mit
+        // mehreren Abschnitten jeder hohe Zylinder zum Vierkant. Maß: Fläche / (Länge des Abschnitts ·
+        // Bandtiefe) = Ausdehnung quer zur Rundung / Bandtiefe — Facette: Sehne/R ≤ 2·sin(12.5°) = 0.43
+        // (tangential ≤ 25°), gemessen ≤ 0.22; Härtetest-Deckflächen/-Wände ≥ 4 (Seitenwände zusammen,
+        // Stirnwände zählen nicht).
+        if (open) {
+          let aSide = 0;
+          const sideW = new Set();
+          for (const e of wallEdges) if (!e.end && !sideW.has(e.wi)) { sideW.add(e.wi); aSide += fdArea(e.wi); }
+          if (fdArea(pi) < OPEN_MIN_DECK * lenL * hHi || aSide < OPEN_MIN_SIDE * lenL * hHi) return null;
+        }
         // (5a) Rundungsprofil: im Querschnitt ist ein Verrundungsband EIN Kreisbogen (Radius r),
         // tangential an P und die Wände (Neigung θw, senkrecht 90°; Bandtiefe = r·(1 − cos θw)). Ein
         // Punkt in Tiefe h liegt dort, wo die Flächennormale um α(h) = acos(1 − h/r) gegen P geneigt
         // ist — die Normalen der angrenzenden Band-Facetten (an L zusätzlich P mit 0°, am Wandring die
         // Wand mit θw) müssen α(h) einschließen.
         // Eine flache Zone im Band liegt zu tief/zu flach für ihre Neigung: Senkungskegel zwischen
-        // zwei Kanten-Rundungen (tangential an P UND an die Bohrung!), verrundete Fase → kein Band.
+        // zwei Kanten-Rundungen (tangential an P UND an die Bohrung!), verrundete Fase → kein EINZELNES
+        // Band; geschlossen und ohne Schräg-Wand: Kegel/Fase zwischen zwei Rundungen (splitMiddleLayer).
+        let profileOk = true;
         {
           const lo = new Map(), hi = new Map(), pts = new Map();   // vtxKey → Neigung min/max (Grad), Punkt
           const note = (p, ang) => { const k = vtxKey(p); if (!(lo.get(k) <= ang)) lo.set(k, ang); if (!(hi.get(k) >= ang)) hi.set(k, ang); };
@@ -1649,8 +1753,13 @@ export function buildVolumeStepBrepV2(analysis) {
           const invR = (1 - Math.cos(wallAng * Math.PI / 180)) / hHi;
           for (const [k, p] of pts) {
             const al = Math.acos(Math.max(-1, Math.min(1, 1 - Math.abs(_dot3(d, p) - off) * invR))) * 180 / Math.PI;
-            if (al < lo.get(k) - PROFILE_TOL_DEG || al > hi.get(k) + PROFILE_TOL_DEG) return null;
+            if (al < lo.get(k) - PROFILE_TOL_DEG || al > hi.get(k) + PROFILE_TOL_DEG) { profileOk = false; break; }
           }
+        }
+        if (!profileOk) {
+          if (tilt || open) return null;
+          const mid = splitMiddleLayer(pi, L, band, wallEdges, seeds, d, off, false);
+          return mid ? finishPlan(pi, L, mid.newLoop, mid.walls, mid.band, mid.proj, mid.planes) : null;
         }
         // (5b) Exakte Ebenen (feine Rundungen, s. truePlane): jeden projizierten Punkt auf die echte
         // Ebene von P und die echte(n) Ebene(n) seiner Wand/Wände setzen (kleinste Verschiebung; an
@@ -1668,38 +1777,80 @@ export function buildVolumeStepBrepV2(analysis) {
           if (!newLoop.length || vtxKey(newLoop[newLoop.length - 1]) !== vtxKey(q)) newLoop.push(q);
         }
         if (newLoop.length > 1 && vtxKey(newLoop[0]) === vtxKey(newLoop[newLoop.length - 1])) newLoop.pop();
+        // Offenes Band, das an einer EINSPRINGENDEN Ecke beginnt/endet: die Stirnwand läuft dort über die
+        // Ecke hinaus, der projizierte Weg kehrt bei A (bzw. B) auf derselben Geraden um — A wäre eine
+        // Spitze der Breite 0 in P und in der Stirnwand (dicht und volumentreu, aber zwei überlappende
+        // Kanten je Fläche: entartet für strikte Kerne). A/B dann aus beiden Loops nehmen (Stirnwand:
+        // applyBand, nach dem Verschieben).
+        let folds = null;
+        if (open) for (const E of [open.A, open.B]) if (dropFold(newLoop, vtxKey(E))) (folds || (folds = [])).push(vtxKey(E));
         if (newLoop.length < 3) return null;
-        // Nur Wände und Band dürfen die verschobenen Punkte benutzen (sonst Riss/T-Junction)
-        for (let fi = 0; fi < fds.length && ok; fi++) {
-          if (band.has(fi) || walls.has(fi) || removed.has(fi)) continue;
-          for (const Lx of [fds[fi].outer, ...fds[fi].inner]) {
-            for (const p of Lx) if (proj.has(vtxKey(p))) { ok = false; break; }
-            if (!ok) break;
-          }
-        }
-        if (!ok) return null;
-        // (6) Orientierung wie der alte Loop, und die neue Kontur muss einfach sein (2D in P)
-        const u = computeRefDir(d), v = _norm3(_cross3(d, u));
-        const to2 = (p) => [_dot3(p, u), _dot3(p, v)];
-        const area2 = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a[0] * b[1] - b[0] * a[1]; } return s / 2; };
-        const old2 = L.map(to2);
-        let new2 = newLoop.map(to2);
-        if (Math.sign(area2(old2)) !== Math.sign(area2(new2))) { newLoop.reverse(); new2 = new2.reverse(); }
-        const segX = (p1, p2, p3, p4) => {
-          const o = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-          const d1 = o(p3, p4, p1), d2 = o(p3, p4, p2), d3 = o(p1, p2, p3), d4 = o(p1, p2, p4);
-          return ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12));
-        };
-        const n2 = new2.length;
-        for (let i = 0; i < n2 && ok; i++) {
-          for (let j = i + 2; j < n2; j++) {
-            if (i === 0 && j === n2 - 1) continue;
-            if (segX(new2[i], new2[(i + 1) % n2], new2[j], new2[(j + 1) % n2])) { ok = false; break; }
-          }
-        }
-        if (!ok) return null;
-        return { pi, L, newLoop, walls, band, proj, planes };
+        const plan = finishPlan(pi, L, newLoop, walls, band, proj, planes, folds);
+        if (plan && open?.multi) plan.multi = true;
+        return plan;
       }
+    }
+
+    // Spitze der Breite 0 bei loop[i]: beide Nachbarn liegen auf demselben Strahl von loop[i] aus
+    // (Abstand des näheren Nachbarn von der Geraden des anderen ≤ FOLD_TOL)
+    function foldTip(loop, i) {
+      const n = loop.length;
+      if (n <= 3) return false;
+      const p = loop[i], u = _sub3(loop[(i - 1 + n) % n], p), w = _sub3(loop[(i + 1) % n], p);
+      const lu = Math.hypot(u[0], u[1], u[2]), lw = Math.hypot(w[0], w[1], w[2]);
+      if (!(lu > 0 && lw > 0) || _dot3(u, w) <= 0) return false;
+      const c = _cross3(u, w);
+      return Math.hypot(c[0], c[1], c[2]) / Math.max(lu, lw) <= FOLD_TOL;
+    }
+    // Spitze ab dem Punkt mit Schlüssel k abtragen: alle Punkte der zurückgefalteten Strecke liegen auf
+    // ihr (A und die projizierten Stirnwand-Punkte bis zur echten Ecke) → die jeweilige Spitze entfernen,
+    // bis ein Nachbar keine mehr bildet. → Anzahl entfernter Punkte
+    function dropFold(loop, k) {
+      let i = loop.findIndex((p) => vtxKey(p) === k), cnt = 0;
+      while (i >= 0 && foldTip(loop, i)) {
+        loop.splice(i, 1); cnt++;
+        const m = loop.length;
+        if (foldTip(loop, i % m)) i %= m;
+        else if (foldTip(loop, (i - 1 + m) % m)) i = (i - 1 + m) % m;
+        else break;
+      }
+      return cnt;
+    }
+
+    // Gemeinsame Schlussprüfungen eines Band-Plans → Plan | null
+    function finishPlan(pi, L, newLoop, walls, band, proj, planes, folds = null) {
+      let ok = true;
+      const d = nrm[pi];
+      // Nur Wände und Band dürfen die verschobenen Punkte benutzen (sonst Riss/T-Junction)
+      for (let fi = 0; fi < fds.length && ok; fi++) {
+        if (band.has(fi) || walls.has(fi) || removed.has(fi)) continue;
+        for (const Lx of [fds[fi].outer, ...fds[fi].inner]) {
+          for (const p of Lx) if (proj.has(vtxKey(p))) { ok = false; break; }
+          if (!ok) break;
+        }
+      }
+      if (!ok) return null;
+      // (6) Orientierung wie der alte Loop, und die neue Kontur muss einfach sein (2D in P)
+      const u = computeRefDir(d), v = _norm3(_cross3(d, u));
+      const to2 = (p) => [_dot3(p, u), _dot3(p, v)];
+      const area2 = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a[0] * b[1] - b[0] * a[1]; } return s / 2; };
+      const old2 = L.map(to2);
+      let new2 = newLoop.map(to2);
+      if (Math.sign(area2(old2)) !== Math.sign(area2(new2))) { newLoop.reverse(); new2 = new2.reverse(); }
+      const segX = (p1, p2, p3, p4) => {
+        const o = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        const d1 = o(p3, p4, p1), d2 = o(p3, p4, p2), d3 = o(p1, p2, p3), d4 = o(p1, p2, p4);
+        return ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12));
+      };
+      const n2 = new2.length;
+      for (let i = 0; i < n2 && ok; i++) {
+        for (let j = i + 2; j < n2; j++) {
+          if (i === 0 && j === n2 - 1) continue;
+          if (segX(new2[i], new2[(i + 1) % n2], new2[j], new2[(j + 1) % n2])) { ok = false; break; }
+        }
+      }
+      if (!ok) return null;
+      return { pi, L, newLoop, walls, band, proj, planes, folds };
     }
 
     // (4) Offenes Band: Weg der Wand-Bandkanten von A nach B → Punkte zwischen A und B | null. Er muss
@@ -1806,29 +1957,289 @@ export function buildVolumeStepBrepV2(analysis) {
         }
       }
       const project = (p, h) => {
-        const fs = [...(at.get(vtxKey(p)) || [])];
-        if (!fs.length) return null;
-        let best = null;
-        for (let i = 0; i < fs.length; i++) {
-          for (let j = i + 1; j < fs.length; j++) {
-            const c = _cross3(nrm[fs[i]], nrm[fs[j]]), l = Math.hypot(c[0], c[1], c[2]);
-            if (!best || l > best.l) best = { c, l };
-          }
-        }
-        let g;
-        if (best && best.l > 1e-3) {
-          g = [best.c[0] / best.l, best.c[1] / best.l, best.c[2] / best.l];
-          for (const f of fs) if (Math.abs(_dot3(nrm[f], g)) > 1e-3) return null;   // keine gemeinsame Mantellinie
-        } else {
-          const n = nrm[fs[0]], k = _dot3(d, n);
-          g = _norm3([d[0] - n[0] * k, d[1] - n[1] * k, d[2] - n[2] * k]);
-        }
+        const g = lineThrough([...(at.get(vtxKey(p)) || [])], d);
+        if (!g) return null;
         const gd = _dot3(g, d);
         if (Math.abs(gd) < 0.2) return null;
         const t = -h / gd;
         return [p[0] + g[0] * t, p[1] + g[1] * t, p[2] + g[2] * t];
       };
       return { band: R, walls: W, wallEdges: edges, ang: tc, project };
+    }
+
+    // Gemeinsame Gerade der Facetten fs durch ihren gemeinsamen Punkt (Mantellinie eines Kegels/einer
+    // Fase, senkrechte Kante zweier Wände): Schnitt der beiden am stärksten gegeneinander geneigten
+    // Facetten-Ebenen — jede weitere Facette muss sie enthalten; eine einzelne Ebene (bzw. nur
+    // parallele): Fallrichtung zu d in ihr. → Einheitsvektor (Vorzeichen beliebig) | null
+    function lineThrough(fs, d) {
+      if (!fs.length) return null;
+      let best = null;
+      for (let i = 0; i < fs.length; i++) {
+        for (let j = i + 1; j < fs.length; j++) {
+          const c = _cross3(nrm[fs[i]], nrm[fs[j]]), l = Math.hypot(c[0], c[1], c[2]);
+          if (!best || l > best.l) best = { c, l };
+        }
+      }
+      if (best && best.l > 1e-3) {
+        const g = [best.c[0] / best.l, best.c[1] / best.l, best.c[2] / best.l];
+        for (const f of fs) if (Math.abs(_dot3(nrm[f], g)) > 1e-3) return null;   // keine gemeinsame Gerade
+        return g;
+      }
+      const n = nrm[fs[0]], k = _dot3(d, n);
+      return _norm3([d[0] - n[0] * k, d[1] - n[1] * k, d[2] - n[2] * k]);
+    }
+
+    // Rundungsprofil zwischen zwei Lagen (wie (5a)): im Querschnitt EIN Kreisbogen, tangential an Lage 1
+    // (Neigung t1 in Tiefe h1) und Lage 2 (t2 in h2) → cos α(h) = cos t1 − (cos t1 − cos t2)·(h − h1)/(h2 − h1).
+    // Die Neigungen der an einen Punkt grenzenden Facetten (auf Rand 1/2 zusätzlich t1/t2) müssen α(h)
+    // einschließen (± PROFILE_TOL_DEG).
+    function arcProfileOk(facets, edge1, t1, h1, edge2, t2, h2, d, off) {
+      const lo = new Map(), hi = new Map(), pts = new Map();
+      const note = (p, ang) => { const k = vtxKey(p); if (!(lo.get(k) <= ang)) lo.set(k, ang); if (!(hi.get(k) >= ang)) hi.set(k, ang); };
+      for (const fi of facets) {
+        const ang = Math.acos(Math.min(1, Math.abs(_dot3(nrm[fi], d)))) * 180 / Math.PI;
+        for (const Lb of loopsOf(fds[fi])) for (const p of Lb) { note(p, ang); pts.set(vtxKey(p), p); }
+      }
+      for (const p of edge1) note(p, t1);
+      for (const p of edge2) note(p, t2);
+      const c1 = Math.cos(t1 * Math.PI / 180), c2 = Math.cos(t2 * Math.PI / 180);
+      for (const [k, p] of pts) {
+        const u = (Math.abs(_dot3(d, p) - off) - h1) / (h2 - h1);
+        const al = Math.acos(Math.max(-1, Math.min(1, c1 - (c1 - c2) * u))) * 180 / Math.PI;
+        if (al < lo.get(k) - PROFILE_TOL_DEG || al > hi.get(k) + PROFILE_TOL_DEG) return false;
+      }
+      return true;
+    }
+
+    // (3c) Kegel/Fase ZWISCHEN den Rundungen — Senkung oder Fase, deren Kanten verrundet sind:
+    //   atP = false: P –Rundung R1– Lage C –Rundung R2– Wand. Das Band von P reicht tangential bis zur
+    //                Wand, das Rundungsprofil (5a) scheitert an der flachen Lage C (Härtetest x5, x6);
+    //   atP = true:  P –scharf– Lage C –Rundung R2– Wand. L grenzt ringsum mit EINER Neigung (Knick
+    //                > 25°) an C, die Rundung liegt erst zwischen C und der Wand (x3).
+    // C = zusammenhängende Facetten EINER Neigung tc (± 0.5°, Kegel/Fase), sie trennt das Band sauber in
+    // R1 (an L) und R2 (an den Wänden). C bleibt, nur die Rundungen fallen weg:
+    //   R1-Rand (R1 ∩ C) läuft entlang der Mantellinien von C bis P (wie splitTiltedWall) → neue Kontur
+    //   von P = C ∩ P; R2-Rand auf C (R2 ∩ C) läuft entlang der Mantellinie von P weg, der Wand-Rand (R2 ∩
+    //   Wand) entlang der Wandkante zu P hin — je Station treffen sich beide in EINEM Punkt S (Kante C ∩
+    //   Wand). Die Stationen müssen Punkt für Punkt zusammenpassen (gleiche Anzahl, gleiche Reihenfolge,
+    //   Geraden schneiden sich bis auf MID_MATCH_TOL, S liegt zwischen den beiden Rand-Tiefen) — sonst
+    //   bliebe ein Riss oder eine T-Kante.
+    // Schutz gegen Fehldeutung: R1 und R2 sind je EIN Kreisbogen (≥ 2 Schichten, tangential an beide
+    // Nachbarn, Profilprüfung wie (5a)); C ist flach UND lang: eine nicht kreisförmige Rundung, deren
+    // breiteste Schicht „C“ wäre, krümmt sich über deren Länge so stark wie an den Schichtknicken —
+    // eine echte Fase/ein echter Kegel bleibt über ein Vielfaches der Bogenschritte gerade
+    // (Länge(C) ≥ MID_LEN_FACTOR · Knick an C · Bogenradius, je Seite).
+    // → { band: R1 ∪ R2, walls: berührte C-Facetten + Wände, proj, newLoop } | null
+    function splitMiddleLayer(pi, L, band, wallEdges, seeds, d, off, atP) {
+      const angOf = (fi) => Math.acos(Math.min(1, Math.abs(_dot3(nrm[fi], d)))) * 180 / Math.PI;
+      const depthOf = (p) => Math.abs(_dot3(d, p) - off);
+      const eachNb = (fi, fn) => {
+        for (const Lb of loopsOf(fds[fi])) {
+          for (let i = 0; i < Lb.length; i++) {
+            const a = Lb[i], b = Lb[(i + 1) % Lb.length];
+            for (const o of edgeOwners.get(edgeKeyFn(a, b)) || []) if (o.fi !== fi) fn(o.fi, a, b);
+          }
+        }
+      };
+      const BW = new Set(), W = new Set();     // Band-Facetten an den Wänden; Wände
+      for (const e of wallEdges) { BW.add(e.bi); W.add(e.wi); }
+      // (a) Neigung tc der Lage C und Start-Facetten
+      let tc = 0;
+      const start = [];
+      if (atP) {
+        for (const fi of seeds) { tc += angOf(fi); start.push(fi); }
+        tc /= seeds.size;
+      } else {
+        // 1°-Fenster mit der größten Fläche unter den Facetten, die weder an L noch an eine Wand grenzen
+        const cand = [];
+        let aBand = 0;
+        for (const fi of band) {
+          const A = fdArea(fi);
+          aBand += A;
+          if (!seeds.has(fi) && !BW.has(fi)) cand.push({ fi, a: angOf(fi), A });
+        }
+        cand.sort((x, y) => x.a - y.a);
+        let best = null;
+        for (let i = 0, j = 0, s = 0; i < cand.length; i++) {
+          s += cand[i].A;
+          while (cand[i].a - cand[j].a > 1) s -= cand[j++].A;
+          if (!best || s > best.s) best = { s, i, j };
+        }
+        if (!best || !(best.s >= MID_MIN_SHARE * aBand)) return null;
+        let sa = 0;
+        for (let k = best.j; k <= best.i; k++) sa += cand[k].a * cand[k].A;
+        tc = sa / best.s;
+        for (let k = best.j; k <= best.i; k++) if (Math.abs(cand[k].a - tc) <= 0.5) start.push(cand[k].fi);
+      }
+      if (!(tc >= MID_TC_MIN && tc <= MID_TC_MAX) || !start.length) return null;
+      for (const fi of start) if (Math.abs(angOf(fi) - tc) > 0.5) return null;
+      const C = new Set(start), stack = [...start];
+      while (stack.length) {
+        eachNb(stack.pop(), (ni) => { if (!C.has(ni) && band.has(ni) && Math.abs(angOf(ni) - tc) <= 0.5) { C.add(ni); stack.push(ni); } });
+      }
+      // (b) R1 (von L aus) und R2 (von den Wänden aus) ohne C: C muss das Band sauber trennen
+      const flood = (from) => {
+        const R = new Set(), st = [];
+        for (const fi of from) if (!C.has(fi) && band.has(fi) && !R.has(fi)) { R.add(fi); st.push(fi); }
+        while (st.length) eachNb(st.pop(), (ni) => { if (!R.has(ni) && !C.has(ni) && band.has(ni)) { R.add(ni); st.push(ni); } });
+        return R;
+      };
+      const R1 = atP ? new Set() : flood(seeds), R2 = flood(BW);
+      if (!R2.size || (!atP && !R1.size)) return null;
+      for (const fi of band) if ((C.has(fi) ? 1 : 0) + (R1.has(fi) ? 1 : 0) + (R2.has(fi) ? 1 : 0) !== 1) return null;
+      for (const fi of seeds) if (atP ? !C.has(fi) : !R1.has(fi)) return null;
+      for (const fi of BW) if (!R2.has(fi)) return null;
+      for (const fi of C) {                     // C grenzt nur an R1, R2, sich selbst (atP: und an P)
+        let bad = false;
+        eachNb(fi, (ni) => { if (!(C.has(ni) || R1.has(ni) || R2.has(ni) || (atP && ni === pi))) bad = true; });
+        if (bad) return null;
+      }
+      // (c) R1 flacher, R2 steiler als C, beide gekrümmt (≥ 2 Schichten)
+      const spread = (R) => { let lo = 90, hi = 0; for (const fi of R) { const a = angOf(fi); if (a < lo) lo = a; if (a > hi) hi = a; } return { lo, hi }; };
+      if (R1.size) { const s = spread(R1); if (s.hi > tc - 0.5 || s.hi - s.lo < 0.25 * tc) return null; }
+      { const s = spread(R2); if (s.lo < tc + 0.5 || s.hi - s.lo < 0.25 * (90 - tc)) return null; }
+      // (d) Ränder an C (tangential: Knick ≤ 25°) und an den Wänden — je EIN geschlossener Ring
+      const e1 = [], eC = [];
+      let k1 = 0, k2 = 0;                       // größter Knick an C (Grad)
+      for (const fi of R1) eachNb(fi, (ni, a, b) => { if (C.has(ni)) { e1.push({ v0: a, v1: b }); k1 = Math.max(k1, tc - angOf(fi)); } });
+      for (const fi of R2) eachNb(fi, (ni, a, b) => { if (C.has(ni)) { eC.push({ v0: a, v1: b }); k2 = Math.max(k2, angOf(fi) - tc); } });
+      if (k1 > 25 || k2 > 25) return null;
+      const oneRing = (edges) => { const rs = chainEdges(edges); return rs.length === 1 && rs[0].length >= 3 ? rs[0] : null; };
+      const ring1 = atP ? null : oneRing(e1), ringC = oneRing(eC), ringW = oneRing(wallEdges);
+      if ((!atP && !ring1) || !ringC || !ringW) return null;
+      // gleichmäßige Tiefe je Ring (wie (5)); Reihenfolge P < R1/C < C/R2 < Wand
+      const meanDepth = (ring) => {
+        let lo = Infinity, hi = -Infinity, s = 0;
+        for (const p of ring) { const h = depthOf(p); if (h < lo) lo = h; if (h > hi) hi = h; s += h; }
+        return hi - lo > Math.max(0.01, 0.02 * hi) ? NaN : s / ring.length;
+      };
+      const h1 = atP ? 0 : meanDepth(ring1), hC = meanDepth(ringC), hW = meanDepth(ringW);
+      if (!(hC > h1 + 1e-6 && hW > hC + 1e-6) || (!atP && !(h1 > 1e-6))) return null;
+      // (e) Profile: R1 Kreisbogen 0° (P) → tc, R2 Kreisbogen tc → 90° (Wand)
+      if (R1.size && !arcProfileOk(R1, L, 0, 0, ring1, tc, h1, d, off)) return null;
+      if (!arcProfileOk(R2, ringC, tc, hC, ringW, 90, hW, d, off)) return null;
+      // (f) C flach und lang gegenüber den Bögen (s. oben)
+      const rad = Math.PI / 180;
+      const lenC = (hC - h1) / Math.sin(tc * rad);
+      if (R1.size && lenC < MID_LEN_FACTOR * (k1 * rad) * (h1 / (1 - Math.cos(tc * rad)))) return null;
+      if (lenC < MID_LEN_FACTOR * (k2 * rad) * ((hW - hC) / Math.cos(tc * rad))) return null;
+      // (g) Neue Punkte aus den EXAKTEN Ebenen (truePlane): bei feinen Rundungen (halber Schichtwinkel
+      // < 2°) schlägt das Region-Growing den tangentialen Streifen jeder Rundung der Nachbarfläche zu
+      // (P, Kegel-/Fasen-Facette, Wand) — die Rand-Punkte liegen dann µm NEBEN der echten Fläche. Darum
+      // Geraden als Schnitt der exakten Ebenen, nicht durch die Rand-Punkte; P, C und Wände tragen
+      // danach ihre exakte Ebene (wie (5b)/applyBand).
+      const planeOf = (fi) => truePlane(fi) || { n: nrm[fi], c: _dot3(nrm[fi], fds[fi].centroid), p: fds[fi].centroid };
+      // Gerade der Facetten fs nahe p (vgl. lineThrough) → { x: Punkt nahe p, u: Richtung } | null
+      const lineOfPlanes = (fs, p) => {
+        if (!fs.length) return null;
+        const pls = fs.map(planeOf);
+        let best = null;
+        for (let i = 0; i < pls.length; i++) {
+          for (let j = i + 1; j < pls.length; j++) {
+            const c = _cross3(pls[i].n, pls[j].n), l = Math.hypot(c[0], c[1], c[2]);
+            if (!best || l > best.l) best = { i, j, c, l };
+          }
+        }
+        let x, u;
+        if (best && best.l > 1e-3) {
+          u = [best.c[0] / best.l, best.c[1] / best.l, best.c[2] / best.l];
+          const A = pls[best.i], B = pls[best.j], k = _dot3(A.n, B.n), den = 1 - k * k;
+          const fa = (A.c - B.c * k) / den, fb = (B.c - A.c * k) / den;
+          const x0 = [A.n[0] * fa + B.n[0] * fb, A.n[1] * fa + B.n[1] * fb, A.n[2] * fa + B.n[2] * fb];
+          const t = _dot3(_sub3(p, x0), u);
+          x = [x0[0] + u[0] * t, x0[1] + u[1] * t, x0[2] + u[2] * t];
+          for (const pl of pls) if (Math.abs(_dot3(pl.n, u)) > 1e-3) return null;   // keine gemeinsame Gerade
+        } else {
+          const pl = pls[0], h = _dot3(pl.n, p) - pl.c, k = _dot3(d, pl.n);
+          x = [p[0] - pl.n[0] * h, p[1] - pl.n[1] * h, p[2] - pl.n[2] * h];
+          u = _norm3([d[0] - pl.n[0] * k, d[1] - pl.n[1] * k, d[2] - pl.n[2] * k]);
+        }
+        for (const pl of pls) if (Math.abs(_dot3(pl.n, x) - pl.c) > MID_MATCH_TOL) return null;
+        if (Math.hypot(x[0] - p[0], x[1] - p[1], x[2] - p[2]) > SNAP_MAX) return null;   // Rand-Punkt weit neben den Ebenen
+        return { x, u };
+      };
+      const facetsAt = new Map(), cTouched = new Set();
+      const keysC = new Set(ringC.map(vtxKey));
+      if (ring1) for (const p of ring1) keysC.add(vtxKey(p));
+      for (const fi of C) {
+        for (const Lb of loopsOf(fds[fi])) {
+          for (const p of Lb) {
+            const k = vtxKey(p);
+            if (!keysC.has(k)) continue;
+            cTouched.add(fi);
+            let s = facetsAt.get(k); if (!s) { s = []; facetsAt.set(k, s); }
+            if (!s.includes(fi)) s.push(fi);
+          }
+        }
+      }
+      const wallAt = new Map(), keysW = new Set(ringW.map(vtxKey));
+      for (const wi of W) {
+        for (const Lb of loopsOf(fds[wi])) {
+          for (const p of Lb) {
+            const k = vtxKey(p);
+            if (!keysW.has(k)) continue;
+            let s = wallAt.get(k); if (!s) { s = []; wallAt.set(k, s); }
+            if (!s.includes(wi)) s.push(wi);
+          }
+        }
+      }
+      const proj = new Map(), newLoop = [];
+      const planes = new Map();               // Fläche → exakte Ebene (applyBand)
+      const usePlane = (fi) => { const t = truePlane(fi); if (t) planes.set(fi, t); };
+      if (ring1) {
+        // R1-Rand → P entlang der Mantellinie von C (Schnitt mit der exakten Ebene von P)
+        const pP = planeOf(pi);
+        usePlane(pi);
+        for (const p of ring1) {
+          const ln = lineOfPlanes(facetsAt.get(vtxKey(p)) || [], p);
+          if (!ln) return null;
+          const gd = _dot3(ln.u, pP.n);
+          if (Math.abs(gd) < 0.2) return null;
+          const t = (pP.c - _dot3(pP.n, ln.x)) / gd;
+          const q = [ln.x[0] + ln.u[0] * t, ln.x[1] + ln.u[1] * t, ln.x[2] + ln.u[2] * t];
+          proj.set(vtxKey(p), q);
+          if (!newLoop.length || vtxKey(newLoop[newLoop.length - 1]) !== vtxKey(q)) newLoop.push(q);
+        }
+        if (newLoop.length > 1 && vtxKey(newLoop[0]) === vtxKey(newLoop[newLoop.length - 1])) newLoop.pop();
+        if (newLoop.length < 3) return null;
+      } else newLoop.push(...L);
+      // R2-Rand auf C und Wand-Rand → gemeinsame Kante S: Station für Station
+      const n = ringW.length;
+      if (ringC.length !== n) return null;
+      const gW = ringW.map((p) => lineOfPlanes(wallAt.get(vtxKey(p)) || [], p));
+      const gC = ringC.map((c) => lineOfPlanes(facetsAt.get(vtxKey(c)) || [], c));
+      if (gW.some((g) => !g) || gC.some((g) => !g)) return null;
+      let scale = 0;
+      for (const p of ringW) scale = Math.max(scale, Math.abs(p[0]), Math.abs(p[1]), Math.abs(p[2]));
+      const tolM = Math.max(MID_MATCH_TOL, 4e-7 * scale);   // float32 fern vom Ursprung
+      const meet = (i, j) => {                // nächste Punkte der Wandgeraden i und der Mantellinie j
+        const { x: p, u: gw } = gW[i], { x: c, u: gc } = gC[j];
+        const w0 = _sub3(p, c), b = _dot3(gw, gc), dd = _dot3(gw, w0), e = _dot3(gc, w0), den = 1 - b * b;
+        if (!(den > 1e-6)) return null;
+        const lam = (b * e - dd) / den, mu = (e - b * dd) / den;
+        const A = [p[0] + gw[0] * lam, p[1] + gw[1] * lam, p[2] + gw[2] * lam];
+        const B = [c[0] + gc[0] * mu, c[1] + gc[1] * mu, c[2] + gc[2] * mu];
+        if (Math.hypot(A[0] - B[0], A[1] - B[1], A[2] - B[2]) > tolM) return null;
+        const S = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2, (A[2] + B[2]) / 2];
+        const h = depthOf(S);
+        return h > hC + 1e-6 && h < hW - 1e-6 ? S : null;
+      };
+      let j0 = -1;
+      for (let j = 0; j < n; j++) if (meet(0, j)) { if (j0 >= 0) return null; j0 = j; }   // eindeutig
+      if (j0 < 0) return null;
+      const dir = meet(1, (j0 + 1) % n) ? 1 : meet(1, (j0 - 1 + n) % n) ? -1 : 0;
+      if (!dir) return null;
+      for (let i = 0; i < n; i++) {
+        const j = (((j0 + dir * i) % n) + n) % n;
+        const S = meet(i, j);
+        if (!S) return null;
+        proj.set(vtxKey(ringW[i]), S);
+        proj.set(vtxKey(ringC[j]), S);
+      }
+      const walls = new Set(cTouched);
+      for (const wi of W) walls.add(wi);
+      for (const fi of walls) usePlane(fi);
+      return { band: new Set([...R1, ...R2]), walls, proj, newLoop, planes };
     }
 
     // (5b) Hilfen: projizierte Punkte auf die exakten Ebenen setzen → Map(fi → Ebene) | null.
@@ -1903,12 +2314,13 @@ export function buildVolumeStepBrepV2(analysis) {
     // (7) Anwenden: P bekommt die Wandkontur, Wände werden bis P verlängert, Band entfällt. Wurde
     // auf exakte Ebenen gesetzt, tragen P und die Wände diese Ebenen auch als Flächen-Ebene (sonst
     // läge die STEP-PLANE µm neben ihrem Rand).
-    function applyBand({ pi, L, newLoop, walls, band, proj, planes }) {
+    function applyBand({ pi, L, newLoop, walls, band, proj, planes, folds }) {
       L.length = 0; L.push(...newLoop);
       for (const wi of walls) {
         const W = fds[wi];
         for (const Lw of [W.outer, ...W.inner]) {
           for (let i = 0; i < Lw.length; i++) { const q = proj.get(vtxKey(Lw[i])); if (q) Lw[i] = q; }
+          for (const k of folds || []) dropFold(Lw, k);   // dieselbe Spitze in der Stirnwand (s. evaluateBand)
         }
       }
       for (const [fi, pl] of planes || []) {
@@ -2346,17 +2758,31 @@ export function buildVolumeStepBrepV2(analysis) {
   // ---- Konvexe Außen-Zylindermäntel (Welle, Zapfen, Scheiben-/Rohr-Außenwand) ----
   // Spiegelbild des scharfen Bohrungs-Pfads: ein voll umlaufender KONVEXER Mantel (radialScore
   // deutlich positiv — Facetten-Normalen zeigen von der Achse WEG) wird zu EINER
-  // CYLINDRICAL_SURFACE, wenn beide Rand-Loops EXAKT der AUSSEN-Loop je einer ebenen Deckfläche
-  // sind (bei der Bohrung ist es ein Innen-Loop). Dieselben harten Gates wie sharpBorePlan:
-  // Ränder eben in der Deckebene, exakt auf dem Kreis, feine und GLEICHMÄSSIGE Segmentwinkel
-  // (D-Wellen-Schutz), volle Umrundung, Wand ⟂ zu den Deckflächen, Kreis in der Deck-Ebene.
-  // Liegt ein Rand nicht direkt auf einer ebenen Deckfläche (Fase/Verrundung an der Außenkante,
-  // Zapfen auf einer Platte: Rand = Innen-Loop), bleibt der Mantel konservativ facettiert — einen
-  // Fasen-Kegel-Pfad gibt es hier bewusst (noch) nicht. Emission in assemble() als EIGENER Block
-  // (same_sense .T., Ränder so, dass die Fläche links liegt); geprüft mit tests/step-strict.mjs
-  // (ohne Heilung) und occt-Volumen gegen den exakten Zylinder (tests/mantle-regression.mjs).
+  // CYLINDRICAL_SURFACE, wenn beide Rand-Loops EXAKT ein kompletter Loop je einer ebenen Deckfläche
+  // sind: meist der AUSSEN-Loop (Welle, Scheibe), beim Zapfen auf einer Platte bzw. der Stufenwelle
+  // auf einer Seite ein INNEN-Loop (Platte um den Zapfen, Schulter der Stufenwelle). Dieselben
+  // harten Gates wie sharpBorePlan: Ränder eben in der Deckebene, exakt auf dem Kreis, feine und
+  // GLEICHMÄSSIGE Segmentwinkel (D-Wellen-Schutz), volle Umrundung, Wand ⟂ zu den Deckflächen,
+  // Kreis in der Deck-Ebene, Wand konvex. Ein Innen-Loop als Deck bekommt die Kreis-Kante mit
+  // derselben Lochrand-Regel wie eine Bohrung (assemble: holeLoopForward — im Uhrzeigersinn um die
+  // Flächennormale), der Mantel nutzt sie gegenläufig.
+  // FASE (C): grenzt ein Rand nicht direkt an eine Deckfläche, sondern an ein Band gleich geneigter
+  // konvexer Facetten (coneBand, s. Kegel-Abschnitt), das seinerseits genau an einem kompletten Loop
+  // einer parallelen ebenen Deckfläche endet, wird das Band ein Fasen-KEGEL zwischen dem Mantel-Rand
+  // (Radius R) und dem Deck-Kreis (R_d, axial jenseits des Mantels) — Außenkanten-Fase (R_d < R)
+  // wie Fuß-Fase eines Zapfens (R_d > R, Deck = Innen-Loop der Platte). Gates wie beim Kegel-Mantel:
+  // Deck-Kreis fein/gleichmäßig/voll, koaxial, JEDER Band-Punkt auf dem Kegel, Normalen passen,
+  // Deck-Kreis in der Deckebene. Der Mantel-Rand ist dann eine Kreis-Kante zwischen Zylinder und
+  // Kegel (keine Deckfläche), der Deck-Kreis die Kante Kegel ↔ Deckfläche. Endet das Band ohne
+  // Deckfläche in EINEM Punkt auf der Achse, ist es eine Kegelspitze (Welle mit Spitze, „Bleistift“;
+  // Spitze als VERTEX_LOOP wie beim Kegel-Mantel). Eine Verrundung (mehrere Facetten-Reihen
+  // verschiedener Neigung) endet weder an einer Deckfläche noch in einer Spitze → bleibt facettiert
+  // (mit Toggle schärft v2 sie vorher, dann greift der direkte Weg).
+  // Emission in assemble() als EIGENER Block (same_sense .T., Ränder so, dass die Fläche links
+  // liegt), die Fasen im Kegel-Block; geprüft mit tests/step-strict.mjs (ohne Heilung) und
+  // occt-Volumen gegen die exakte Geometrie (tests/mantle-regression.mjs).
   let mantlePlans = [];
-  const sharpMantlePlan = (entry, owners, fdsOfGroup, taken) => {
+  const sharpMantlePlan = (entry, owners, fdsOfGroup, taken, allOwners) => {
     const W = new Set();
     for (const g of entry.groups) for (const fi of (fdsOfGroup.get(g) || [])) if (!taken.has(fi)) W.add(fi);
     if (W.size < 3) return null;
@@ -2387,24 +2813,36 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     const rings = chainEdges(rimEdges);
     if (rings.length !== 2) return null;                       // voller Mantel: genau 2 Ränder
-    // Jeder Rand = KOMPLETTER AUSSEN-Loop genau einer Deckfläche
-    const decks = [];
+    if (rings[0].length + rings[1].length !== rimEdges.length) return null; // jede Randkante in einem der Ringe
+    // Jeder Rand = KOMPLETTER Loop (außen oder innen) genau einer Deckfläche — oder eine Fase (C):
+    // Kegel-Band zwischen Rand und dem kompletten Loop einer Deckfläche (band ≠ null)
+    const ends = [];
     for (const ring of rings) {
-      let own = null;
-      for (let i = 0; i < ring.length; i++) {
+      let own = null, direct = true;
+      for (let i = 0; i < ring.length && direct; i++) {
         const o = otherOf.get(edgeKeyFn(ring[i], ring[(i + 1) % ring.length]));
-        if (!o || (own && (o.fi !== own.fi || o.loop !== own.loop))) return null;
+        if (!o) return null;
+        if (own && (o.fi !== own.fi || o.loop !== own.loop)) direct = false;
         own = o;
       }
-      const fd = faceDefs[own.fi];
-      if (fd.outer !== own.loop || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
-      decks.push({ fi: own.fi, fd, loop: own.loop, ring });
+      if (direct) {
+        const fd = faceDefs[own.fi];
+        if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== ring.length) return null;
+        ends.push({ deck: { fi: own.fi, fd, loop: own.loop, ring }, band: null });
+        continue;
+      }
+      if (!allOwners) return null;
+      const band = coneBand(ring, W, _norm3(entry.prim.axis), entry.prim.axisPoint, allOwners(), taken);
+      if (!band || (!band.deck && !CONE_APEX)) return null;
+      ends.push({ deck: band.deck, band });                  // deck = null: Kegelspitze (Welle mit Spitze)
     }
-    if (decks[0].fi === decks[1].fi) return null;
+    const dk = ends.filter((e) => e.deck);
+    if (!dk.length || (dk.length === 2 && dk[0].deck.fi === dk[1].deck.fi)) return null;
+    if (ends[0].band && ends[1].band && [...ends[1].band.W].some((fi) => ends[0].band.W.has(fi))) return null;
     // Achse = Deck-Normale (beide Deckflächen parallel), orientiert von Rand 0 nach Rand 1
-    const n0 = _norm3(decks[0].fd.normal), n1 = _norm3(decks[1].fd.normal);
+    const n0 = _norm3(dk[0].deck.fd.normal), n1 = _norm3(dk[dk.length - 1].deck.fd.normal);
     if (Math.abs(_dot3(n0, n1)) < 0.9999) return null;
-    const f0 = fitCircleInPlane(decks[0].ring, n0), f1 = fitCircleInPlane(decks[1].ring, n0);
+    const f0 = fitCircleInPlane(rings[0], n0), f1 = fitCircleInPlane(rings[1], n0);
     if (!f0 || !f1) return null;
     const along = _dot3(_sub3(f1.center, f0.center), n0);
     const axis = along >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
@@ -2418,8 +2856,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const cyl = (p) => { const w = _sub3(p, c0), t = _dot3(w, axis); return { t, rho: Math.hypot(w[0] - axis[0] * t, w[1] - axis[1] * t, w[2] - axis[2] * t), w }; };
     // Ränder: eben (in ihrer Deckebene), auf dem Kreis, fein genug und einmal ganz um die Achse
     const ringAt = [0, H];
+    let maxSeg = 0;
     for (let r = 0; r < 2; r++) {
-      const ring = decks[r].ring;
+      const ring = rings[r];
       let turn = 0;
       for (let i = 0; i < ring.length; i++) {
         const a = cyl(ring[i]), b = cyl(ring[(i + 1) % ring.length]);
@@ -2428,7 +2867,7 @@ export function buildVolumeStepBrepV2(analysis) {
         const rb = _sub3(b.w, [axis[0] * b.t, axis[1] * b.t, axis[2] * b.t]);
         const ang = Math.atan2(_dot3(_cross3(ra, rb), axis), _dot3(ra, rb));
         if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return null;
-        turn += ang;
+        turn += ang; maxSeg = Math.max(maxSeg, Math.abs(ang));
       }
       if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return null;
       if (!ringAngleUniform(ring, c0, axis)) return null; // D-Welle (Sehnen-Abflachung) → kein Zylinder
@@ -2448,17 +2887,67 @@ export function buildVolumeStepBrepV2(analysis) {
       }
       const q = cyl([cx / np, cy / np, cz / np]);
       if (_dot3(n, _sub3(q.w, [axis[0] * q.t, axis[1] * q.t, axis[2] * q.t])) <= 0) return null; // konkav → Bohrung, kein Mantel
+      if (!srcPointsOk(fd, (p) => { const s = cyl(p); return s.rho > R + tol || s.rho < R * Math.cos(maxSeg / 2) - tol || s.t < -tol || s.t > H + tol; })) return null;
     }
-    if (!circleOnDeck(c0, R, axis, decks[0].fd) || !circleOnDeck(c1, R, axis, decks[1].fd)) return null;
-    const rim0 = mkCircleDesc(c0, R, axis), rim1 = mkCircleDesc(c1, R, axis);
-    if (rim0.rimKey === rim1.rimKey) return null;
+    if (!wallSpanOk(W, c0, axis, maxSeg, tol)) return null;            // verdrillte Wand (Hyperboloid)
+    const rims = [mkCircleDesc(c0, R, axis), mkCircleDesc(c1, R, axis)];
+    if (rims[0].rimKey === rims[1].rimKey) return null;
+    // Je Ende: Deck-Kreis = Mantel-Rand (direkt) bzw. Fasen-Kegel vom Mantel-Rand zum Deck-Kreis bzw.
+    // Kegelspitze (Band ohne Deckfläche: alle Facetten laufen in EINEM Punkt auf der Achse zusammen)
+    const wall = new Set(W), decks = [], deckRims = [], cones = [];
+    for (let r = 0; r < 2; r++) {
+      const e = ends[r], cr = r === 0 ? c0 : c1;
+      if (!e.band) {
+        if (!circleOnDeck(cr, R, axis, e.deck.fd)) return null;
+        decks.push(e.deck.loop); deckRims.push(rims[r]);
+        continue;
+      }
+      const out = r === 0 ? [-axis[0], -axis[1], -axis[2]] : axis;   // vom Mantel weg
+      if (!e.deck) {
+        let Ha = 0, top = null;
+        for (const fi of e.band.W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) { const t = _dot3(_sub3(p, cr), out); if (t > Ha) { Ha = t; top = p; } } }
+        if (!top || !(Ha > tol)) return null;
+        const apex = [cr[0] + out[0] * Ha, cr[1] + out[1] * Ha, cr[2] + out[2] * Ha];
+        if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
+        if (!bandOnCone(e.band.W, cr, R, out, Ha, -R / Ha, tol, maxSeg) || !wallSpanOk(e.band.W, cr, axis, maxSeg, tol)) return null;
+        cones.push({
+          large: rims[r], small: null, apex, coneAxis: [-out[0], -out[1], -out[2]],
+          semiAngle: Math.atan2(R, Ha), groups: e.band.groups, zone: { c0: cr, zAx: out, H: Ha, R0: R, k: -R / Ha }, chamfer: true,
+        });
+        for (const fi of e.band.W) wall.add(fi);
+        continue;
+      }
+      const fdk = ringAsCircle(e.deck.ring, n0);
+      if (!fdk) return null;
+      const Hc = _dot3(_sub3(fdk.center, cr), out), Rd = fdk.radius;
+      const tolC = Math.max(tol, 0.002 * Rd);
+      if (!(Hc > tolC) || !(Math.abs(Rd - R) > tolC)) return null;     // Fase jenseits des Mantels, anderer Radius
+      const cd = [cr[0] + out[0] * Hc, cr[1] + out[1] * Hc, cr[2] + out[2] * Hc];
+      if (Math.hypot(fdk.center[0] - cd[0], fdk.center[1] - cd[1], fdk.center[2] - cd[2]) > tolC) return null; // koaxial
+      const k = (Rd - R) / Hc;
+      const segC = Math.max(maxSeg, fdk.maxSeg);
+      if (!bandOnCone(e.band.W, cr, R, out, Hc, k, tolC, segC) || !wallSpanOk(e.band.W, cr, axis, segC, tolC)) return null;
+      if (!circleOnDeck(cd, Rd, axis, e.deck.fd)) return null;
+      const deckRim = mkCircleDesc(cd, Rd, axis);
+      if (deckRim.rimKey === rims[r].rimKey || deckRim.rimKey === rims[1 - r].rimKey) return null;
+      const grow = Rd > R;                                     // Fuß-Fase: Radius wächst zum Deck hin
+      cones.push({
+        large: grow ? deckRim : rims[r], small: grow ? rims[r] : deckRim, apex: null,
+        coneAxis: grow ? out : [-out[0], -out[1], -out[2]],      // Richtung wachsenden Radius
+        semiAngle: Math.atan2(Math.abs(Rd - R), Hc), groups: e.band.groups,
+        zone: { c0: cr, zAx: out, H: Hc, R0: R, k }, chamfer: true,
+      });
+      for (const fi of e.band.W) wall.add(fi);
+      decks.push(e.deck.loop); deckRims.push(deckRim);
+    }
     return {
-      plan: { prim: entry.prim, rims: [rim0, rim1], groups: entry.groups, surfCenter: rim0.center },
-      wall: W, decks: [decks[0].loop, decks[1].loop],
+      plan: { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center },
+      wall, decks, deckRims, cones,
     };
   };
-  // Alle passenden konvexen Mäntel umwandeln: Wandflächen entfallen, die Deck-AUSSEN-Loops werden
-  // zur analytischen Kreis-Kante (fd.outer.circleRim). Scheitert ein Gate → facettiert lassen.
+  // Alle passenden konvexen Mäntel umwandeln: Wandflächen entfallen, die Deck-Loops werden zur
+  // analytischen Kreis-Kante (loop.circleRim; Außen- oder Innen-Loop). Scheitert ein Gate →
+  // facettiert lassen.
   const convertMantles = () => {
     if (!mantleById.size) return;
     const fdsOfGroup = new Map();   // Gruppe → [fi]
@@ -2501,15 +2990,345 @@ export function buildVolumeStepBrepV2(analysis) {
         }
       }
     });
+    // Vollständiger Kanten-Index erst, wenn ein Rand eine Fase sein könnte (coneBand läuft über das
+    // ganze Band bis zur Deckfläche)
+    let full = null;
+    const allOwners = () => {
+      if (full) return full;
+      full = new Map();
+      faceDefs.forEach((fd, fi) => {
+        for (const L of [fd.outer, ...fd.inner]) {
+          if (L.circleRim) continue;
+          for (let i = 0; i < L.length; i++) {
+            const a = L[i], b = L[(i + 1) % L.length];
+            if (vtxKey(a) === vtxKey(b)) continue;
+            const k = edgeKeyFn(a, b);
+            let o = full.get(k); if (!o) { o = []; full.set(k, o); }
+            o.push({ fi, loop: L });
+          }
+        }
+      });
+      return full;
+    };
     const drop = new Set();
     for (const entry of mantleById.values()) {
       let res = null;
-      try { res = sharpMantlePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
+      try { res = sharpMantlePlan(entry, owners, fdsOfGroup, drop, allOwners); } catch (_) { res = null; }
       if (!res) continue;
       for (const fi of res.wall) drop.add(fi);
-      res.decks[0].circleRim = res.plan.rims[0];
-      res.decks[1].circleRim = res.plan.rims[1];
+      res.decks.forEach((L, i) => { L.circleRim = res.deckRims[i]; });
       mantlePlans.push(res.plan);
+      for (const cp of res.cones) mantleConePlans.push(cp);
+    }
+    if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
+  };
+
+  // ---- Konvexe Kegel-Mäntel (Kegelstumpf, Kegel mit Spitze) als CONICAL_SURFACE ----
+  // Die Erkennung (primitive-recognition.js) kennt keine Kegel — die Kandidaten kommen direkt aus
+  // der Topologie: Saat ist ein Loop (außen oder innen) einer ebenen Fläche, der ein feiner,
+  // gleichmäßig unterteilter VOLLKREIS ist (ringAsCircle). Die Facetten jenseits dieses Loops und
+  // alle über Kanten anschließenden Facetten mit GLEICHER Neigung zur Achse (Normale von der Achse
+  // weg = konvex) bilden die Wand. Ihr Rand muss sein:
+  //   Kegelstumpf: genau 2 Ringe — der Saat-Loop und ein KOMPLETTER Loop einer zweiten, parallelen
+  //     ebenen Deckfläche, mit anderem Radius (gleicher Radius = Zylinder → nicht hier);
+  //   Kegel mit Spitze: genau 1 Ring (die Saat), alle Facetten laufen in EINEM Punkt auf der Achse
+  //     zusammen (CONE_APEX).
+  // Harte Gates wie beim Zylinder-Mantel: Ringe exakt auf ihrem Kreis in der Deckebene, Segmente
+  // ≤ 42° und gleichmäßig (D-Schutz), volle Umrundung, koaxial; JEDER Wand-Punkt auf dem Kegel
+  // (Toleranz wie beim Zylinder), jede Facetten-Normale passt zur Kegel-Normale (konvex), Kreise in
+  // den Deck-Ebenen (circleOnDeck). Sonst bleibt die Wand facettiert. Flache, geneigte oder
+  // unterbrochene Deckel, Kegel-Ketten ohne Deckfläche dazwischen und konkave Kegel (Senkung,
+  // konisches Loch) bleiben damit facettiert.
+  // Emission in assemble() als eigener Block (s. dort): same_sense .T. (die STEP-Kegelnormale zeigt
+  // beim konvexen Kegel aus dem Material), Fläche links vom Rand, Spitze als VERTEX_LOOP.
+  let mantleConePlans = [];
+  const CONE_APEX = true;           // Kegel mit Spitze umwandeln (VERTEX_LOOP an der Spitze)
+  const CONE_TILT_TOL = 0.03;       // Wand-Flood: Achsanteil der Facetten-Normale wie die Saat (≈ ±1.7°)
+  const CONE_NORMAL_COS = Math.cos(10 * Math.PI / 180); // Facetten-Normale ↔ Kegel-Normale
+  const CONE_MIN_SEG = 9;           // ≥ 9 Segmente (SEG_MAX_DEG = 42°)
+  const CONE_MAX_WALL = 20000;      // Wand-Flächen je Kandidat (Laufzeit-Schutz)
+  // Geschlossener Punktzug (Ebene ⟂ n) als Vollkreis → { center, radius, maxSeg } | null: jeder
+  // Punkt in der Kreisebene und auf dem Kreis, Segmente ≤ 42°, volle Umrundung, gleichmäßig.
+  // maxSeg = größter Segmentwinkel (rad), Maß für wallSpanOk.
+  const ringAsCircle = (ring, n) => {
+    if (ring.length < CONE_MIN_SEG) return null;
+    const f = fitCircleInPlane(ring, n);
+    if (!f) return null;
+    const tol = Math.max(0.01, 0.002 * f.radius);
+    const rad = (p) => { const w = _sub3(p, f.center), t = _dot3(w, n); return { t, r: [w[0] - n[0] * t, w[1] - n[1] * t, w[2] - n[2] * t] }; };
+    let turn = 0, maxSeg = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const a = rad(ring[i]), b = rad(ring[(i + 1) % ring.length]);
+      if (Math.abs(a.t) > tol || Math.abs(Math.hypot(a.r[0], a.r[1], a.r[2]) - f.radius) > tol) return null;
+      const ang = Math.atan2(_dot3(_cross3(a.r, b.r), n), _dot3(a.r, b.r));
+      if (Math.abs(ang) > SHARP_SEG_MAX_DEG * Math.PI / 180) return null;
+      turn += ang; maxSeg = Math.max(maxSeg, Math.abs(ang));
+    }
+    if (Math.abs(Math.abs(turn) - 2 * Math.PI) > 1e-3) return null;
+    if (!ringAngleUniform(ring, f.center, n)) return null;
+    return { ...f, maxSeg };
+  };
+  // Innenpunkte einer Wand-Fläche: das Region-Growing fasst Facetten bis 0.05 mm Unebenheit zusammen,
+  // Punkte im Inneren einer Fläche stehen in keinem Loop (eine 0.024 mm tiefe Delle mitten in der
+  // Facette einer Welle R10 blieb so unsichtbar). Darum zusätzlich die Ecken ihrer Original-Dreiecke
+  // (fd.src, falls vorhanden) prüfen — sie dürfen zwischen Sehnen-Polygon und Mantel liegen:
+  // ρ ∈ [ρ_Mantel·cos(maxSeg/2) − tol, ρ_Mantel + tol]. off(p) = true → Punkt außerhalb.
+  const srcPointsOk = (fd, off) => {
+    const s = fd.src;
+    if (!s || !s.verts || !s.tris) return true;
+    for (const t of s.tris) for (let j = 0; j < 3; j++) if (off(s.verts[t * 3 + j])) return false;
+    return true;
+  };
+  // Verdrillungs-Schutz (Wand eines Zylinders/Kegels): Punkte auf dem Mantel allein reichen nicht —
+  // ist der obere Rand gegen den unteren verdreht und die Wand verbindet i ↔ i, liegen alle Punkte
+  // auf den Randkreisen, die Facetten aber auf einem Hyperboloid (Taille bis R·(1 − cos(φ/2)) innen;
+  // 30°-verdrillte Welle R5: Netz 1.7 % kleiner als der Zylinder). Eine echte Teilung verläuft
+  // entlang der Mantellinien: jede Wand-Kante überspannt um die Achse höchstens einen Randsegment-
+  // Winkel (Mantellinie 0, Sehne/Diagonale ≤ maxSeg). Kanten an der Spitze (Radius < rMin) zählen nicht.
+  const wallSpanOk = (W, c, axis, maxSeg, rMin) => {
+    const lim = maxSeg * 1.05 + 1e-9;
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (let i = 0; i < L.length; i++) {
+          const wa = _sub3(L[i], c), wb = _sub3(L[(i + 1) % L.length], c);
+          const ta = _dot3(wa, axis), tb = _dot3(wb, axis);
+          const ra = [wa[0] - axis[0] * ta, wa[1] - axis[1] * ta, wa[2] - axis[2] * ta];
+          const rb = [wb[0] - axis[0] * tb, wb[1] - axis[1] * tb, wb[2] - axis[2] * tb];
+          if (Math.hypot(ra[0], ra[1], ra[2]) < rMin || Math.hypot(rb[0], rb[1], rb[2]) < rMin) continue;
+          const x = _cross3(ra, rb);
+          if (Math.atan2(Math.hypot(x[0], x[1], x[2]), _dot3(ra, rb)) > lim) return false;
+        }
+      }
+    }
+    return true;
+  };
+  const faceCentroid = (fd) => {
+    let cx = 0, cy = 0, cz = 0, k = 0;
+    for (const L of [fd.outer, ...fd.inner]) for (const p of L) { cx += p[0]; cy += p[1]; cz += p[2]; k++; }
+    return [cx / k, cy / k, cz / k];
+  };
+  // Kegel-Band jenseits eines Rings (gemeinsamer Kern von Kegel-Mantel und Mantel-Fase): S0 = je
+  // Ringkante genau EINE Fläche außerhalb von `stop` (Flächen auf der Ring-Seite: Saat-Deckfläche
+  // bzw. Zylinder-Wand); Flood über gemeinsame Kanten zu Facetten GLEICHER Neigung zur Achse n0
+  // (Normale von der Achse durch cs weg = konvex). Der Ring muss vollständig Rand des Bandes sein;
+  // die übrigen Randkanten bilden keinen (Spitze) oder genau EINEN weiteren Ring, und der muss ein
+  // KOMPLETTER Loop (außen oder innen) genau einer Fläche sein (Deckfläche).
+  // → { W:Set<fi>, deck: { fi, fd, loop, ring } | null, groups } | null
+  const coneBand = (ring, stop, n0, cs, owners, taken) => {
+    const W = new Set(), startKeys = new Set();
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      if (vtxKey(a) === vtxKey(b)) continue;
+      const k = edgeKeyFn(a, b);
+      const others = (owners.get(k) || []).filter((o) => !stop.has(o.fi));
+      if (others.length !== 1 || taken.has(others[0].fi)) return null;
+      startKeys.add(k); W.add(others[0].fi);
+    }
+    if (!W.size) return null;
+    // Neigung der Saat-Facetten zur Achse: weder Zylinder-Wand (⟂, < 0.2°) noch Deckfläche (∥).
+    // Toleranz der Neigung relativ (grobe/ungleichmäßige Teilung: die Facetten-Neigung schwankt
+    // um wenige % von α), damit bei kleiner Formschräge keine Zylinder-Facette (Neigung 0) mitläuft.
+    let a0 = 0;
+    for (const fi of W) a0 += _dot3(_norm3(faceDefs[fi].normal), n0);
+    a0 /= W.size;
+    if (!(Math.abs(a0) > 0.003 && Math.abs(a0) < 0.9998)) return null;
+    const tiltTol = Math.min(CONE_TILT_TOL, Math.max(0.0015, 0.5 * Math.abs(a0)));
+    const fitMemo = new Map();
+    const fits = (fi) => {
+      let ok = fitMemo.get(fi);
+      if (ok !== undefined) return ok;
+      const fd = faceDefs[fi], n = _norm3(fd.normal);
+      ok = !fd.outer.circleRim && !fd.inner.some((L) => L.circleRim) && Math.abs(_dot3(n, n0) - a0) <= tiltTol;
+      if (ok) { // konvex: Normale zeigt von der Achse weg
+        const w = _sub3(faceCentroid(fd), cs), t = _dot3(w, n0);
+        ok = _dot3(n, [w[0] - n0[0] * t, w[1] - n0[1] * t, w[2] - n0[2] * t]) > 0;
+      }
+      fitMemo.set(fi, ok);
+      return ok;
+    };
+    for (const fi of W) if (!fits(fi)) return null;
+    // Band: über gemeinsame Kanten alle passenden Facetten einsammeln
+    const queue = [...W];
+    while (queue.length) {
+      const fd = faceDefs[queue.pop()];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          for (const o of (owners.get(edgeKeyFn(a, b)) || [])) {
+            if (stop.has(o.fi) || W.has(o.fi) || taken.has(o.fi) || !fits(o.fi)) continue;
+            W.add(o.fi); queue.push(o.fi);
+            if (W.size > CONE_MAX_WALL) return null;
+          }
+        }
+      }
+    }
+    if (W.size < 3) return null;
+    // Rand des Bandes: Kanten genau 1× im Band — außer dem Start-Ring Gegenüber genau EINE Fläche
+    const cnt = new Map();
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) {
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          const k = edgeKeyFn(a, b), e = cnt.get(k);
+          if (e) e.n++; else cnt.set(k, { n: 1, v0: a, v1: b });
+        }
+      }
+    }
+    const rimEdges = [], otherOf = new Map();
+    let nStart = 0;
+    for (const [k, e] of cnt) {
+      if (e.n > 2) return null;
+      if (e.n === 2) continue;
+      if (startKeys.has(k)) { nStart++; continue; }
+      const others = (owners.get(k) || []).filter((o) => !W.has(o.fi));
+      if (others.length !== 1 || taken.has(others[0].fi)) return null;
+      rimEdges.push({ v0: e.v0, v1: e.v1 });
+      otherOf.set(k, others[0]);
+    }
+    if (nStart !== startKeys.size) return null;                 // Start-Ring ganz am Rand des Bandes
+    const rings = chainEdges(rimEdges);
+    if (rings.length > 1 || rings.reduce((s, r) => s + r.length, 0) !== rimEdges.length) return null; // jede Randkante in genau einem Ring
+    let deck = null;
+    if (rings.length === 1) {
+      const dr = rings[0];
+      let own = null;
+      for (let i = 0; i < dr.length; i++) {
+        const o = otherOf.get(edgeKeyFn(dr[i], dr[(i + 1) % dr.length]));
+        if (!o || (own && (o.fi !== own.fi || o.loop !== own.loop))) return null;
+        own = o;
+      }
+      const fd = faceDefs[own.fi];
+      if ((fd.outer !== own.loop && !fd.inner.includes(own.loop)) || own.loop.circleRim || loopEdgeCount(own.loop) !== dr.length) return null;
+      deck = { fi: own.fi, fd, loop: own.loop, ring: dr };
+    } else if (rimEdges.length) return null;
+    return { W, deck, groups: [...new Set([...W].map((fi) => faceDefs[fi].group).filter(Boolean))] };
+  };
+  // Liegt das Band auf dem Kegel ρ(t) = R0 + k·t (t entlang zAx ab c0, 0 ≤ t ≤ H)? Jeder Punkt
+  // innerhalb tol, jede Facetten-Normale nahe der Kegel-Normale (e_r − k·zAx)/√(1+k²) — radial nach
+  // außen, zur schmalen Seite gekippt — an ihrem Schwerpunkt.
+  const bandOnCone = (W, c0, R0, zAx, H, k, tol, maxSeg) => {
+    const cn = 1 / Math.sqrt(1 + k * k), cs = Math.cos(maxSeg / 2);
+    // dr(p) = Achsabstand − Kegelradius auf Höhe t (null außerhalb 0 … H)
+    const dr = (p) => {
+      const w = _sub3(p, c0), t = _dot3(w, zAx);
+      if (t < -tol || t > H + tol) return null;
+      const rc = R0 + k * t;
+      return { d: Math.hypot(w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t) - rc, rc };
+    };
+    const offLoop = (p) => { const q = dr(p); return !q || Math.abs(q.d) > tol; };
+    const offSrc = (p) => { const q = dr(p); return !q || q.d > tol || q.d < -q.rc * (1 - cs) - tol; };
+    for (const fi of W) {
+      const fd = faceDefs[fi];
+      for (const L of [fd.outer, ...fd.inner]) for (const p of L) if (offLoop(p)) return false;
+      if (!srcPointsOk(fd, offSrc)) return false;
+      const w = _sub3(faceCentroid(fd), c0), t = _dot3(w, zAx);
+      const er = _norm3([w[0] - zAx[0] * t, w[1] - zAx[1] * t, w[2] - zAx[2] * t]);
+      const nc = [(er[0] - k * zAx[0]) * cn, (er[1] - k * zAx[1]) * cn, (er[2] - k * zAx[2]) * cn];
+      if (!(_dot3(_norm3(fd.normal), nc) >= CONE_NORMAL_COS)) return false;
+    }
+    return true;
+  };
+  // Plan für EINEN Saat-Loop → { plan, wall:Set<fi>, decks:[Loop…], rims:[Kreis…] } | null
+  const sharpConePlan = (seed, owners, taken) => {
+    const fi0 = seed.fi, L0 = seed.loop;
+    const n0 = _norm3(faceDefs[fi0].normal);
+    const R0 = seed.radius, c0 = seed.center;
+    const band = coneBand(L0, new Set([fi0]), n0, c0, owners, taken);
+    if (!band) return null;
+    const { W, deck: d1, groups } = band;
+    // Kegel: Radius ρ(t) = R0 + k·t entlang zAx (t = 0 in der Saat-Ebene)
+    if (d1) {
+      // ── Kegelstumpf zwischen zwei parallelen Deckflächen
+      if (d1.fi === fi0 || Math.abs(_dot3(n0, _norm3(d1.fd.normal))) < 0.9999) return null;
+      const f1 = ringAsCircle(d1.ring, n0);
+      if (!f1) return null;
+      const along = _dot3(_sub3(f1.center, c0), n0);
+      const zAx = along >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
+      const H = Math.abs(along), R1 = f1.radius;
+      const tol = Math.max(0.01, 0.002 * Math.max(R0, R1));
+      if (!(H > tol) || !(Math.abs(R1 - R0) > tol)) return null;          // flach bzw. Zylinder
+      const c1 = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
+      if (Math.hypot(f1.center[0] - c1[0], f1.center[1] - c1[1], f1.center[2] - c1[2]) > tol) return null; // koaxial
+      const seg = Math.max(seed.maxSeg, f1.maxSeg);
+      if (!bandOnCone(W, c0, R0, zAx, H, (R1 - R0) / H, tol, seg)) return null;
+      if (!wallSpanOk(W, c0, zAx, seg, tol)) return null;                 // verdrillte Wand
+      if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0]) || !circleOnDeck(c1, R1, zAx, d1.fd)) return null;
+      const rim0 = mkCircleDesc(c0, R0, zAx), rim1 = mkCircleDesc(c1, R1, zAx);
+      if (rim0.rimKey === rim1.rimKey) return null;
+      const grow = R1 > R0;                                   // wächst der Radius entlang zAx?
+      return {
+        plan: {
+          large: grow ? rim1 : rim0, small: grow ? rim0 : rim1, apex: null,
+          coneAxis: grow ? zAx : [-zAx[0], -zAx[1], -zAx[2]],   // Richtung wachsenden Radius
+          semiAngle: Math.atan2(Math.abs(R1 - R0), H), groups,
+          zone: { c0, zAx, H, R0, k: (R1 - R0) / H },
+        },
+        wall: W, decks: [L0, d1.loop], rims: [rim0, rim1],
+      };
+    }
+    // ── Kegel mit Spitze: die Wand liegt auf EINER Seite der Saat-Ebene, ihr Punkt mit dem größten
+    // Achsabstand ist die Spitze (auf der Achse)
+    if (!CONE_APEX) return null;
+    let st = 0;
+    for (const fi of W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) st += _dot3(_sub3(p, c0), n0); }
+    const zAx = st >= 0 ? n0 : [-n0[0], -n0[1], -n0[2]];
+    let H = 0, top = null;
+    for (const fi of W) { const fd = faceDefs[fi]; for (const L of [fd.outer, ...fd.inner]) for (const p of L) { const t = _dot3(_sub3(p, c0), zAx); if (t > H) { H = t; top = p; } } }
+    const tol = Math.max(0.01, 0.002 * R0);
+    if (!top || !(H > tol)) return null;
+    const apex = [c0[0] + zAx[0] * H, c0[1] + zAx[1] * H, c0[2] + zAx[2] * H];
+    if (Math.hypot(top[0] - apex[0], top[1] - apex[1], top[2] - apex[2]) > tol) return null; // Spitze auf der Achse
+    if (!bandOnCone(W, c0, R0, zAx, H, -R0 / H, tol, seed.maxSeg) || !wallSpanOk(W, c0, zAx, seed.maxSeg, tol)) return null;
+    if (!circleOnDeck(c0, R0, zAx, faceDefs[fi0])) return null;
+    const rim0 = mkCircleDesc(c0, R0, zAx);
+    return {
+      plan: {
+        large: rim0, small: null, apex, coneAxis: [-zAx[0], -zAx[1], -zAx[2]],
+        semiAngle: Math.atan2(R0, H), groups, zone: { c0, zAx, H, R0, k: -R0 / H },
+      },
+      wall: W, decks: [L0], rims: [rim0],
+    };
+  };
+  // Alle passenden konvexen Kegel umwandeln: Wandflächen entfallen, die Deck-Loops werden zur
+  // analytischen Kreis-Kante (loop.circleRim). Scheitert ein Gate → facettiert lassen.
+  const convertMantleCones = () => {
+    // Saat-Loops: Vollkreis-Kandidaten (billiger Vorfilter — ohne Kandidaten kein Kanten-Index)
+    const seeds = [];
+    faceDefs.forEach((fd, fi) => {
+      const n = _norm3(fd.normal);
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim || loopEdgeCount(L) < CONE_MIN_SEG) continue;
+        const f = ringAsCircle(L, n);
+        if (f) seeds.push({ fi, loop: L, center: f.center, radius: f.radius, maxSeg: f.maxSeg });
+      }
+    });
+    if (!seeds.length) return;
+    const owners = new Map();       // Kante → [{ fi, loop }]
+    faceDefs.forEach((fd, fi) => {
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim) continue;
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length];
+          if (vtxKey(a) === vtxKey(b)) continue;
+          const k = edgeKeyFn(a, b);
+          let o = owners.get(k); if (!o) { o = []; owners.set(k, o); }
+          o.push({ fi, loop: L });
+        }
+      }
+    });
+    const drop = new Set();
+    for (const seed of seeds) {
+      if (seed.loop.circleRim || drop.has(seed.fi)) continue;
+      let res = null;
+      try { res = sharpConePlan(seed, owners, drop); } catch (_) { res = null; }
+      if (!res) continue;
+      for (const fi of res.wall) drop.add(fi);
+      res.decks.forEach((L, i) => { L.circleRim = res.rims[i]; });
+      mantleConePlans.push(res.plan);
     }
     if (drop.size) faceDefs = faceDefs.filter((_, i) => !drop.has(i));
   };
@@ -2517,9 +3336,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // ---- Ablauf (re-entrant für die Fallback-Stufen) ----
   // withBores=false: ohne Bohrungs-Umwandlung (Defeaturing bleibt). Setzt faceDefs, finalPlans,
   // chamferZones und die Defeaturing-Zähler.
-  // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen UND Kanäle neu bauen.
+  // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen, Mäntel, Kegel UND Kanäle neu bauen.
   const runPipeline = (withBores) => {
-    finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; chamferDroppedGroups = new Set();
+    finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set();
     filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0;
     if (!DEFEATURE) {
       // Toggle AUS — bisheriger Ablauf unverändert: Bohrungs-Pläne aus den Original-Dreiecken,
@@ -2536,7 +3355,7 @@ export function buildVolumeStepBrepV2(analysis) {
       }
       faceDefs = buildFaceDefs(boreSkip);
       matchBorePlans(tentative, (plan) => { for (const g of plan.groups) for (const fd of extractGroupFaces(g)) { fd.group = g; faceDefs.push(fd); } });
-      if (withBores) { planTubes(); convertMantles(); }
+      if (withBores) { planTubes(); convertMantles(); convertMantleCones(); }
       return;
     }
     // Toggle AN — ERST entrunden (v1, v2, v2b), DANN Bohrungen. Die Bohrungs-Gruppen bleiben dafür
@@ -2560,6 +3379,7 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!withBores) return;
     const sharp = convertSharpBores();
     convertMantles();
+    convertMantleCones();
     // Übrige Bohrungen: bisheriger Pfad (direkt oder Fase → Kegel). Bleibt für Mündungen, die v2
     // NICHT schärfen konnte (echte Fase, Mündung auf einer Fläche ohne senkrechte Wand, …).
     // Die Ränder kommen dabei aus den AKTUELLEN Wand-faceDefs (attemptBoreCurrent, Review-Fund a):
@@ -2728,8 +3548,8 @@ export function buildVolumeStepBrepV2(analysis) {
   //   (b) eine Rand-Kurve KONSISTENT verdreht (beide Nutzungen) — die Fläche liegt dann rechts vom
   //       Rand: occt wählt still das Komplementär-Band (+8.8 % Volumen im Synthetik-Test, +400 % am
   //       eBike), strikte Importer (CST/ACIS) verwerfen die Fläche.
-  // Darum prüft der Wächter je analytischer Fläche (Bohrungs-Zylinder, Außenmantel, Fasen-Kegel,
-  // Kanal-Stück):
+  // Darum prüft der Wächter je analytischer Fläche (Bohrungs-Zylinder, Außenmantel, Kegel-Mantel,
+  // Fasen-Kegel, Kanal-Stück):
   //   (a) Normalen-Probe: effektive Normale (Flächennormale × same_sense) an den Schwerpunkten der
   //       ersetzten ORIGINAL-Dreiecke gegen deren Wicklungs-Normalen (zeigen aus dem Material);
   //       flächengewichtetes Mittel < 0 → Widerspruch.
@@ -2826,6 +3646,17 @@ export function buildVolumeStepBrepV2(analysis) {
       return [sgn * (rad[0] / l * ca - ax[0] * sa), sgn * (rad[1] / l * ca - ax[1] * sa), sgn * (rad[2] / l * ca - ax[2] * sa)];
     };
   };
+  // Dasselbe für einen Kegel-Mantel (Achse ax durch ap, ax zeigt zum wachsenden Radius).
+  const coneNormalAt = (ap, ax, semiAngle, sgn) => {
+    const ca = Math.cos(semiAngle), sa = Math.sin(semiAngle);
+    return (p) => {
+      const w0 = _sub3(p, ap), al = _dot3(w0, ax);
+      const rad = [w0[0] - ax[0] * al, w0[1] - ax[1] * al, w0[2] - ax[2] * al];
+      const l = Math.hypot(rad[0], rad[1], rad[2]);
+      if (l < 1e-9) return null;
+      return [sgn * (rad[0] / l * ca - ax[0] * sa), sgn * (rad[1] / l * ca - ax[1] * sa), sgn * (rad[2] / l * ca - ax[2] * sa)];
+    };
+  };
   // Stützpunkt-Filter: liegt p in der Chamfer-Zone? (gleiche Logik wie filterChamferZones)
   const inGuardZone = (z) => (p) => {
     const w0 = _sub3(p, z.ap), al = _dot3(w0, z.axis);
@@ -2846,6 +3677,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const rLo = r * cosG - radTol, rHi = r + radTol;  // geneigtes Profil: Wandabstand ∈ [r·cosγ, r]
     return sp.pieces.map((pc, k) => {
       const sgn = ssOf(k) ? 1 : -1;
+      const swept = tilted || pc.swept === true; // wie emittiert (s. assemble)
       if (pc.kind === 'line') {
         const lo = -r * sinG - 0.4, hi = pc.len + r * sinG + 0.4;
         const accept = (p) => {
@@ -2855,7 +3687,7 @@ export function buildVolumeStepBrepV2(analysis) {
           return rho >= rLo && rho <= rHi;
         };
         let normalAt;
-        if (!tilted) normalAt = cylGuardNormal(pc.profC, pc.dir, sgn);
+        if (!swept) normalAt = cylGuardNormal(pc.profC, pc.dir, sgn);
         else {
           // SURFACE_OF_LINEAR_EXTRUSION: N = C'(u) × dir mit C'(u) = profM × (p0 − profC),
           // p0 = p auf die Profilebene zurückgeschoben (entlang dir).
@@ -2886,7 +3718,7 @@ export function buildVolumeStepBrepV2(analysis) {
         return u <= pc.sweep + mrg || u >= 2 * Math.PI - mrg;
       };
       let normalAt;
-      if (!tilted) {
+      if (!swept) {
         // TOROIDAL_SURFACE: Normale zeigt vom Seelenkreis weg, × same_sense.
         normalAt = (p) => {
           const w0 = _sub3(p, pc.O), al = _dot3(w0, pc.axis);
@@ -3017,7 +3849,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
   // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
   const entMark = entities.length, idMark = id;
-  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = []) => {
+  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = [], mantleConesArg = []) => {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
@@ -3033,6 +3865,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const ssBore = testFlip('bore');   // korrekt .F.: Wand-Normale zeigt zur Achse (ins Loch)
     const ssCone = testFlip('cone');   // korrekt .F.: dito für die Fase
     const ssMantle = !testFlip('mantle'); // korrekt .T.: konvexer Mantel, Normale zeigt aus dem Material
+    const ssMantleCone = !testFlip('mantlecone'); // korrekt .T.: konvexer Kegel / Mantel-Fase, dito
 
     // Kreis-Orientierung (ISO 10303-42, von strikten Importern wie CST/ACIS wörtlich genommen —
     // occt/Fusion reparieren still): Ein Loch-Rand läuft IM Uhrzeigersinn um die Flächennormale,
@@ -3046,7 +3879,9 @@ export function buildVolumeStepBrepV2(analysis) {
     const outerLoopForward = (rim, faceNormal) => _dot3(rim.axis, faceNormal) > 0;
 
     // Flachflächen (Loops mit `circleRim`-Tag werden als EINE Kreis-Kante emittiert: Innen-Loops
-    // an Bohrungen/Kanälen, der Außen-Loop an konvexen Mänteln).
+    // an Bohrungen/Kanälen und am Fuß eines Zapfens/einer Wellenstufe, der Außen-Loop an konvexen
+    // Mänteln und Kegeln). Richtung je Loop-Art: Außen-Loop gegen, Innen-Loop im Uhrzeigersinn um
+    // die Flächennormale — die analytische Nachbarfläche nutzt die Kante gegenläufig.
     for (const { outer, inner, normal, centroid, fold } of faceDefsArg) {
       let outerBound;
       if (outer.circleRim) {
@@ -3183,10 +4018,57 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
 
+    // Konvexe Kegel-Mäntel (Kegelstumpf, Kegel mit Spitze; convertMantleCones) und Fasen an Zylinder-
+    // Mänteln (sharpMantlePlan, chamfer: der große bzw. kleine Rand ist der Mantel-Rand, den der
+    // Zylinder gegenläufig nutzt): CONICAL_SURFACE mit
+    // Lage im Mittelpunkt des GROSSEN Randkreises, Achse coneAxis zur Seite wachsenden Radius (STEP:
+    // Radius R + v·tan α wächst entlang der Achse — zwischen den Rändern ist v ≤ 0), Halbwinkel α.
+    // Die natürliche Kegelnormale (radial nach außen, zur schmalen Seite gekippt) zeigt beim
+    // konvexen Kegel aus dem Material → same_sense .T.. Fläche links vom Rand: der kleine Rand läuft
+    // gegen, der große im Uhrzeigersinn um coneAxis — gegenläufig zur jeweiligen Deckfläche (Außen-
+    // Loop gegen, Innen-Loop im Uhrzeigersinn um deren Normale). Die Spitze wird ein VERTEX_LOOP
+    // (nur ihr Punkt, keine Kante).
+    for (const cp of mantleConesArg) {
+      const lg = cp.large, ax = cp.coneAxis;
+      const surf = addConicalSurface(addAxis2Placement3D(lg.center, ax, lg.refDir), lg.radius, cp.semiAngle);
+      const ceL = getOrCreateCircleEdge(lg.rimKey, lg);
+      const fL = _dot3(lg.axis, ax) < 0;
+      useCircle(lg.rimKey, fL);
+      const bounds = [addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceL.ecId, fL)]))];
+      const rimLoops = [{ geom: lg, fwd: fL, d: _sub3(cp.small ? cp.small.center : cp.apex, lg.center) }];
+      if (cp.small) {
+        const sm = cp.small, ceS = getOrCreateCircleEdge(sm.rimKey, sm);
+        const fS = _dot3(sm.axis, ax) > 0;
+        useCircle(sm.rimKey, fS);
+        bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ceS.ecId, fS)])));
+        rimLoops.push({ geom: sm, fwd: fS, d: _sub3(lg.center, sm.center) });
+      } else {
+        const vl = id++;
+        entities.push(`#${vl}=VERTEX_LOOP('',#${getVertex(cp.apex).vtxId});`);
+        bounds.push(addFaceBound(vl));
+      }
+      emitFace(addAdvancedFace(bounds, surf, ssMantleCone));
+      { // Wächter: (a) Wand-Facetten (nur Dreiecke im Kegel-Bereich) gegen die emittierte Kegel-
+        // Orientierung, (b) Umlaufsinn der Ränder (Fläche = Richtung zum anderen Rand bzw. zur Spitze)
+        const tg = nowMs();
+        const nAt = coneNormalAt(lg.center, ax, cp.semiAngle, ssMantleCone ? 1 : -1);
+        const z = cp.zone;
+        const onCone = (p) => {
+          const w0 = _sub3(p, z.c0), t = _dot3(w0, z.zAx);
+          if (t < -0.15 || t > z.H + 0.15) return false;
+          return Math.abs(Math.hypot(w0[0] - z.zAx[0] * t, w0[1] - z.zAx[1] * t, w0[2] - z.zAx[2] * t) - (z.R0 + z.k * t)) <= 0.15;
+        };
+        const mean = guardScan(cp.groups, onCone, nAt);
+        if ((mean !== null && mean < 0) || !loopSenseOk(rimLoops, nAt)) guardFailures++;
+        guardMs += nowMs() - tg;
+      }
+    }
+
     // Kanal-Flächenketten (tube-sweep.js): Stück k zwischen Kurve k und k+1. Profil ⟂ Bahn (γ=0):
     // Gerade → CYLINDRICAL_SURFACE, Bogen → TOROIDAL_SURFACE. Profil geneigt (γ≠0, Profilkreis auf
     // der Mündungsfläche skizziert): Gerade → SURFACE_OF_LINEAR_EXTRUSION, Bogen →
-    // SURFACE_OF_REVOLUTION des Profilkreises — beides exakt die gezogene Fläche.
+    // SURFACE_OF_REVOLUTION des Profilkreises — beides exakt die gezogene Fläche. γ=0-Stücke mit
+    // pc.swept (Rand-Kurven > 1e-6 mm neben Zylinder/Torus, s. tube-sweep.js) ebenso als Sweep.
     // Orientierung: Flächennormale zeigt in den Hohlraum. Kurven mit sense +1 laufen positiv um die
     // Bahnrichtung: Anfangskurve wird .F., Endkurve .T. benutzt (sense −1 umgekehrt); die ebene
     // Mündungsfläche benutzt ihre Kurve .T. → jede Kurve genau 1× vor, 1× zurück.
@@ -3199,15 +4081,18 @@ export function buildVolumeStepBrepV2(analysis) {
       const flipCurve = testFlip('tubecurve') && sp.pieces.length >= 2 ? Math.floor(sp.pieces.length / 2) : -1;
       sp.pieces.forEach((pc, k) => {
         let surf, sameSense;
+        // pc.swept (γ = 0, tube-sweep.js): Rand-Kurven liegen nicht exakt auf Zylinder/Torus der Bahn
+        // → wie bei γ ≠ 0 die Extrusions-/Rotationsfläche des mitgeführten Profils (enthält sie exakt)
+        const swept = tilted || pc.swept === true;
         const profCircle = () => addCircle(addAxis2Placement3D(pc.profC, pc.profM, computeRefDir(pc.profM)), r);
         if (pc.kind === 'line') {
           sameSense = false; // Normale zeigt von der Achse weg
-          if (!tilted) surf = addCylindricalSurface(addAxis2Placement3D(pc.profC, pc.dir, computeRefDir(pc.dir)), r);
+          if (!swept) surf = addCylindricalSurface(addAxis2Placement3D(pc.profC, pc.dir, computeRefDir(pc.dir)), r);
           else {
             const sc = profCircle(), vec = addVector(addDirection(pc.dir), 1);
             surf = id++; entities.push(`#${surf}=SURFACE_OF_LINEAR_EXTRUSION('',#${sc},#${vec});`);
           }
-        } else if (!tilted) {
+        } else if (!swept) {
           sameSense = false; // Torus-Normale zeigt vom Seelenkreis weg
           surf = id++; entities.push(`#${surf}=TOROIDAL_SURFACE('',#${addAxis2Placement3D(pc.O, pc.axis, pc.ea)},${toStep(pc.R)},${toStep(r)});`);
         } else {
@@ -3277,6 +4162,8 @@ export function buildVolumeStepBrepV2(analysis) {
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
         mantlesConverted: mantlesArg.length,
+        mantleConesConverted: mantleConesArg.filter((c) => !c.chamfer).length,   // Kegel-Mäntel
+        mantleChamfersConverted: mantleConesArg.filter((c) => c.chamfer).length,  // Fasen/Kegelspitzen an Zylinder-Mänteln
         tubesConverted: tubesArg.length,
         tubePieces: tubesArg.reduce((n, tp) => n + tp.spec.pieces.length, 0),
         // Orientierungs-Wächter: analytische Flächen, deren Orientierung den Original-Dreiecken
@@ -3623,7 +4510,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const pl = enforcePlanarity(faceDefs);
     faceDefs = pl.fds;
     removeCollinearPoints(faceDefs);
-    const a = assemble(faceDefs, finalPlans, tubePlans, mantlePlans);
+    const a = assemble(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
@@ -3633,7 +4520,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // Ein Zusammenbau gilt als gescheitert, wenn die Hülle offen ist ODER der Orientierungs-Wächter
   // eine analytische Fläche verworfen hat (s. assemble) — beides löst dieselben Fallback-Stufen
   // aus. Die Wächter-Befunde aller Stufen werden aufsummiert (Report: orientationGuardFailures,
-  // fallbackStage 0 = keiner, 1 = ohne Bohrungen/Kanäle, 2 = facettiert).
+  // fallbackStage 0 = keiner, 1 = ohne Bohrungen/Mäntel/Kegel/Kanäle, 2 = facettiert).
   let guardTotal = 0, guardMsTotal = 0, fallbackStage = 0;
   const failed = (a) => !a.report.watertight || (GUARD_FALLBACK && a.report.orientationGuardFailures > 0);
   const tracked = (a) => { guardTotal += a.report.orientationGuardFailures; guardMsTotal += a.report.orientationGuardMs; return a; };
@@ -3644,17 +4531,18 @@ export function buildVolumeStepBrepV2(analysis) {
   //   Stufe 2 (global): ALLES facettiert neu bauen (buildFaceDefs(null) erzeugt FRISCHE, unmutierte
   //     Loops) — die wasserdichte Baseline kann dadurch nie regressieren. (Die Kollinear-Bereinigung
   //     läuft auch hier: sie ist topologisch neutral, sonst hätte „Defeaturing an" mehr Kanten als „aus".)
-  //   Stufe 1 (nur mit Toggle, nur bei Bohrungen/Mänteln/Kanälen): ohne diese neu bauen, Defeaturing
+  //   Stufe 1 (nur mit Toggle, nur bei Bohrungen/Mänteln/Kegeln/Kanälen): ohne diese neu bauen, Defeaturing
   //     bleibt — sonst verwarf der globale Fallback auch korrekte Bänder/Ecken.
   // Die Basislinie wird ZUERST gebaut: ist schon sie nicht wasserdicht (Netz von Haus aus offen, z.B.
   // gelochtes Netz), kann Stufe 1 die Hülle praktisch nie schließen — sie lief früher trotzdem und
   // kostete am gelochten eBike 39–57 % der Exportzeit. Ergebnis: Stufe 1, wenn sie gelingt, sonst
   // die Basislinie (deren Entitäten dafür gesichert und zurückgeschrieben werden).
-  const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.tubesConverted > 0 ||
-    filletsDefeatured > 0 || bandsDefeatured > 0 || cornersDefeatured > 0;
+  const converted = asm.report.boresConverted > 0 || asm.report.mantlesConverted > 0 || asm.report.mantleConesConverted > 0 ||
+    asm.report.mantleChamfersConverted > 0 || asm.report.tubesConverted > 0 || filletsDefeatured > 0 || bandsDefeatured > 0 ||
+    cornersDefeatured > 0;
   let stage1Tried = false;
   if (converted && failed(asm)) {
-    const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0);
+    const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0 || mantleConePlans.length > 0);
     const pl = enforcePlanarity(buildFaceDefs(null));
     const fallbackDefs = pl.fds;
     removeCollinearPoints(fallbackDefs);
@@ -3678,7 +4566,7 @@ export function buildVolumeStepBrepV2(analysis) {
     }
   }
   // Befund für Tests/Diagnose: fallbackStage 0 = keine Fallback-Stufe, 1 = ohne Bohrungen/Mäntel/
-  // Kanäle neu gebaut, 2 = facettierte Basislinie; stage1Tried = Stufe 1 wurde überhaupt versucht.
+  // Kegel/Kanäle neu gebaut, 2 = facettierte Basislinie; stage1Tried = Stufe 1 wurde überhaupt versucht.
   asm.report.orientationGuardFailures = guardTotal;
   asm.report.orientationGuardMs = Math.round(guardMsTotal * 1000) / 1000;
   asm.report.fallbackStage = fallbackStage;

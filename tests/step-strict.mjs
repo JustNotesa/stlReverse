@@ -7,6 +7,11 @@
 // genau diese Regeln direkt an der STEP-Datei (ohne Heilung):
 //
 //   loop-chain       Ränder geschlossen: Ende einer Kante = Anfang der nächsten
+//   loop-fold        (nur mit opts.folds, z.B. Härtetest; sonst gezählt in stats.folds) keine Spitze der
+//                    Breite 0: zwei aufeinanderfolgende gerade Kanten laufen nicht auf derselben Geraden
+//                    zurück (überlappende Kanten = Selbstüberschneidung des Randes). Bei den Samples
+//                    bildet die Facetten-Ausgabe so Eingabe-Fehler ab (dino: 2 entartete Dreiecke →
+//                    6 Spitzen, AN = AUS) — darum dort nicht als Verstoß
 //   edge-use         jede Kante genau 2× genutzt, einmal in jede Richtung (Bound-Flag beachtet);
 //                    bei OPEN_SHELL (offenes/non-manifold Eingabe-Netz, z.B. dino) ist eine
 //                    Kante mit 1 Nutzung ein erlaubter Rand (stats.openEdges)
@@ -15,7 +20,13 @@
 //   orient-plane     Ebene: Außenrand gegen den Uhrzeigersinn um die effektive Normale
 //                    (Normale × same_sense), Löcher im Uhrzeigersinn; FACE_OUTER_BOUND = Außenrand
 //   orient-curved    gekrümmte Fläche mit ≥ 2 Rändern: die Fläche liegt LINKS vom Rand
-//                    (effektive Normale × Laufrichtung zeigt zu den anderen Rändern)
+//                    (effektive Normale × Laufrichtung zeigt zu den anderen Rändern; ein
+//                    VERTEX_LOOP — Kegelspitze — zählt als Rand aus einem Punkt, der beim Kegel
+//                    genau in der Spitze liegen muss: vertex-surface); Drehflächen-
+//                    Band (Torus/Rotationsfläche, 2 Ränder konstanten Drehwinkels): beide Ränder
+//                    legen die Fläche in entgegengesetzte Drehrichtung (auch bei Bögen ≥ 180°);
+//                    tangentiale Kante zwischen zwei gekrümmten Flächen: keine Faltung (beide
+//                    Flächen liegen auf verschiedenen Seiten der Kante)
 //   shell-connected  jede CLOSED_SHELL/OPEN_SHELL hängt über gemeinsame Kanten zusammen
 //                    (mehrere Körper im Netz → mehrere Schalen)
 //
@@ -73,7 +84,7 @@ export function checkStepStrict(text, opts = {}) {
   const ents = parseStep(text);
   const E = (r) => { const e = ents.get(r && r.ref !== undefined ? r.ref : r); if (!e) throw new Error('fehlende Entität #' + (r?.ref ?? r)); return e; };
   const violations = [];
-  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0 };
+  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0, folds: 0 };
   // Offene Hülle (der Exporter schreibt OPEN_SHELL, wenn schon das Eingabe-Netz offen bzw.
   // non-manifold ist): einfach genutzte Kanten sind dort der ehrliche Rand, kein Fehler.
   for (const e of ents.values()) { if (e.type === 'CLOSED_SHELL') { stats.openShell = false; break; } if (e.type === 'OPEN_SHELL') stats.openShell = true; }
@@ -166,13 +177,16 @@ export function checkStepStrict(text, opts = {}) {
     if (e.type === 'CONICAL_SURFACE') {
       const ax = axis2(e.args[1]), R = e.args[2], al = e.args[3];
       const parts = (p) => { const w = sub(p, ax.o), h = dot(w, ax.z); const q = sub(w, mul(ax.z, h)); return { h, q, rho: len(q) }; };
-      return { kind: 'cone', ax, normal: (p) => { const { q } = parts(p); return norm(sub(mul(norm(q), Math.cos(al)), mul(ax.z, Math.sin(al)))); },
+      return { kind: 'cone', ax, apex: add(ax.o, mul(ax.z, -R / Math.tan(al))),
+        normal: (p) => { const { q } = parts(p); return norm(sub(mul(norm(q), Math.cos(al)), mul(ax.z, Math.sin(al)))); },
         dist: (p) => { const { h, rho } = parts(p); return Math.abs(rho - (R + h * Math.tan(al))) * Math.cos(al); } };
     }
     if (e.type === 'TOROIDAL_SURFACE') {
       const ax = axis2(e.args[1]), R = e.args[2], rr = e.args[3];
       const core = (p) => { const w = sub(p, ax.o), h = dot(w, ax.z); const q = sub(w, mul(ax.z, h)); return add(ax.o, mul(norm(q), R)); };
-      return { kind: 'torus', ax, normal: (p) => norm(sub(p, core(p))), dist: (p) => Math.abs(len(sub(p, core(p))) - rr) };
+      // rev: Drehachse + Drehwinkel u (Parameter um die Achse) — für die Band-Prüfung (orient-curved)
+      return { kind: 'torus', ax, normal: (p) => norm(sub(p, core(p))), dist: (p) => Math.abs(len(sub(p, core(p))) - rr),
+        rev: { O: ax.o, a: ax.z, u: (p) => { const w = sub(p, ax.o); return Math.atan2(dot(w, ax.y), dot(w, ax.x)); } } };
     }
     if (e.type === 'SURFACE_OF_REVOLUTION') {
       const pc = curveOf(e.args[1]);
@@ -199,7 +213,8 @@ export function checkStepStrict(text, opts = {}) {
         const su = cross(a, sub(p, O));                 // ∂S/∂u
         const sv = cross(s.mu, sub(p, s.cu));           // ∂S/∂v (Profilkreis gegen den Uhrzeigersinn um seine Achse)
         return norm(cross(su, sv));
-      }, dist: (p) => { const s = solve(p); return s ? s.d : Infinity; } };
+      }, dist: (p) => { const s = solve(p); return s ? s.d : Infinity; },
+      rev: { O, a, u: (p) => { const s = solve(p); return s ? Math.atan2(Math.sin(s.u), Math.cos(s.u)) : NaN; } } };
     }
     if (e.type === 'SURFACE_OF_LINEAR_EXTRUSION') {
       const pc = curveOf(e.args[1]); const vv = E(e.args[2]).args; const V = mul(D(vv[1]), vv[2]);
@@ -212,8 +227,36 @@ export function checkStepStrict(text, opts = {}) {
     return { kind: 'unknown:' + e.type };
   };
 
+  // Drehflächen-Band (orient-curved): je Rand die Richtung (±1), in die die Fläche von ihm aus im
+  // Drehwinkel u liegt — Anteil von (effektive Normale × Laufrichtung) längs ∂S/∂u = Achse × (p − O).
+  // null, wenn ein Rand nicht auf konstantem u liegt oder die Richtung nicht eindeutig ist (dann
+  // gilt die allgemeine Heuristik).
+  const bandSense = (surf, sense, loops) => {
+    const { O, a, u } = surf.rev;
+    const out = [];
+    for (const L of loops) {
+      const us = L.pts.map(u);
+      if (!us.length || !us.every(Number.isFinite)) return null;
+      let cx = 0, cy = 0; for (const x of us) { cx += Math.cos(x); cy += Math.sin(x); }
+      const um = Math.atan2(cy, cx);
+      let spread = 0; for (const x of us) spread = Math.max(spread, Math.abs(Math.atan2(Math.sin(x - um), Math.cos(x - um))));
+      if (spread > 1e-3) return null;
+      let vote = 0, cnt = 0;
+      for (let k = 0; k + 1 < L.pts.length; k++) {
+        const p = L.pts[k], T = sub(L.pts[k + 1], p); if (len(T) < 1e-12) continue;
+        const n = surf.normal(p); if (!n) continue;
+        const v = dot(cross(mul(n, sense), T), cross(a, sub(p, O)));
+        if (v !== 0) { vote += Math.sign(v); cnt++; }
+      }
+      if (!cnt || Math.abs(vote) < 0.8 * cnt) return null;
+      out.push(Math.sign(vote));
+    }
+    return out;
+  };
+
   // ---- Shell durchgehen
-  const edgeUse = new Map();   // edgeCurveId → [{face, dir}]
+  const edgeUse = new Map();   // edgeCurveId → [{face, fwd, p, T}] (p/T: Kantenmitte + Laufrichtung dieser Nutzung)
+  const faceInfo = new Map();  // faceId → { surf, sense }
   for (const [fid, fe] of ents) {
     if (fe.type !== 'ADVANCED_FACE') continue;
     stats.faces++;
@@ -221,12 +264,23 @@ export function checkStepStrict(text, opts = {}) {
     const sense = ssame?.en === 'F' ? -1 : 1;
     const surf = surfOf(sref);
     if (!surf.normal) { flag('unsupported', `#${fid}: Flächentyp ${surf.kind} nicht prüfbar`, { face: fid }); continue; }
+    faceInfo.set(fid, { surf, sense });
     const loops = [];
     for (const bref of bounds) {
       const be = E(bref); stats.loops++;
       const outer = be.type === 'FACE_OUTER_BOUND';
       const bflag = be.args[2]?.en === 'F' ? -1 : 1;
       const le = E(be.args[1]);
+      if (le.type === 'VERTEX_LOOP' && surf.kind !== 'plane') {
+        // Spitze eines Kegels: Rand aus EINEM Punkt ohne Kante — der Punkt muss auf der Fläche
+        // liegen (beim Kegel: IN der Spitze); für die Umlauf-Prüfung der übrigen Ränder zählt er
+        // als „andere Seite“.
+        const p = vtx(le.args[1]), d = surf.apex ? len(sub(p, surf.apex)) : surf.dist(p);
+        stats.maxVertexSurface = Math.max(stats.maxVertexSurface, d);
+        if (d > TOL) flag('vertex-surface', `#${fid} (${surf.kind}): Punkt-Rand #${be.args[1].ref} ${d.toExponential(2)} mm neben ${surf.apex ? 'der Kegelspitze' : 'der Fläche'}`, { face: fid, d });
+        loops.push({ bref: bref.ref, outer, pts: [p], vertexLoop: true });
+        continue;
+      }
       if (le.type !== 'EDGE_LOOP') { flag('unsupported', `#${fid}: Bound ohne EDGE_LOOP`, { face: fid }); continue; }
       let oes = le.args[1].map((o) => E(o));
       if (bflag < 0) oes = oes.slice().reverse();
@@ -236,8 +290,9 @@ export function checkStepStrict(text, opts = {}) {
         let fwd = oe.args[4]?.en !== 'F'; if (bflag < 0) fwd = !fwd;
         const vs = ec.args[1].ref, ve = ec.args[2].ref;
         const start = fwd ? vs : ve, end = fwd ? ve : vs;
-        chain.push({ start, end });
-        const id = ecRef.ref; if (!edgeUse.has(id)) edgeUse.set(id, []); edgeUse.get(id).push({ face: fid, fwd });
+        chain.push({ start, end, line: E(ec.args[3]).type === 'LINE' });
+        const use = { face: fid, fwd, p: null, T: null };
+        const id = ecRef.ref; if (!edgeUse.has(id)) edgeUse.set(id, []); edgeUse.get(id).push(use);
         const c = curveOf(ec.args[3]);
         if (c.kind.startsWith('unknown')) { flag('unsupported', `#${id}: Kurventyp ${c.kind}`, { face: fid }); continue; }
         const ps = vtx(vs), pe = vtx(ve);
@@ -246,12 +301,21 @@ export function checkStepStrict(text, opts = {}) {
         const ecSame = ec.args[4]?.en !== 'F';
         let seg = ecSame ? sampleCurve(c, ps, pe) : sampleCurve(c, pe, ps).reverse();  // jetzt immer vs → ve
         if (!fwd) seg = seg.slice().reverse();
+        { const h = seg.length >> 1; if (seg.length >= 3) { use.p = seg[h]; use.T = sub(seg[h + 1], seg[h - 1]); } }
         if (pts.length) seg = seg.slice(1);
         pts.push(...seg);
       }
       for (let i = 0; i < chain.length; i++) {
         const a = chain[i], b = chain[(i + 1) % chain.length];
         if (a.end !== b.start && len(sub(vtx(a.end), vtx(b.start))) > 1e-9) flag('loop-chain', `#${fid}: Rand #${be.args[1].ref} unterbrochen (Kante ${i} → ${i + 1})`, { face: fid });
+        // Spitze: beide Nachbarn der Ecke liegen auf demselben Strahl (näherer ≤ TOL neben der Geraden)
+        if (a.line && b.line && chain.length > 2) {
+          const p = vtx(a.end), u = sub(vtx(a.start), p), w = sub(vtx(b.end), p), lu = len(u), lw = len(w);
+          if (lu > 0 && lw > 0 && dot(u, w) > 0 && len(cross(u, w)) / Math.max(lu, lw) <= TOL) {
+            stats.folds++;
+            if (opts.folds) flag('loop-fold', `#${fid}: Rand #${be.args[1].ref} läuft bei (${p.map((x) => x.toFixed(3)).join(', ')}) auf derselben Geraden zurück (Spitze der Breite 0)`, { face: fid });
+          }
+        }
       }
       loops.push({ bref: bref.ref, outer, pts });
       // Rand-Punkte auf der Fläche?
@@ -270,7 +334,18 @@ export function checkStepStrict(text, opts = {}) {
         if (L.outer !== (i === big)) flag('outer-bound', `#${fid}: FACE_OUTER_BOUND ${L.outer ? 'auf einem Loch' : 'fehlt am Außenrand'} (#${L.bref})`, { face: fid });
       });
     } else if (loops.length >= 2) {
-      loops.forEach((L, i) => {
+      // Drehfläche (Torus, SURFACE_OF_REVOLUTION) mit zwei Rändern konstanten Drehwinkels u (Band
+      // um die Achse, z.B. Kanal-Bogen): von jedem Rand aus muss die Fläche in u-Richtung zum
+      // ANDEREN Rand hin liegen — die beiden Ränder müssen also entgegengesetzt in u „zeigen“.
+      // (Die Heuristik unten — nächster Punkt des anderen Randes — liegt bei Bögen ≥ 180° quer über
+      // den Spalt statt entlang der Fläche und meldete dort korrekte Bänder als verdreht. Welches der
+      // beiden Bänder zwischen den Rändern gemeint ist, sieht man an EINER Fläche nicht — eine
+      // verdrehte Drehfläche fällt an der Falt-Prüfung ihrer tangentialen Nachbarn auf, s. unten.)
+      const band = loops.length === 2 && surf.rev ? bandSense(surf, sense, loops) : null;
+      if (band) {
+        if (band[0] === band[1]) flag('orient-curved', `#${fid} (${surf.kind}): beide Ränder #${loops[0].bref}/#${loops[1].bref} legen die Fläche auf dieselbe Seite (u ${band[0] > 0 ? '+' : '−'}) — einer läuft verkehrt herum`, { face: fid });
+      } else loops.forEach((L, i) => {
+        if (L.vertexLoop) return;                       // Punkt-Rand (Spitze): keine Laufrichtung
         // Bezug „zur Fläche hin“: der NÄCHSTE Punkt der anderen Ränder (nicht deren Mittelpunkt —
         // der liegt bei breiten Fasen-Kegeln auf der Achse und zeigt schräg nach innen)
         const others = loops.filter((_, k) => k !== i).flatMap((o) => o.pts);
@@ -289,6 +364,23 @@ export function checkStepStrict(text, opts = {}) {
     if (uses.length === 1 && stats.openShell) { stats.openEdges++; continue; }
     if (uses.length !== 2) flag('edge-use', `Kante #${id}: ${uses.length}× genutzt statt 2×`);
     else if (uses[0].fwd === uses[1].fwd) flag('edge-use', `Kante #${id}: beide Nutzungen gleichsinnig (Flächen #${uses[0].face}, #${uses[1].face})`);
+    else {
+      // Falt-Prüfung an TANGENTIALEN Kanten zwischen zwei gekrümmten Flächen (z.B. Übergangskreis
+      // Zylinder ↔ Torus eines Kanals): setzt die Nachbarfläche glatt fort, liegt sie auf der
+      // anderen Seite der Kante (effektive Normale × Laufrichtung zeigen entgegengesetzt). Zeigen
+      // sie in dieselbe Richtung, falten die Flächen aufeinander — eine ist verdreht (z.B. das
+      // Komplementär-Band eines Torus mit gekippter Normale; die Rand-Prüfung oben sieht das nicht).
+      const [A, B] = uses, fa = faceInfo.get(A.face), fb = faceInfo.get(B.face);
+      if (fa && fb && A.p && B.p && fa.surf.kind !== 'plane' && fb.surf.kind !== 'plane') {
+        const na = fa.surf.normal(A.p), nb = fb.surf.normal(A.p);
+        if (na && nb) {
+          const ea = mul(na, fa.sense), eb = mul(nb, fb.sense);
+          if (Math.abs(dot(ea, eb)) > Math.cos(1 * Math.PI / 180) && dot(cross(ea, A.T), cross(eb, B.T)) > 0) {
+            flag('orient-curved', `Kante #${id}: Flächen #${A.face}/#${B.face} falten an der tangentialen Kante aufeinander — eine ist verdreht`, { face: A.face });
+          }
+        }
+      }
+    }
   }
   // shell-connected: jede Schale hängt über gemeinsame Kanten zusammen (ISO 10303-42: connected
   // face set) — ein Netz aus mehreren Körpern gehört in mehrere Schalen/Körper.
@@ -344,6 +436,15 @@ if (isMain) {
       const res = { on: buildVolumeStepBrepV2({ normalGroups: g, defeature: true }), off: buildVolumeStepBrepV2({ normalGroups: g, defeature: false }) };
       console.log = log;
       for (const k of ['on', 'off']) if (res[k]) bad += summarize(`${f} [${k === 'on' ? 'AN' : 'AUS'}]`, checkStepStrict(res[k].step));
+      // Selbsttest VERTEX_LOOP: Kegelspitze 0.5 mm verschoben → muss als vertex-surface auffallen
+      const vl = res.on && res.on.step.match(/VERTEX_LOOP\('',#(\d+)\)/);
+      if (vl) {
+        const vp = res.on.step.match(new RegExp(`#${vl[1]}=VERTEX_POINT\\('',#(\\d+)\\)`))[1];
+        const moved = res.on.step.replace(new RegExp(`(#${vp}=CARTESIAN_POINT\\('',\\()([-0-9.eE]+)`), (_, a, x) => `${a}${(+x + 0.5).toFixed(6)}`);
+        const hit = checkStepStrict(moved).violations.filter((v) => v.kind === 'vertex-surface').length;
+        console.log(`${hit ? '✅' : '❌'} ${`Selbsttest Kegelspitze verschoben (${f})`.padEnd(64)} vertex-surface: ${hit}`);
+        if (!hit) bad++;
+      }
     }
     // Selbsttest OPEN_SHELL-Regel (kein Sample ist offen): Würfel ohne Deckel → offene Hülle mit
     // 4 erlaubten Randkanten; dieselbe Datei als CLOSED_SHELL deklariert → 4 edge-use-Verstöße.
