@@ -100,7 +100,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 50,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -109,12 +109,12 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 0,
-      "conical": 0,
+      "conical": 1,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 50,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -123,7 +123,7 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 0,
-      "conical": 0,
+      "conical": 1,
       "occt": true
     }
   },
@@ -132,7 +132,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 50,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -141,12 +141,12 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 0,
-      "conical": 0,
+      "conical": 1,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 50,
+      "faces": 3,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -155,7 +155,7 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 0,
-      "conical": 0,
+      "conical": 1,
       "occt": true
     }
   },
@@ -164,7 +164,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 49,
+      "faces": 2,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -173,12 +173,12 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 0,
-      "conical": 0,
+      "conical": 1,
       "occt": true
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 49,
+      "faces": 2,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -187,7 +187,7 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 0,
-      "conical": 0,
+      "conical": 1,
       "occt": true
     }
   },
