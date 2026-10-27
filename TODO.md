@@ -61,9 +61,6 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
   - **Geneigte/verrundete Loch-Mündungen** (auch die 2 eBike-Durchgangslöcher im AUS-Modus) — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
     (fischerEbike id=1/id=5: ~10–20° schräg) findet das Rand-Matching keinen Innen-Loop → Fallback.
     Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
-  - **Profil-Bögen als Teil-Zylinder + Fasen-Kegel** — Hauptmasse der Kabelhalter-Datei (Haken-Biegungen r 3–9 mm,
-    Logo-Bögen). Größter Hebel für kleinere Dateien (User 2026-10-27: „7 MB zu groß, 0,0001 mm muss nicht
-    abgebildet werden“).
   - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
     für Bögen erweiterbar (Naht-Form aus dem Design-Plan).
 
@@ -187,6 +184,13 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Profil-Bögen als Teil-Zylinder/-Kegel (2026-10-27, `wt/profil-boegen`, Lead Claude + Code MiniMax)** — neues
+  Modul `profile-arcs.js`: Bänder aus Facetten auf zwei koaxialen Kreisen → CYLINDRICAL/CONICAL_SURFACE-Teilflächen mit
+  CIRCLE-Bogenkanten aus den geschriebenen Koordinaten; alignBands, Rückfall (gesperrte Bänder), Zeitbudget 2,5 s,
+  Schalter analysis.profileArcs. Kabelhalter AN 4076 → 1138 Flächen / 1,28 MB (Tagesbeginn 7,6 MB), AUS 5906 → 1824 /
+  1,92 MB, OCP gültig. Golden AUS: block_with_hole_and_fillet 21 → 8, lbracket 14 → 9, plate_4fillets 30 → 10, eBike
+  2996 → 2306. Härtetest p1–p6. Offen: Blech-Biegungen werden im AN-Lauf von v1 scharf (Owner-Entscheidung), Rest-
+  Fächer/Fasen-Dreiecke (~1600 Ebenen AUS), Bogen-Kanten in split/pairEdgeUses der Schalen-Analyse, Panel-Farben.
 - [x] **Parallel-Runde Claude + MiniMax (2026-10-27, 3 Leads)** —
   (1) `wt/sackloch`: Sacklöcher mit flachem Boden (Kreisscheibe) und Bohrspitze 118°/120° (konkaver Kegel + VERTEX_LOOP),
   auch bei Toggle AUS; Rückfall je Bohrung (blockedBores/boreCulprits, boresDropped, STLREV_TEST_BREAK=bore); Härtetest
