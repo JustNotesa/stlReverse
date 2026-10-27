@@ -134,6 +134,35 @@ function regularPolygon(r, n) {
   return pts;
 }
 
+// ── Profil: Ecke aus zwei tangential aneinanderstoßenden Bögen (spec-T1f) ────
+// R5 über 45° (4 Seg.), dann R3 über 45° (4 Seg.) — beide CCW, sie berühren sich
+// mit derselben Tangente. `inset` = 0.5 → Fasen-Ring: Bogenradien −0.5, die
+// geraden Kanten 0.5 nach innen (Mittelpunkte der Bögen bleiben).
+function twoTangentArcs(inset) {
+  const seg = 4;
+  const r5 = 5 - inset, r3 = 3 - inset;
+  const C5 = [0, 0];
+  const aEnd = -45 * Math.PI / 180;
+  const P = [r5 * Math.cos(aEnd), r5 * Math.sin(aEnd)];      // Tangentenpunkt
+  const td = [-Math.sin(aEnd), Math.cos(aEnd)];              // CCW-Tangente dort
+  const C3 = [P[0] - r3 * td[1], P[1] + r3 * td[0]];          // links der Tangente
+  const arcPts = (c, r, a0, a1, n) => {
+    const out = [];
+    for (let i = 0; i <= n; i++) {
+      const a = (a0 + (a1 - a0) * i / n) * Math.PI / 180;
+      out.push([c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)]);
+    }
+    return out;
+  };
+  const pts = [];
+  pts.push(...arcPts(C5, r5, -90, -45, seg).slice(0, -1));   // R5-Bogen (ohne Tangentenpunkt)
+  pts.push(...arcPts(C3, r3, -45, 0, seg));                   // R3-Bogen (Start = Tangentenpunkt)
+  pts.push([C3[0] + r3, 10 - inset]);                         // gerade Kante nach oben
+  pts.push([-10 + inset, 10 - inset]);                       // gerade Kante nach links
+  pts.push([-10 + inset, -5 + inset]);                       // gerade Kante nach unten
+  return pts;
+}
+
 const run = (fds, opts = {}) => findArcBands(fds, { vtxKey, ...opts });
 
 describe('profile-arcs.js — Band-Erkennung', () => {
@@ -383,6 +412,88 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(edgeCanonKey(vtxKey, a, b)).toBe(edgeCanonKey(vtxKey, b, a));
     expect(edgeCanonKey(vtxKey, a, b)).toContain('||');
     expect(edgeCanonKey(vtxKey, a, b).split('||').length).toBe(2);
+  });
+
+  // ── alignBands: gemeinsame Teilungsstellen der Bänder (spec-T1f) ────────────
+  // Zahl der Eigentümer je Bogen
+  const ownerCount = (arcs) => {
+    const m = new Map();
+    for (const rec of arcs.values()) m.set(rec.key, (rec.owners || []).length);
+    return m;
+  };
+
+  test('14: zwei tangential aneinanderstoßende Bögen (R5/R3) mit Fasen → 2 cyl + 4 cone, alle gültig', () => {
+    const full = twoTangentArcs(0);
+    const ins = twoTangentArcs(0.5);
+    const fds = extrude([
+      { z: 0, pts2d: ins }, { z: 0.5, pts2d: full },
+      { z: 9.5, pts2d: full }, { z: 10, pts2d: ins },
+    ]);
+    const det = run(fds);
+    expect(det.bands.length).toBe(6);
+    expect(det.stats.cyl).toBe(2);
+    expect(det.stats.cone).toBe(4);
+    expect(det.bands.every((b) => b.sense === 1)).toBe(true);
+    // die beiden Bögen je Ecke: R5 (r 5) und R3 (r 3)
+    const cyl = det.bands.filter((b) => b.kind === 'cyl');
+    expect(cyl.map((b) => Math.round(b.levels.lo.r)).sort()).toEqual([3, 5]);
+    // Kegel: unten 4.5 → 5 (R5) bzw. 2.5 → 3 (R3)
+    const cone = det.bands.filter((b) => b.kind === 'cone');
+    expect(cone.filter((b) => b.levels.lo.r > b.levels.hi.r).length).toBe(2);   // untere Fase
+    expect(cone.filter((b) => b.levels.lo.r < b.levels.hi.r).length).toBe(2);   // obere Fase
+
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(6);
+    expect(det.stats.valid).toBe(6);
+    // 8 Bögen: 4 zwischen Zylinder und Kegel (2 Eigentümer) + 4 an den Deckflächen (1)
+    expect(det.arcs.size).toBe(8);
+    const own = ownerCount(det.arcs);
+    const counts = [...own.values()].sort();
+    expect(counts).toEqual([1, 1, 1, 1, 2, 2, 2, 2]);
+    // die Bogen-Stücke zwischen Zylinder und Kegel: 2 Eigentümer, gleicher Polygonzug
+    for (const rec of det.arcs.values()) {
+      if (rec.owners.length !== 2) continue;
+      expect(rec.owners[0].band).not.toBe(rec.owners[1].band);
+    }
+  });
+
+  test('15: Teilungsstellen angeglichen — Zylinder-Bogen und Kegel-Bogen decken sich', () => {
+    // Rundrechteck 11.85×11.85, Ecken R5 mit je 4 Seg. (Sehne 1.951), die kurzen
+    // Geraden sind 1.85 lang. Im ZYLINDER-Band ist damit die ECKE die längste Kante
+    // (1.951 > 1.85) → die Kette wird IN der Ecke geschnitten (der Zylinder-Bogen
+    // beginnt eine Facette später). Im KEGEL-Band ist die Ecke kürzer (1.756) →
+    // dort ist die GERADE die längste Kante → die Kette wird an der Geraden
+    // geschnitten (der Kegel-Bogen umfasst die ganze Ecke). Die Teilungsstellen
+    // liegen also verschieden: ohne Angleichen grenzt der Kegel-Bogen halb an das
+    // Zylinder-Band, halb an eine Facette (beide Bänder fallen weg).
+    const full = roundedRect(11.85, 11.85, [5, 5, 5, 5], 4);
+    const ins = roundedRect(10.85, 10.85, [4.5, 4.5, 4.5, 4.5], 4);
+    const fds = extrude([
+      { z: 0, pts2d: ins }, { z: 0.5, pts2d: full },
+      { z: 9.5, pts2d: full }, { z: 10, pts2d: ins },
+    ]);
+    const det = run(fds);
+    // 4 Zylinder + 8 Kegel, und mindestens eine Teilung wurde angeglichen
+    expect(det.bands.length).toBe(12);
+    expect(det.stats.cyl).toBe(4);
+    expect(det.stats.cone).toBe(8);
+    expect(det.stats.aligned).toBeGreaterThanOrEqual(1);
+
+    // alle Bänder bleiben gültig: Zylinder- und Kegel-Bögen decken sich
+    const before = det.bands.length;
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(before);
+    expect(det.stats.valid).toBe(before);
+    // 16 Bögen: 8 zwischen Zylinder und Kegel (2 Eigentümer) + 8 an den Deckflächen (1)
+    expect(det.arcs.size).toBe(16);
+    const counts = [...ownerCount(det.arcs).values()].sort();
+    expect(counts).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2]);
+    // jeder Bogen mit 2 Eigentümern: Zylinder-Band + Kegel-Band
+    for (const rec of det.arcs.values()) {
+      if (rec.owners.length !== 2) continue;
+      const kinds = rec.owners.map((ow) => det.bands[ow.band].kind).sort();
+      if (kinds[0] === 'cyl' && kinds[1] === 'cone') expect(rec.owners.length).toBe(2);
+    }
   });
 });
 
