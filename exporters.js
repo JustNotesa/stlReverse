@@ -226,14 +226,17 @@ export function buildVolumeStepBrepV2(analysis) {
   let id = 1;
 
   // ---- Number formatter ----
+  // Punkte, Radien, Winkel mit 9 Nachkommastellen: ACIS (CST CAD Navigator) rechnet mit einer
+  // absoluten Auflösung von 1e-6 mm — mit 6 Stellen lag allein die Rundung bis 8.7e-7 mm daneben,
+  // zusammen mit der Ebenheit und den Linien-Enden darüber (Kabelhalter: Flächen fehlten in CST).
   const toStep = (v) => {
     if (!Number.isFinite(v)) return '0.';
-    const t = Number(v).toFixed(6).replace(/(\.\d*?)0+$/, '$1');
+    const t = Number(v).toFixed(9).replace(/(\.\d*?)0+$/, '$1');
     return t.includes('.') ? t : t + '.';
   };
   // Richtungen mit 12 Nachkommastellen: mit 6 lag bei langen schrägen Kanten/Flächen allein die
   // Rundung der Richtung daneben (schräger 300-mm-Quader: Kanten-Ende 1.2e-4 mm neben seiner LINE,
-  // Rand 9.6e-5 mm neben der PLANE — strikte Importer, tests/step-strict.mjs). Punkte bleiben bei 6.
+  // Rand 9.6e-5 mm neben der PLANE — strikte Importer, tests/step-strict.mjs).
   const toStepDir = (v) => {
     if (!Number.isFinite(v)) return '0.';
     const t = Number(v).toFixed(12).replace(/(\.\d*?)0+$/, '$1');
@@ -2595,12 +2598,17 @@ export function buildVolumeStepBrepV2(analysis) {
   // fragt jeden Punkt mehrfach ab; nach der Ebenheits-Zerlegung sind es deutlich mehr Kanten).
   const ptKey = (p) => vtxKey(p);
 
+  // Auf die Ebenen gesetzte Eckpunkte (snapToPlanes, je assemble-Aufruf) — Schlüssel → Punkt
+  let vertexSnap = null;
+  // w = die Koordinaten, wie sie in der Datei stehen (gerundet; bei gleichem Schlüssel die des
+  // zuerst gesehenen Punkts) — LINE-Richtungen werden daraus berechnet.
   const getVertex = (pt) => {
     const key = ptKey(pt);
     if (!ptRegistry.has(key)) {
-      const ptId = addPoint(pt);
+      const q = (vertexSnap && vertexSnap.get(key)) || pt;
+      const ptId = addPoint(q);
       const vtxId = addVertex(ptId);
-      ptRegistry.set(key, { ptId, vtxId });
+      ptRegistry.set(key, { ptId, vtxId, w: q.map((v) => +toStep(v)) });
     }
     return ptRegistry.get(key);
   };
@@ -2626,10 +2634,11 @@ export function buildVolumeStepBrepV2(analysis) {
   // Schlüssel und damit eine eigene EDGE_CURVE zwischen denselben Ecken.
   const getOrCreateEdge = (p1, p2, key = edgeCanonKey(p1, p2)) => {
     if (!edgeRegistry.has(key)) {
-      const { vtxId: sv } = getVertex(p1);
-      const { ptId: startPtId } = ptRegistry.get(ptKey(p1));
-      const { vtxId: ev } = getVertex(p2);
-      const dir = [p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]];
+      const { vtxId: sv, ptId: startPtId, w: a } = getVertex(p1);
+      const { vtxId: ev, w: b } = getVertex(p2);
+      // Richtung aus den GESCHRIEBENEN Endpunkten: die LINE läuft dann exakt durch beide
+      // CARTESIAN_POINTs (aus den ungerundeten Werten lag das Ende bis 1.2e-6 mm daneben).
+      const dir = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
       const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
       const dirId = addDirection(dir);
       const vecId = addVector(dirId, len);
@@ -2951,6 +2960,59 @@ export function buildVolumeStepBrepV2(analysis) {
     return pcs.map((rec) => rec.w > 0 && rec.sum / rec.w < 0);
   };
 
+  // ---- Eckpunkte exakt auf ihre Ebenen setzen ----
+  // Eine ebene Fläche aus dem Netz ist nur bis aufs float32-Rauschen eben: Eckpunkte schräger
+  // Flächen liegen µm neben der Ebene (enforcePlanarity lässt bis PLANAR_TOL zu). ACIS (CST CAD
+  // Navigator) rechnet mit 1e-6 mm — dort fehlten solche Flächen. Jeder Polygon-Eckpunkt wird um
+  // die kleinste Verschiebung d versetzt, mit der er alle Ebenen seiner Flächen erfüllt (kleinste
+  // Quadrate, schwach regularisiert): 1 Ebene → Lot, 2 → nächster Punkt der Schnittgeraden, 3 →
+  // Schnittpunkt. Gerechnet wird d, nicht der Punkt selbst — so bleibt das Gleichungssystem auch
+  // bei fast parallelen Ebenen genau. Bleiben Ebenen unerfüllt (> SNAP_RES, z.B. 4 nicht exakt
+  // durch einen Punkt laufende Ebenen) oder wäre der Weg > SNAP_MAX (fast parallele Ebenen mit
+  // Versatz), bleibt der Punkt, wo er ist. Kreis-Ränder (circleRim) bleiben unberührt.
+  const SNAP_RES = 1e-9, SNAP_MAX = 1e-3;
+  const snapToPlanes = (fds) => {
+    const at = new Map();
+    for (const fd of fds) {
+      const n = _norm3(fd.normal), c = _dot3(n, fd.centroid);
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim) continue;
+        for (const p of L) {
+          const k = vtxKey(p);
+          let e = at.get(k);
+          if (!e) { e = { p, pl: [] }; at.set(k, e); }
+          if (!e.pl.some((q) => q.fd === fd)) e.pl.push({ fd, n, c });
+        }
+      }
+    }
+    const snap = new Map();
+    let moved = 0, kept = 0, maxMove = 0;
+    for (const [k, { p, pl }] of at) {
+      // (Σ n nᵀ + λ I) d = Σ n (c − n·p)
+      const lam = 1e-10;
+      const a = [lam, 0, 0, 0, lam, 0, 0, 0, lam], r = [0, 0, 0];
+      let res0 = 0;
+      for (const { n, c } of pl) {
+        const e0 = c - _dot3(n, p);
+        res0 = Math.max(res0, Math.abs(e0));
+        for (let i = 0; i < 3; i++) { r[i] += n[i] * e0; for (let j = 0; j < 3; j++) a[i * 3 + j] += n[i] * n[j]; }
+      }
+      if (res0 <= SNAP_RES) continue;
+      const det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+      if (!(Math.abs(det) > 0)) { kept++; continue; }
+      const col = (i) => { const m = a.slice(); m[i] = r[0]; m[3 + i] = r[1]; m[6 + i] = r[2]; return (m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6])) / det; };
+      const d = [col(0), col(1), col(2)];
+      const x = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+      let res = 0;
+      for (const { n, c } of pl) res = Math.max(res, Math.abs(_dot3(n, x) - c));
+      const mv = Math.hypot(d[0], d[1], d[2]);
+      if (!(res <= SNAP_RES) || mv > SNAP_MAX) { kept++; continue; }
+      snap.set(k, x); moved++;
+      if (mv > maxMove) maxMove = mv;
+    }
+    return { snap, moved, kept, maxMove };
+  };
+
   // ---- Step 3: Flächen emittieren — re-entrant, damit der globale Fallback alles facettiert
   // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
   // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
@@ -2959,6 +3021,8 @@ export function buildVolumeStepBrepV2(analysis) {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
+    const snapRes = snapToPlanes(faceDefsArg);
+    vertexSnap = snapRes.snap;
     const faceIds = [], faceKeys = [];
     // Fläche aufnehmen + ihre Kanten-Schlüssel (buildLoopEdges/useCircle sammeln in faceKeySink)
     const emitFace = (fid) => { faceIds.push(fid); faceKeys.push(faceKeySink); faceKeySink = []; };
@@ -3220,6 +3284,9 @@ export function buildVolumeStepBrepV2(analysis) {
         // Fallback-Stufen auf).
         orientationGuardFailures: guardFailures,
         orientationGuardMs: Math.round(guardMs * 1000) / 1000,
+        // snapToPlanes: auf ihre Ebenen gesetzte Eckpunkte / nicht setzbare (Rest bleibt) / größter Weg
+        snappedVertices: snapRes.moved, snapKept: snapRes.kept,
+        snapMaxMove: Math.round(snapRes.maxMove * 1e9) / 1e9,
       },
     };
   };
