@@ -846,4 +846,19 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(det.stats.budgetHit).toBe(true);
     expect(ARC_DEFAULTS.budgetMs).toBe(2500);
   });
+
+  // ── Achsen-Begrenzung: höchstens o.maxAxes Achsen-Kandidaten bearbeiten ────
+  test('24: maxAxes: 0 → keine Achse → 0 Bänder (Rundrechteck)', () => {
+    const prof = roundedRect(40, 30, [5, 5, 5, 5], 8);
+    const fds = extrude([{ z: 0, pts2d: prof }, { z: 10, pts2d: prof }]);
+    // ohne Begrenzung: 4 Bögen (eine je Ecke)
+    const normal = run(fds);
+    expect(normal.bands.length).toBe(4);
+    // maxAxes 0 → keine Achse wird bearbeitet → keine Bänder
+    const det = run(fds, { maxAxes: 0 });
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.bands).toBe(0);
+    expect(det.stats.axes).toBe(0);
+    expect(ARC_DEFAULTS.maxAxes).toBe(6);
+  });
 });
