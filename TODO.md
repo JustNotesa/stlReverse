@@ -1,6 +1,6 @@
 # TODO - STL Reverse Add-on
 
-*Stand: 2026-10-26 — STEP für strikte Importer (CST CAD Navigator/ACIS): Kanten-Richtungen, Kreis-Orientierung,
+*Stand: 2026-10-27 — Mindest-Detailgröße (Mikro-Facetten weg); 2026-10-26 — STEP für strikte Importer (CST CAD Navigator/ACIS): Kanten-Richtungen, Kreis-Orientierung,
 ebene Flächen, Schalen je Körper, Orientierungs-Wächter; Außenmäntel als echte Zylinder; Senkungen geschützt;
 Erkennung 2–4× schneller. Testen im eingebauten Browser + Node-Harness (Firefox erst beim Packaging).*
 
@@ -61,12 +61,14 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
   - **Geneigte/verrundete Loch-Mündungen** — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
     (fischerEbike id=1/id=5: ~10–20° schräg) findet das Rand-Matching keinen Innen-Loop → Fallback.
     Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
-  - **Bohrungs-Pfad härten (Funde aus Runde I)** — HOCH: verdrillte Bohrung (30°) wird als Zylinder exportiert,
-    dicht + strict 0, aber ΔV −17,3 mm³ (Repro `scratchpad/agentM-mantel/adv-twist-bore.mjs`) → `wallSpanOk`/
-    `srcPointsOk` aus dem Mantel-Pfad auch in sharpBorePlan/attemptBore/attemptBoreCurrent einsetzen. MITTEL: Achse
-    und Zentrum aus dem Fit statt aus den Deckebenen — circleOnDeck (1e-5) lehnt dadurch Bohrungen ab, die v2 exakt
-    geschärft hat (c5_r1, Drehlagen von x3/x8/x9). Erkennung: Fase flacher als ~15° zur Achse verhindert die
-    Zylinder-Erkennung (AXIS_PERP 0,26).
+  - **Fasen-Erkennung flacher als ~15°** (AXIS_PERP 0,26 in primitive-recognition.js) verhindert die Zylinder-
+    Erkennung — Rest aus Runde J (B), betrifft die gemeinsame Erkennung + Golden, daher bewusst offen.
+  - **Kabelhalter: Bohrung/Senkung** — Kreiskanten (-19,1,0|2.25 / -19,2.5,0|2.25) mit Orientierungsfehler →
+    fallbackStage 1, ~700 Flächen facettiert. Primitiv-Erkennung hängt Gruppen schon bei 1 passenden Dreieck an
+    (acceptPrim) — dieselbe „Verschmutzung“, die K bei v1 behoben hat.
+  - **Profil-Bögen als Teil-Zylinder + Fasen-Kegel** — Hauptmasse der Kabelhalter-Datei (Haken-Biegungen r 3–9 mm,
+    Logo-Bögen). Größter Hebel für kleinere Dateien (User 2026-10-27: „7 MB zu groß, 0,0001 mm muss nicht
+    abgebildet werden“).
   - **Kegel mit verrundeten Rändern** bleiben auch mit Toggle facettiert (v2 schärft Bänder an geneigten Kegelwänden
     nicht). Panel 2 markiert Kegel nicht (keine Primitive). Spitzer Kegel (VERTEX_LOOP) in CST/Fusion gegentesten.
   - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
@@ -198,6 +200,15 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Runde J (2026-10-27): Mindest-Detailgröße, Kabelhalter-Verrundungen, Bohrungs-Pfad** —
+  (A) `mesh-clean.js`: Kanten < τ werden vor dem Region-Growing kollabiert (Ecken/scharfe Kanten geschützt,
+  Ebenen-Treue 1e-5, keine Durchdringung); UI „Kleinste Detailgröße“ aus/0,01/**0,02**/0,05/0,1 mm; STEP-Kopf
+  UNCERTAINTY 1e-4 statt 0,01 mm. (K) v1 nimmt nur echte Zylinder-Gruppen und tangentiale, ebene Seiten
+  (thin-web-Rückfall weg), Rückfall je Merkmal (nur die störende Rundung bleibt facettiert), gefaste Enden →
+  Gehrung; Härtetest k1/k2. (B) boreWallOk (Verdrillung > 1 Segment → facettiert), Achse/Zentrum aus den
+  Deckebenen (33 Bohrungs-Läufe in Drehlagen neu exakt). Kabelhalter AN: 6361 → 5163 Flächen, 7,6 → 5,8 MB,
+  OCP gültig. Golden: eBike AUS 2997 → 2996, sphere_full 3127 → 3133 (Pole), eBike-Erkennung fillets 1 → 0
+  (Export unverändert 47 Flächen).
 - [x] **Schalen-Klassifikation + Freigang + OCP-Zweitprüfer (2026-10-27, Merge `wt/schalen-freigang`)** — die drei
   bestätigten Review-Funde: (1) je Komponente Volumen + Lage → Hohlräume als BREP_WITH_VOIDS (Würfel mit Hohlraum:
   occt 9000 → 7000 mm³), invertierte Eingabe umgedreht (block_edge_fillet), Finnen/Mini-Taschen verworfen (dino

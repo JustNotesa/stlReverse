@@ -385,7 +385,7 @@
   },
   "fischerEbike - FahrradLicht - mount unter sattel.stl": {
     "bores": 10,
-    "fillets": 1,
+    "fillets": 0,
     "defeatureOn": {
       "exported": true,
       "faces": 47,
@@ -402,7 +402,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 2997,
+      "faces": 2996,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -516,7 +516,7 @@
     "fillets": 0,
     "defeatureOn": {
       "exported": true,
-      "faces": 3127,
+      "faces": 3133,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -530,7 +530,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 3127,
+      "faces": 3133,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
