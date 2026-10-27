@@ -13,8 +13,13 @@
 //   U) U-Bogen (Gerade + 180°-Bogen + Gerade, γ = 0), R = 4.0 / 4.2 / 7 / 12: exakt 3 Stücke
 //      (Anker-Kette), Zylinder/Torus — früher Biarc-Kette mit Knick bis 4.2° (Kreise bis 0.022 mm
 //      neben ihren Flächen) bzw. bei R = 4.0 ein Fehlalarm von step-strict am 180°-Torusband
-//   S) S-Kurve mit 1 mm Zwischengerade (Anker-Kette greift nicht): Biarc-Vereinfachung ohne Knick
-//      über das Budget — Profil höchstens 0.1° gegen die Bahn geneigt
+//   S1) S-Kurve mit 1 mm Zwischengerade (zu kurz für einen Anker): früher G1-Biarc-Kette mit 21
+//      Stücken, jetzt eingefügte Zwischengerade → exakt 5 Stücke (Anker-Kette)
+//   S14) S-Kurve mit 1,4 mm Zwischengerade (< minLen → kein eigener Anker): Bogen→Gerade→Bogen
+//   SA)  S-Kurve R10/R7 mit 1,2 mm Zwischengerade: ebenfalls Bogen→Gerade→Bogen
+//   C1)  gleichsinnige Bögen 45°+45° mit 1 mm Zwischengerade (C-Kurve): Bogen→Gerade→Bogen
+//   S0)  S-Kurve ohne Zwischengerade (nur Wendepunkt): direkter Bogen→Bogen-Übergang, 4 Stücke
+//   S05) S-Kurve mit 0,5 mm Zwischengerade: in Toleranz geschluckt, 4 Stücke
 //   P) D-Profil (Kreis mit ebener Abflachung) → KEIN Kanal, Abflachung bleibt, ΔV = 0 zum Netz
 // Je Fall: wasserdicht, orientationDefects 0, occt parst, step-strict ohne Verstoß, Volumen (feine
 // occt-Vernetzung) gegen das Netz < 0.2 % (Polygon-Effekt des einbeschriebenen N-Ecks).
@@ -205,13 +210,18 @@ export const cases = [
   // knickte um bis zu 4.2° (Kreise bis 0.022 mm neben Zylinder/Torus). R = 4.0: Anker-Kette lief
   // schon, step-strict meldete aber orient-curved am 180°-Torusband (Fehlalarm).
   ...[4.0, 4.2, 7, 12].map((R) => ({ name: `U${R}  γ=0  U-Bogen R=${R} (Gerade + 180°-Bogen + Gerade)`, mesh: { W: 30 + 2 * R, x0: 22 + 2 * R, exit: 'top', segs: [{ L: 10 }, { R, deg: 180 }, { L: 14 }] }, expect: { tubes: 1, tilted: false, pieces: 3 } })),
-  // S-Kurve mit 1 mm Zwischengerade (zu kurz für einen Anker → Biarc-Kette): früher knickte die
-  // Vereinfachung um 2.6° (Kreise bis 0.004 mm neben ihren Flächen)
-  { name: 'S1  γ=0  S-Kurve 60°/−60° mit 1 mm Zwischengerade', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 8, deg: 60 }, { L: 1 }, { R: 8, deg: -60 }, { L: 20 }] }, expect: { tubes: 1 } },
+  // Kurze Zwischengeraden (< 1,5 mm, kein eigener Anker) zwischen zwei Bögen — s. S1/S14/SA unten
+  { name: 'C1 γ=0  gleichsinnige Bögen 45°+45° mit 1 mm Zwischengerade', mesh: { exit: 'x0', segs: [{ L: 6 }, { R: 8, deg: 45 }, { L: 1 }, { R: 8, deg: 45 }, { L: 20 }] }, expect: { tubes: 1, tilted: false, pieces: 5 } },
+  { name: 'S0  γ=0  S-Kurve ohne Zwischengerade (Wendepunkt)', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 8, deg: 60 }, { R: 8, deg: -60 }, { L: 20 }] }, expect: { tubes: 1, tilted: false, pieces: 4 } },
+  { name: 'S05 γ=0  S-Kurve mit 0,5 mm Zwischengerade (in Toleranz geschluckt)', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 8, deg: 60 }, { L: 0.5 }, { R: 8, deg: -60 }, { L: 20 }] }, expect: { tubes: 1, tilted: false, pieces: 4 } },
   // D-Profil (Kreis r = 2.5 mit ebener Abflachung, nur Eck-Vertices auf den D-Kanten): früher als
   // RUNDER Kanal exportiert (Abflachung weg, ΔV −0.14 %) — muss facettiert bleiben
   { name: 'P25  D-Profil α=25°, Abflachung ∥ Bahn-Ebene → bleibt facettiert', mesh: { profile: dProfile(2.5, 25 * DEG, Math.PI / 2, 40), segs: [{ L: 12 }, { R: 8, deg: 90 }, { L: 30 }] }, expect: { tubes: 0, flat: { n: [0, 1, 0], d: 5 + 2.5 * Math.cos(25 * DEG) } } },
   { name: 'P15  D-Profil α=15°, Abflachung ⟂ Bahn-Ebene → bleibt facettiert', mesh: { profile: dProfile(2.5, 15 * DEG, 0, 40), segs: [{ L: 12 }, { R: 8, deg: 90 }, { L: 30 }] }, expect: { tubes: 0 } },
+  // S-Kurve mit 1 mm Zwischengerade: früher Biarc-Kette (21 Stücke; davor Knick 2.6°), jetzt 5 exakte
+  { name: 'S1  γ=0  S-Kurve 60°/−60° mit 1 mm Zwischengerade', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 8, deg: 60 }, { L: 1 }, { R: 8, deg: -60 }, { L: 20 }] }, expect: { tubes: 1, tilted: false, pieces: 5 } },
+  { name: 'S14 γ=0  S-Kurve mit 1,4 mm Zwischengerade', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 8, deg: 60 }, { L: 1.4 }, { R: 8, deg: -60 }, { L: 20 }] }, expect: { tubes: 1, tilted: false, pieces: 5 } },
+  { name: 'SA  γ=0  S-Kurve R10/R7 mit 1,2 mm Zwischengerade', mesh: { exit: 'bot', segs: [{ L: 6 }, { R: 10, deg: 50 }, { L: 1.2 }, { R: 7, deg: -70 }, { L: 20 }] }, expect: { tubes: 1, tilted: false, pieces: 5 } },
 ];
 // D-Profil: Kreisbogen von ψ+α bis ψ+2π−α (M Segmente), die Sehne schließt den Ring (keine Punkte darauf)
 function dProfile(r, alpha, psi, M) {
