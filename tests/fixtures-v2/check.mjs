@@ -24,10 +24,21 @@
 // Kanten-Rundung weg, Kegel bleibt) oder ein Kegel durch die Rundung (Chamfer-Pfad), s. cskVariant.
 //   exakt     → OK
 //   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der Toleranz-Stufe 0.01 mm = Planar-Toleranz des Region-Growing)
+//   Bögen exakt → OK mit Hinweis (der Exporter hat facettierte Profil-Bögen durch echte Teil-Zylinder/
+//                 -Kegel ersetzt: die Abweichung entspricht der Sehnen-Pfeilhöhe bzw. dem Bogen-Volumen;
+//                 der Kandidat wird hier NICHT nach dem nächsten Volumen gewählt — die Volumina der
+//                 Varianten liegen oft dicht beieinander (k1 v2) — es gewinnt die Variante mit dem
+//                 KLEINSTEN beidseitigen Abstand, zulässig bis Sehnen-Pfeilhöhe + 0.01 mm)
 //   sonst     → Soll-Verletzung (Exit 1); ebenso: offen, occt-Fehler, Fallback verwirft v2, zu langsam,
 //               Verstoß gegen strikte Importer (tests/step-strict.mjs inkl. loop-fold, je Export AUS/AN/v2)
 // Passt eine Variante, die nicht das Ziel ist (Rundung bleibt, obwohl v2 schärfen sollte) →
 // Hinweis „Ziel verfehlt“ (sicher, aber nicht defeaturet).
+//
+// Körper mit `expect.anFree` (Blech-Biegungen p1–p3, Taschenecke p5): im AN-Lauf schärfen v1/v2 die
+// Biegungen bzw. die Taschenecken (bestehendes Verhalten, hier nicht Teil der Prüfung) → für AN und
+// v2-isoliert KEINE Varianten-Zuordnung, nur die universellen Pflichten (dicht, occt, strikt) plus
+// der Hinweis „AN/v2: freie Entrundung (Bögen nur AUS geprüft)“. AUS bleibt voll geprüft
+// (Bogen-Flächen `arcsOff`, Volumen).
 //
 // Aufruf:  node tests/fixtures-v2/check.mjs [--only a,b,...] [--json] [--quick]
 //          --quick: ohne Zusatz-/Stresskörper (nur a–i)
@@ -35,7 +46,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
-import { BODIES, STRESS, buildMesh, checkManifold, toBinaryStl, meshVolume, sharpen, polyArea, triVolume, makeTransform, sharpenCorners } from './gen.mjs';
+import { BODIES, STRESS, buildMesh, checkManifold, toBinaryStl, meshVolume, sharpen, polyArea, triVolume, makeTransform, sharpenCorners, bendsConcentric } from './gen.mjs';
 import { parseStl, simplifyMesh } from '../../analysis-core.js';
 import { buildNormalGroups } from '../../region-growing.js';
 import { cleanMesh } from '../../mesh-clean.js';
@@ -447,8 +458,11 @@ function matchVariants(r, vs, ctx) {
   const countsOk = (v) => {
     const why = [];
     if (r.bands > (v.sharpMax ?? v.sharpCount) || (r.bands < v.sharpCount && !r.fillets && !(v.bores && r.bores))) why.push(`bands ${r.bands}≠${v.sharpCount}`);
-    if (v.planar && (r.cyl || r.cones)) why.push('analytische Flächen');
-    if (!v.planar && (r.bores !== v.bores || r.cones !== v.cones)) why.push(`bores/cones ${r.bores}/${r.cones}`);
+    // Bogen-Flächen (Teil-Zylinder/-Kegel aus den Profil-Bögen) sind keine analytischen Flächen
+    // einer planaren Variante — sie zählen daher nicht mit.
+    const cyl = r.cyl - r.arcCyl, cones = r.cones - r.arcCones;
+    if (v.planar && (cyl > 0 || cones > 0)) why.push('analytische Flächen');
+    if (!v.planar && (r.bores !== v.bores || cones !== v.cones)) why.push(`bores/cones ${r.bores}/${r.cones}`);
     return why;
   };
   for (const v of vs) {
@@ -473,15 +487,52 @@ function matchVariants(r, vs, ctx) {
       if (worst <= STEP_UNC) return { hit: cand, tier: 'toleranz', tried, dV: r.volume - cand.volume, maxDist: worst, worstPt: fwd.worst >= bwd.worst ? fwd.worstPt : bwd.worstPt };
     }
   }
+  // Stufe „bogen": der Exporter hat die facettierten Profil-Bögen durch echte Teil-Zylinder/-Kegel
+  // ersetzt → das Volumen weicht um das Volumen zwischen Sehnen und Bögen ab (arcDV) und die
+  // Oberfläche liegt um die größte Sehnen-Pfeilhöhe (arcSag) daneben. Zulässig, wenn die
+  // Abweichung genau diesen Größen entspricht (2·arcDV als Sicherheitsfaktor).
+  // Der Kandidat wird NICHT nach dem nächsten Volumen gewählt: die Volumina der Varianten liegen
+  // oft dicht beieinander (k1 v2: „Rundung bleibt“ und „2 von 4 Eckrundungen scharf“ unterscheiden
+  // sich um 0.05 mm³, das Volumen allein entscheidet also nicht). Stattdessen kommen ALLE planaren
+  // Varianten mit passenden Zählwerten und einem Volumen in der Bogen-Toleranz infrage; es gewinnt
+  // die mit dem KLEINSTEN beidseitigen Abstand (Stresskörper: nur Volumen, kein Abstand).
+  if (r.arcCyl + r.arcCones > 0) {
+    const cands = vs.filter((v) => v.planar && !countsOk(v).length && Number.isFinite(v.volume)
+      && Math.abs(r.volume - v.volume) <= 2 * r.arcDV + tolPlanar(v.volume));
+    if (cands.length) {
+      if (heavy) {
+        const cand = cands.slice().sort((a, b) => Math.abs(r.volume - a.volume) - Math.abs(r.volume - b.volume))[0];
+        return { hit: cand, tier: 'bogen', tried, dV: r.volume - cand.volume, maxDist: undefined };
+      }
+      let best = null;
+      for (const cand of cands) {
+        const fwd = maxDistToSurface(verts, cand.tris), bwd = maxDistToSurface(uniquePts(cand.tris), r.otris);
+        const worst = Math.max(fwd.worst, bwd.worst);
+        if (!best || worst < best.worst) best = { cand, worst, worstPt: fwd.worst >= bwd.worst ? fwd.worstPt : bwd.worstPt };
+      }
+      if (best && best.worst <= r.arcSag + STEP_UNC) {
+        return { hit: best.cand, tier: 'bogen', tried, dV: r.volume - best.cand.volume, maxDist: best.worst, worstPt: best.worstPt };
+      }
+    }
+  }
   return { hit: null, tier: null, tried };
 }
 
 async function checkBody(body, occt) {
-  const out = { id: body.id, file: body.file, desc: body.desc, expect: body.expect.mode, problems: [], notes: [] };
+  // anFree: der AN-/v2-Lauf darf frei entrunden (v1/v2 schärfen dort Biegungen/Ecken) → für AN und
+  // v2-isoliert KEINE Varianten-Zuordnung, nur die universellen Pflichten (dicht, occt, strikt).
+  // AUS bleibt voll geprüft (Bogen-Flächen, Volumen).
+  const anFree = !!body.expect.anFree;
+  const out = { id: body.id, file: body.file, desc: body.desc, expect: body.expect.mode, anFree, problems: [], notes: [] };
   const tris = buildMesh(body);
   const man = checkManifold(tris);
   out.tris = tris.length;
   if (!man.ok) out.problems.push(`Generator: Netz nicht manifold (${man.badEdges} Kanten, ${man.degenerate} entartet)`);
+  if (body.bends) {
+    // Biege-Paare: Innen- und Außenbogen müssen konzentrisch sein (sonst ungleiche Wandstärke)
+    try { bendsConcentric(body.bends.pts, body.bends.radii, body.bends.t); }
+    catch (e) { out.problems.push(`Generator: Biege nicht konzentrisch (${e.message})`); }
+  }
   const buf = toBinaryStl(tris, body.file);
   const mesh = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
   let vMesh = 0; for (const f of mesh.faces) vMesh += triVolume(...f.vertices);
@@ -506,6 +557,12 @@ async function checkBody(body, occt) {
       bores: r.boresConverted, fillets: r.filletsDefeatured ?? 0, bands: r.bandsDefeatured ?? 0, fallbackStage: r.fallbackStage,
       cyl: (res.step.match(/CYLINDRICAL_SURFACE\(/g) || []).length,
       cones: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
+      // Bogen-Flächen des Exporters (Profil-Bögen → Teil-Zylinder/-Kegel): arcCylinders/arcCones
+      // zählen die Flächen, arcMaxSagitta die größte Sehnen-Pfeilhöhe der ersetzten Facetten (mm),
+      // arcVolumeDelta das Volumen zwischen Sehnen und Bögen (mm³). Liefert der Exporter sie noch
+      // nicht, sind sie 0.
+      arcCyl: r.arcCylinders ?? 0, arcCones: r.arcCones ?? 0,
+      arcSag: r.arcMaxSagitta ?? 0, arcDV: r.arcVolumeDelta ?? 0,
       occt: !!parsed.success, occtMeshes: (parsed.meshes || []).length,
       volume: otris.length ? meshVolume(otris) : NaN, otris, step: res.step,
       strict: checkStepStrict(res.step, { folds: true }).violations.map((v) => v.kind),
@@ -528,7 +585,7 @@ async function checkBody(body, occt) {
   }
   const limit = Math.max(EXPORT_LIMIT_MS, 3 * (off.exportMs || 0));
   if (on.exported && on.exportMs > limit) out.problems.push(`AN: Export ${Math.round(on.exportMs)} ms > ${Math.round(limit)} ms`);
-  if (body.expect.mode === 'skip' && (on.bands || iso.bands)) out.problems.push(`v2 hat ${Math.max(on.bands, iso.bands)} Band/Bänder entfernt, Soll ist Überspringen`);
+  if (!anFree && body.expect.mode === 'skip' && (on.bands || iso.bands)) out.problems.push(`v2 hat ${Math.max(on.bands, iso.bands)} Band/Bänder entfernt, Soll ist Überspringen`);
   // v1-Soll (Anzahl entfernter Kanten-Verrundungen): weniger = Rückfall/Fehlschlag, mehr = unerwartet
   if (body.expect.fillets !== undefined && on.exported && on.fillets !== body.expect.fillets) out.problems.push(`AN: v1 entfernt ${on.fillets} Verrundung(en), Soll ${body.expect.fillets} (fallbackStage ${on.fallbackStage})`);
   // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert
@@ -540,15 +597,25 @@ async function checkBody(body, occt) {
   const heavy = tris.length > 20000;
   const inv = body.transform ? makeTransform(body.transform).inverse : null;
   const heights = body.sections || defaultSections(body);
+  // AUS mit Bogen-Flächen und sonst KEINEN analytischen Flächen: der Exporter hat die facettierten
+  // Profil-Bögen durch echte Teil-Zylinder/-Kegel ersetzt → das Volumen weicht um das Bogen-Volumen
+  // ab (arcDV) und die Oberfläche liegt um die Sehnen-Pfeilhöhe (arcSag) daneben.
+  const hasArcs = off.exported && (off.arcCyl + off.arcCones > 0);
+  const arcOnly = off.exported && (off.cyl - off.arcCyl === 0) && (off.cones - off.arcCones === 0);
   if (off.exported && off.occt && off.otris.length) {
-    const tol = off.cyl || off.cones ? tolAnalytic(vMesh) : tolPlanar(vMesh);
+    const tol = (off.cyl || off.cones) ? (arcOnly ? tolPlanar(vMesh) + 2 * off.arcDV : tolAnalytic(vMesh)) : tolPlanar(vMesh);
+    const distLimit = (arcOnly ? off.arcSag : 0) + STEP_UNC;
     if (Math.abs(off.volume - vMesh) > tol) {
       const meshTris = f32(tris);
       const d = heavy ? null : Math.max(maxDistToSurface(uniquePts(off.otris), meshTris).worst, maxDistToSurface(uniquePts(meshTris), off.otris).worst);
       const msg = `AUS: STEP-Volumen ${off.volume.toFixed(3)} ≠ Netz ${vMesh.toFixed(3)} (Δ ${(off.volume - vMesh).toFixed(3)}${d !== null ? `, max. Abstand ${d.toFixed(4)} mm` : ''})`;
-      if (d !== null && d <= STEP_UNC) out.notes.push(msg + ' — innerhalb 0.01 mm (Planar-Toleranz des Region-Growing, nicht v2)');
+      if (d !== null && d <= distLimit) out.notes.push(msg + ` — innerhalb ${distLimit.toFixed(3)} mm (${hasArcs ? 'Bogen-Pfeilhöhe + ' : ''}Planar-Toleranz des Region-Growing, nicht v2)`);
       else out.problems.push(msg);
     }
+  }
+  // Erwartete Zahl der Bogen-Flächen im AUS-Export (Teil-Zylinder + Teil-Kegel aus Profil-Bögen)
+  if (body.expect.arcsOff !== undefined && off.exported && (off.arcCyl + off.arcCones) < body.expect.arcsOff) {
+    out.problems.push(`AUS: ${off.arcCyl + off.arcCones} Bogen-Flächen, Soll ≥ ${body.expect.arcsOff}`);
   }
 
   // ── AN und v2 isoliert je einer zulässigen Variante zuordnen ──
@@ -556,6 +623,7 @@ async function checkBody(body, occt) {
   const ctx = { heights, inv, heavy };
   for (const [tag, r] of [['AN', on], ['v2', iso]]) {
     if (!(r.exported && r.occt && r.otris.length)) continue;
+    if (anFree) { out[tag === 'AN' ? 'onMatch' : 'isoMatch'] = { match: null, tier: null, target: false }; continue; }
     const vs = planarVs.slice();
     if (tag === 'AN' && body.boreChamfer) {
       vs.push(boreSharpVariant(body, body.boreChamfer, r.step, roundedPairs(body).length));
@@ -578,10 +646,12 @@ async function checkBody(body, occt) {
       const nearest = m.tried.slice().sort((a, b) => a.why.length - b.why.length || Math.abs(r.volume - a.v.volume) - Math.abs(r.volume - b.v.volume))[0];
       out.problems.push(`${tag}: falsche Geometrie — keine zulässige Variante; beobachtet bands=${r.bands} fillets=${r.fillets} bores=${r.bores} cones=${r.cones} V=${r.volume.toFixed(3)}; Ziel ${tgt}; nächste: „${nearest.v.label}“ (${nearest.why.join('; ')})`);
     } else {
-      if (m.tier === 'toleranz') out.notes.push(`${tag}: „${m.hit.label}“ nur innerhalb 0.01 mm (ΔV ${m.dV.toFixed(3)}, max. Abstand ${m.maxDist.toFixed(4)} mm bei ${fmtPt(m.worstPt)})`);
-      if (!m.hit.target) out.notes.push(`${tag}: sicher, aber Ziel verfehlt: „${m.hit.label}“ (bands=${r.bands}, fillets=${r.fillets})`);
+      if (m.tier === 'toleranz') out.notes.push(`${tag}: „${m.hit.label}” nur innerhalb 0.01 mm (ΔV ${m.dV.toFixed(3)}, max. Abstand ${m.maxDist.toFixed(4)} mm bei ${fmtPt(m.worstPt)})`);
+      if (m.tier === 'bogen') out.notes.push(`${tag}: „${m.hit.label}” mit exakten Bögen (Pfeilhöhe ≤ ${r.arcSag.toFixed(4)} mm, ΔV ${m.dV.toFixed(3)} mm³)`);
+      if (!m.hit.target) out.notes.push(`${tag}: sicher, aber Ziel verfehlt: „${m.hit.label}” (bands=${r.bands}, fillets=${r.fillets})`);
     }
   }
+  if (anFree) out.notes.push('AN/v2: freie Entrundung (Bögen nur AUS geprüft)');
   return out;
 }
 
@@ -616,13 +686,15 @@ if (asJson) {
   origLog(JSON.stringify(results, null, 2));
 } else {
   const f = (x, d = 1) => (Number.isFinite(x) ? x.toFixed(d) : '-');
-  const tierTxt = (m) => (!m ? '-' : !m.match ? 'FALSCH' : m.tier === 'toleranz' ? '≤0.01' : 'exakt');
-  origLog('id     Soll  tris  | AN: bands fil bore cone  wt   faces(AN/AUS) | v2 allein: bands wt  geom  |  V_soll      V_STEP(AN)    ΔV     | recog exp-AN exp-AUS ms | Ergebnis');
+  const tierTxt = (m, free) => (free ? 'frei' : !m ? '-' : !m.match ? 'FALSCH' : m.tier === 'toleranz' ? '≤0.01' : m.tier === 'bogen' ? 'bogen' : 'exakt');
+  // Bogen-Flächen (Teil-Zylinder + Teil-Kegel aus den Profil-Bögen) je Export
+  const arcTxt = (r) => `${String(r.arcCyl ?? 0).padStart(2)}+${String(r.arcCones ?? 0).padStart(2)}`;
+  origLog('id     Soll  tris  | AN: bands fil bore cone  wt   faces(AN/AUS) | Bögen AN/AUS | v2 allein: bands wt  geom  |  V_soll      V_STEP(AN)    ΔV     | recog exp-AN exp-AUS ms | Ergebnis');
   for (const r of results) {
     const on = r.on || {}, off = r.off || {}, iso = r.iso || {};
     const verdict = r.problems.length ? 'VERLETZT' : r.notes.length ? 'OK*' : 'OK';
     origLog(
-      `${r.id.padEnd(6)} ${String(r.expect || '').padEnd(5)} ${String(r.tris ?? '-').padStart(5)} |    ${String(on.bands ?? '-').padStart(5)} ${String(on.fillets ?? '-').padStart(3)} ${String(on.bores ?? '-').padStart(4)} ${String(on.cones ?? '-').padStart(4)}  ${String(on.watertight).padEnd(5)} ${String(on.faces ?? '-').padStart(5)}/${String(off.faces ?? '-').padEnd(6)} |       ${String(iso.bands ?? '-').padStart(5)} ${String(iso.watertight).padEnd(5)} ${tierTxt(r.isoMatch).padEnd(6)} | ${f(r.vSoll, 3).padStart(11)} ${f(on.volume, 3).padStart(11)} ${f(on.volume - r.vSoll, 3).padStart(9)} | ${f(r.recogMs, 0).padStart(5)} ${f(on.exportMs, 0).padStart(6)} ${f(off.exportMs, 0).padStart(7)}    | ${verdict}${r.onMatch?.match ? ' – ' + r.onMatch.match + (r.onMatch.tier === 'toleranz' ? ' (≤0.01 mm)' : '') : ''}`);
+      `${r.id.padEnd(6)} ${String(r.expect || '').padEnd(5)} ${String(r.tris ?? '-').padStart(5)} |    ${String(on.bands ?? '-').padStart(5)} ${String(on.fillets ?? '-').padStart(3)} ${String(on.bores ?? '-').padStart(4)} ${String(on.cones ?? '-').padStart(4)}  ${String(on.watertight).padEnd(5)} ${String(on.faces ?? '-').padStart(5)}/${String(off.faces ?? '-').padEnd(6)} | ${arcTxt(on)}/${arcTxt(off)} |       ${String(iso.bands ?? '-').padStart(5)} ${String(iso.watertight).padEnd(5)} ${tierTxt(r.isoMatch, r.anFree).padEnd(6)} | ${f(r.vSoll, 3).padStart(11)} ${f(on.volume, 3).padStart(11)} ${f(on.volume - r.vSoll, 3).padStart(9)} | ${f(r.recogMs, 0).padStart(5)} ${f(on.exportMs, 0).padStart(6)} ${f(off.exportMs, 0).padStart(7)}    | ${verdict}${r.onMatch?.match ? ' – ' + r.onMatch.match + (r.onMatch.tier === 'toleranz' ? ' (≤0.01 mm)' : r.onMatch.tier === 'bogen' ? ' (Bögen exakt)' : '') : ''}`);
   }
   for (const r of results) {
     if (!r.sections || !(r.problems.length || r.id.startsWith('g'))) continue;
