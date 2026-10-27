@@ -1386,7 +1386,15 @@ function fitTube(T, cand, keyOf, loops) {
   };
   if (!endA.isCircle && !extendEnd(true, plA, inA)) return fail('Anfangs-Stück erreicht Mündung A nicht');
   if (!extendEnd(false, plB, inB)) return fail('End-Stück erreicht Mündung B nicht');
-  for (let k = 0; k < nP; k++) { pieces[k].profC = profs[k].c; pieces[k].profM = profs[k].m; }
+  for (let k = 0; k < nP; k++) {
+    pieces[k].profC = profs[k].c; pieces[k].profM = profs[k].m;
+    // Seam-Referenz des Profilkreises im Profil-Frame (refOf) mitführen: das Profil wird starr
+    // mitgeführt (Bögen: Drehung um Achsen ∥ Bn, Geraden: Verschiebung) → refOf wird konsistent
+    // transportiert. Die Naht der SURFACE_OF_REVOLUTION (v = 0) läuft dann durch den refDir-Vertex
+    // beider Übergangskreise und durch den Mündungs-Vertex. Sonst schneidet OCCT die
+    // B-Spline-Mündung neben der Naht → 3D-Lücke ~2e-5 mm (> 1e-6).
+    pieces[k].profRef = refOf(profs[k].m);
+  }
   // Kurven: 0 = Mündung A, 1..nP−1 = Übergänge, nP = Mündung B. sense +1 = Umlauf positiv um die
   // Bahnrichtung (Kurvenachse ≈ +T), −1 = negativ (Achse ≈ −T).
   const curves = profs.map((pf) => ({ kind: 'circle', center: pf.c, axis: pf.m, refDir: refOf(pf.m), radius: rProf, sense: 1 }));
@@ -1416,7 +1424,14 @@ function fitTube(T, cand, keyOf, loops) {
       const p = X(0.5 * (a + b));
       pts.push(sub(p, mul(pl.n, dot(sub(p, pl.c), pl.n))));
     }
-    if (!isStart) pts.reverse();
+    if (!isStart) {
+      pts.reverse();
+      // End-Mündung: φ = 0 wieder an den Anfang drehen (Start-Vertex = p(0) auf der Naht).
+      // Nach dem Umdrehen wäre pts[0] = p(71) (φ = 355°) — der Mündungs-Vertex läge dann neben
+      // der Naht der Rotationsfläche; OCCT müsste den B-Spline dort auftrennen → 3D-Lücke
+      // ~2e-5 mm (> 1e-6). Reihenfolge [p(0), p(71), p(70), …, p(1)] (Umlaufsinn bleibt).
+      const p0 = pts.pop(); pts.unshift(p0);
+    }
     let c = [0, 0, 0]; for (const p of pts) c = addv(c, p); c = mul(c, 1 / N);
     const sp = closedCubicSpline(pts);
     if (!sp) return null;

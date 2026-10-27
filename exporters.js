@@ -4597,7 +4597,11 @@ export function buildVolumeStepBrepV2(analysis) {
         // pc.swept (γ = 0, tube-sweep.js): Rand-Kurven liegen nicht exakt auf Zylinder/Torus der Bahn
         // → wie bei γ ≠ 0 die Extrusions-/Rotationsfläche des mitgeführten Profils (enthält sie exakt)
         const swept = tilted || pc.swept === true;
-        const profCircle = () => addCircle(addAxis2Placement3D(pc.profC, pc.profM, computeRefDir(pc.profM)), r);
+        // refDir des Profilkreises = profRef (refOf im Profil-Frame, s. tube-sweep.js): die Naht
+        // (v = 0) der Rotations-/Extrusionsfläche muss durch den refDir-Vertex der Übergangskreise
+        // und den Mündungs-Vertex laufen — sonst teilt OCCT den B-Spline neben der Naht auf und es
+        // bleiben 3D-Lücken ~2e-5 mm (> 1e-6).
+        const profCircle = () => addCircle(addAxis2Placement3D(pc.profC, pc.profM, pc.profRef || computeRefDir(pc.profM)), r);
         if (pc.kind === 'line') {
           sameSense = false; // Normale zeigt von der Achse weg
           if (!swept) surf = addCylindricalSurface(addAxis2Placement3D(pc.profC, pc.dir, computeRefDir(pc.dir)), r);
