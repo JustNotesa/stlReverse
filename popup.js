@@ -1,5 +1,5 @@
 import { formatBytes, describeDetailLevel } from './utils.js';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=34';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=35';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=28';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=19';
@@ -437,6 +437,10 @@ function setStepWatertightStatus(report) {
     if (n(report.mantleConesConverted)) done.push(`${report.mantleConesConverted} ${report.mantleConesConverted === 1 ? 'Kegelmantel' : 'Kegelmäntel'} als echter Kegel`);
     if (n(report.mantleChamfersConverted)) done.push(`${report.mantleChamfersConverted} ${report.mantleChamfersConverted === 1 ? 'Fase/Spitze' : 'Fasen/Spitzen'} am Außenmantel als echter Kegel`);
     if (n(report.tubesConverted)) done.push(`${report.tubesConverted} gebogene${report.tubesConverted === 1 ? 'r Kanal' : ' Kanäle'} als exakte Fläche (${report.tubePieces} Stück)`);
+    // Schalen-Befunde (assembleSolids): Hohlräume, umgestülpte Eingabe, verworfene Finnen
+    if (n(report.voids)) done.push(report.voids === 1 ? '1 innerer Hohlraum als echter Hohlraum im Körper' : `${report.voids} innere Hohlräume als echte Hohlräume im Körper`);
+    if (n(report.invertedShells)) done.push('Eingabe-Netz war innen-außen gestülpt — Flächen umgedreht');
+    if (n(report.droppedShells)) done.push(`${report.droppedShells} hauchdünne Schale${report.droppedShells === 1 ? '' : 'n'} (Finne/Mini-Tasche) verworfen`);
     const rounds = [];
     if (n(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
     if (n(report.cornersDefeatured)) rounds.push(`${report.cornersDefeatured} gerundete Profilecke${report.cornersDefeatured === 1 ? '' : 'n'}`);
@@ -457,7 +461,15 @@ function setStepWatertightStatus(report) {
     if (boundaryEdges)      parts.push(`${boundaryEdges} offene Kante${boundaryEdges === 1 ? '' : 'n'}`);
     if (nonManifoldEdges)   parts.push(`${nonManifoldEdges} non-manifold-Kante${nonManifoldEdges === 1 ? '' : 'n'}`);
     if (orientationDefects) parts.push(`${orientationDefects} fehlorientierte Kante${orientationDefects === 1 ? '' : 'n'}`);
-    el.textContent = `⚠ Nicht wasserdicht: ${parts.join(', ')} von ${edgeCount} Kanten (${faceCount} Flächen) → offene Hülle, kein Solid.`;
+    // Seit dem Dicht-Urteil je Schale können dichte Körper NEBEN offenen Schalen stehen —
+    // dann ist nur ein Teil offen, die Körper sind trotzdem echte Volumen.
+    const solids = Number.isFinite(report.solids) ? report.solids : 0;
+    const opens = Number.isFinite(report.openShells) ? report.openShells : 0;
+    if (solids > 0) {
+      el.textContent = `⚠ Teilweise offen: ${parts.join(', ')} von ${edgeCount} Kanten (${faceCount} Flächen) — ${solids} geschlossene${solids === 1 ? 'r' : ''} Körper als Volumen exportiert, ${opens} offene Schale${opens === 1 ? '' : 'n'} als Flächenmodell beigelegt.`;
+    } else {
+      el.textContent = `⚠ Nicht wasserdicht: ${parts.join(', ')} von ${edgeCount} Kanten (${faceCount} Flächen) → offene Hülle, kein Solid.`;
+    }
     el.dataset.state = 'warn';
   }
 }

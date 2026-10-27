@@ -163,26 +163,19 @@ Kreis-Kanten teilen.
   - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
   - eBike rechts: Modell-Restfehler im Bogen bis 0.037 mm (Profil-Neigung dort ~1° anders) — prüfen.
   - Restlaufzeit detectTubes auf großen Freiform-Kanälen ~2–3 s (score/marchNormal, linear).
-- [ ] **Review 2026-10-27 — drei bestätigte Funde (in Arbeit, Branch `wt/schalen-freigang`)**:
-  - HOCH, Regression aus 1c9905c: jede Zusammenhangskomponente wird ein eigener Volumenkörper — auch Hohlräume
-    (Würfel mit innerem Hohlraum: occt 9000 statt 7000 mm³), innen-außen vertauschte Netze und Null-Volumen-Finnen.
-    dino: die 5 Zusatz-Schalen sind 4 winzige Hohlräume im Hauptkörper + 1 flache Finne. Abhilfe: Volumen je Schale,
-    Hohlräume als BREP_WITH_VOIDS, invertierte Eingabe umdrehen, Finnen nicht als Körper.
-  - HOCH: Kreis-Umwandlung ohne Freigangsprüfung — der Kreis durch die Polygon-Ecken ragt um die Pfeilhöhe über das
-    Netz; bei dünnem Steg schneiden sich Bohrungen/Mantel → selbstdurchdringender Körper (occt −33 %), step-strict ok.
-  - MITTEL: Wasserdicht-Urteil global statt je Schale — ein loses Dreieck macht alle Körper zu offenen Hüllen und
-    wirft ihre Bohrungen/Mäntel weg; an einer Kante/Ecke berührende Körper teilen Topologie.
-  - Dazu: OpenCascade (OCP, in `~/Library/Python/3.9`) als zweiter, unabhängiger Prüfer (BRepCheck +
-    Selbstdurchdringung) — findet, was `step-strict` nicht sieht.
-- [ ] **Kanal-Übergangskreise: Startpunkt knapp neben der Naht** (OCP-Befund 2026-10-27) — eBike (beide Varianten):
-  BRepCheck gültig, aber BRepAlgoAPI_Check 34× TooSmallEdge + 17× Vertex/Vertex. Die VERTEX der Übergangskreise auf
-  den SURFACE_OF_REVOLUTION liegen 2e-8…4e-7 mm neben der Flächennaht; OCCT fügt beim Lesen die Naht ein und teilt
-  die Kreise → 18 Mikro-Bögen (81 → 129 Kanten). Abhilfe nach dem Merge von T: Kreis-Startpunkt entweder EXAKT auf
-  die Naht (gleicher Richtungsvektor wie die Fläche, so ist es bei Zylindern — dort sauber) oder deutlich daneben
-  (z.B. 90° versetzt), auch für Tori; OCP-Check als Abnahme.
-- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten. Bekannt (OCP):
-  `dino-freiform-facettiert.step` — 5 Zusatz-Schalen fehlerhaft (Review-Fund oben); beide eBike-Dateien — Mikro-
-  Bögen an den Kanal-Übergängen (s. oben). Würfel, Bohrung, Zylinder, Scheibe, Platte, Kugel: OCP-sauber.
+- [ ] **Schalen — Restpunkte (nach dem Merge von `wt/schalen-freigang`, 2026-10-27)**:
+  - BREP_WITH_VOIDS (Hohlraum im Körper) in Fusion/CST gegentesten (occt + OCP ok; Datei `cst-test/wuerfel-mit-hohlraum.step`).
+  - Berührende Hohlräume über 1e-4 des Körpervolumens bleiben Hohlraum mit Hinweis (`shellNotes` 'hohlraum-beruehrt')
+    und teilen dann Ecken mit der Außenschale — step-strict meldet dort shared-topology.
+  - Lage-Tests haben ein Budget (CONTAIN_BUDGET): riesige Mehrkörper-Netze → unentschieden → V<0-Schalen lösen den
+    sicheren Rückfall aus. `shell-volume` im Prüfer überspringt Drehflächen-Schalen (stats.volumeSkipped).
+  - Semantik: `watertight=false` erzwingt keinen Rückfall mehr — Downstream-Annahmen „!watertight ⇒ facettiert“ prüfen.
+- [ ] **Kanal-Naht, Rest** (OCP): Nach den Runde-I-Kanal-Fixes sind die eBike-Mikro-Bögen (TooSmallEdge/SelfIntersect)
+  WEG; es bleiben `sa gaps3d=2` — Rand-B-Splines der Kanal-SURFACE_OF_REVOLUTION ~2e-5 mm neben der Naht
+  (OCP-Erwartungsliste führt genau das). Abhilfe im Kanal-Bereich: Mündungs-B-Spline exakt auf die Fläche bzw.
+  Naht versetzen.
+- [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten — alle Dateien
+  sind nach den Fixes frisch zu exportieren (dino jetzt 4 Körper ohne kaputte Zusatz-Schalen).
 - [ ] **Release 0.2.2** (nach CST-Rückmeldung zum Kabelhalter + Merge der laufenden Agenten): Version in
   `manifest.json`/`package.json` hochzählen, `updates.json` um den neuen Eintrag ergänzen, `npm run build:xpi`,
   bei AMO „Neue Version hochladen“ (Datei wählt der User — AMOs CSP blockt Skript-Uploads), Prüfer-Hinweise wie
@@ -204,6 +197,16 @@ Kreis-Kanten teilen.
 ---
 
 ## Erledigt
+
+- [x] **Schalen-Klassifikation + Freigang + OCP-Zweitprüfer (2026-10-27, Merge `wt/schalen-freigang`)** — die drei
+  bestätigten Review-Funde: (1) je Komponente Volumen + Lage → Hohlräume als BREP_WITH_VOIDS (Würfel mit Hohlraum:
+  occt 9000 → 7000 mm³), invertierte Eingabe umgedreht (block_edge_fillet), Finnen/Mini-Taschen verworfen (dino
+  9 → 4 Körper, keine geteilte Topologie mehr); (2) Dicht-Urteil je Schale — dichter Körper neben losem Dreieck
+  behält Bohrung/Mantel (block_with_hole: 187 → 8 Flächen), kanten-/eckberührende Würfel werden zwei gültige
+  Körper; (3) Freigang der Kreis-Umwandlung (circleClear): dünne Stege bleiben facettiert statt selbstdurchdringend
+  (r8: occt −33 % → exakt). step-strict: shell-volume, shared-topology, open-shell, loop-overlap. Neue Suiten
+  `test:schalen` und `test:ocp` (volles OpenCascade: BRepCheck, BOP, ShapeAnalysis 1e-6, Volumen je Körper;
+  Erwartungsliste je Datei — der Kabelhalter-Fehler wäre damit gefunden worden). npm test = 12 Suiten.
 
 - [x] **Runde I (2026-10-27): Kanäle, Mäntel/Kegel, Senkungs-Restfälle** —
   **Kanäle (T):** U-Bögen laufen über die Anker-Kette (3 exakte Stücke statt 15 geknickter; Kreise vorher bis 0,022 mm
