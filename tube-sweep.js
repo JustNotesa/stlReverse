@@ -611,9 +611,21 @@ const kinkOf = (t1, t2) => Math.atan2(cr2(norm2(t1), norm2(t2)), dot2(norm2(t1),
 // den Worker unabsehbar zu blockieren. Größter gemessener Fall (Freiform-Kanal, 43k Dreiecke):
 // 1.5e7 Einheiten — das Budget liegt ~13-fach darüber.
 // Nicht-endliche Eingaben (kommen nicht vor): ohne Schranken-Abbruch und Unmöglichkeits-Beweis.
+//
+// g1 (Profil ⟂ Bahn, γ = 0): Zylinder/Tori werden aus der BAHN gebaut, die Übergangskreise sind
+// das starr mitgeführte Profil — beide passen nur zusammen, solange das Profil nirgends gegen die
+// Bahn kippt. Die Knick-Summe muss dann auch über Rückfall-Stücke im Budget bleiben (ohne g1, also
+// bei γ ≠ 0, entstehen die Flächen aus dem mitgeführten Profil selbst — Verhalten unverändert):
+//  • Ein Ersatz-Stück vor dem Kettenende muss so enden, dass das Original-Stück dahinter noch im
+//    Budget anschließt — sonst verlängert z.B. eine Gerade über den Tangentenpunkt hinaus (die
+//    Stationen liegen dort noch ≤ tol, die Tangente ist aber schon um √(2·tol/R) gedreht) und der
+//    folgende Rückfall auf das Original-Stück knickt um Grad (gemessen U-Bogen R 4.2: 4.2°).
+//  • Ein Rückfall, der das Budget sprengen würde, wird G1 neu angesetzt (Bogen ab J[k] mit der
+//    Tangente tPrev durch J[k+1]) und muss seine Stationen ≤ tol treffen — sonst Abbruch
+//    ({ kinked }); der Aufrufer nimmt dann die unvereinfachte (G1-)Biarc-Kette.
 const SIMPLIFY_BUDGET = 2e8;
 const DEV_WORK = 8;
-function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity) {
+function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity, g1 = false) {
   const owner = Q.map((q) => { let bi = 0, bd = Infinity; chain.forEach((pc, i) => { const d = distToPiece2(q, pc); if (d < bd) { bd = d; bi = i; } }); return bi; });
   const J = [chain[0].A, ...chain.map((pc) => pc.B)];
   // Am offenen Kettenende wird verlängert/angesetzt → dortige End-Tangente muss erhalten bleiben
@@ -623,6 +635,8 @@ function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity) {
   // sein Lagefehler gegenüber der Bahn → begrenzt wird die kumulierte Summe, nicht der Einzelknick.
   let cum = 0;
   const kinkOk = (pc) => Math.abs(cum + kinkOf(tPrev, pc.ta)) <= maxKink;
+  // g1: Original-Stück chain[l] schließt nach dem Ersatz-Stück pc noch im Budget an (s. oben)
+  const nextOk = (pc, l) => !g1 || l >= chain.length || Math.abs(cum + kinkOf(tPrev, pc.ta) + kinkOf(pc.tb, chain[l].ta)) <= maxKink;
   // Stationen nach Stück-Zuordnung gruppiert: Stationen zu [k, l) = Bereich [first[k], first[l]).
   const nC = chain.length, nQ = Q.length;
   const first = new Int32Array(nC + 1);
@@ -715,6 +729,14 @@ function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity) {
   };
   const out = [];
   let k = 0, tPrev = startT;
+  // Rückfall: Original-Stück behalten — mit g1 nur im Knick-Budget, sonst G1 neu angesetzt (s. oben)
+  const fallback = () => {
+    const orig = chain[k];
+    if (!g1 || Math.abs(cum + kinkOf(tPrev, orig.ta)) <= maxKink) return { pc: orig, l: k + 1 };
+    const pc = arcFrom(J[k], tPrev, J[k + 1]);
+    if (pc && endOk(pc, k + 1) && devRange(pc, first[k], first[k + 1], tol, true) <= tol) return { pc, l: k + 1 };
+    return null;
+  };
   while (k < chain.length) {
     if (out.length + 1 >= maxPieces) return { tooMany: true };
     let best = null;
@@ -735,12 +757,12 @@ function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity) {
       work += i1 - i0;
       H = Math.min(H, L / 2 * 0.999);
       if (finite && provenInfeasible(i0, i1, A, c, L, n0, n1, H, tol, offMax, offMin)) {
-        if (l === k + 1) { best = { pc: chain[k], l }; break; }
+        if (l === k + 1) { best = fallback(); break; }
         continue;
       }
       // Gerade?
       const ln = pieceThrough(A, B, 0);
-      if (ln && kinkOk(ln) && endOk(ln, l) && devRange(ln, i0, i1, tol, true) <= tol) { best = { pc: ln, l }; break; }
+      if (ln && kinkOk(ln) && endOk(ln, l) && nextOk(ln, l) && devRange(ln, i0, i1, tol, true) <= tol) { best = { pc: ln, l }; break; }
       // Bogen: Pfeilhöhe h per Goldenem Schnitt (max. Abweichung minimieren)
       const f = (h, cut, strict) => { const pc = pieceThrough(A, B, h); return pc ? devRange(pc, i0, i1, finite ? cut : Infinity, finite ? strict : true) : Infinity; };
       let lo = -H, hi = H; const gr = (Math.sqrt(5) - 1) / 2;
@@ -751,9 +773,10 @@ function simplifyChain(chain, Q, tol, maxKink, startT, maxPieces = Infinity) {
         else { lo = x1; x1 = x2; f1 = f2; x2 = lo + gr * (hi - lo); if (used) f2 = f(x2, f1, true); }
       }
       const pc = pieceThrough(A, B, 0.5 * (lo + hi));
-      if (pc && kinkOk(pc) && endOk(pc, l) && devRange(pc, i0, i1, tol, true) <= tol) { best = { pc, l }; break; }
-      if (l === k + 1) { best = { pc: chain[k], l }; break; } // Original-Stück behalten
+      if (pc && kinkOk(pc) && endOk(pc, l) && nextOk(pc, l) && devRange(pc, i0, i1, tol, true) <= tol) { best = { pc, l }; break; }
+      if (l === k + 1) { best = fallback(); break; } // Original-Stück behalten
     }
+    if (!best) return { kinked: true, work }; // g1: Knick nicht vermeidbar → unvereinfachte Kette
     cum += kinkOf(tPrev, best.pc.ta); out.push(best.pc); tPrev = best.pc.tb; k = best.l;
   }
   return { pieces: out, work };
@@ -843,19 +866,24 @@ function fitAnchorChain(Q, start, tol, minLen, rMin) {
       break;
     }
     // Übergangspunkt u entlang des aktuellen Stücks: Stationen davor → aktuelles Stück,
-    // danach (bis Ende des nächsten Ankers) → nächstes Stück (tangential angesetzt)
+    // danach (bis Ende des nächsten Ankers) → nächstes Stück (tangential angesetzt).
+    // Getrennt wird in BAHN-Reihenfolge (Stations-Index): alles ab der ersten Station, deren
+    // Projektion jenseits u liegt, gehört zum nächsten Stück. (Nach der Projektion allein zu
+    // trennen scheitert an Bögen ≥ 180°: die Stationen am Bogenende projizieren auf die Gerade
+    // davor zurück und würden gegen sie gemessen — Abweichung 2R, U-Bögen fielen auf die Biarc-Kette.)
     const ptsAll = Q.slice(iFrom, next.i1 + 1);
     const us = ptsAll.map((q) => uOf(p, t, kappa, q));
+    const splitAt = (u) => { let j = 0; while (j < us.length && us[j] <= u) j++; return j; };
     const evalU = (u) => {
       const P = pointOn(p, t, kappa, u), Tn = tangentOn(t, kappa, u);
-      const after = ptsAll.filter((_, i) => us[i] > u);
-      const before = ptsAll.filter((_, i) => us[i] <= u);
+      const j = splitAt(u);
+      const before = ptsAll.slice(0, j), after = ptsAll.slice(j);
       if (after.length < 2) return { dev: Infinity };
       const kn = kappaFor(P, Tn, next.kind, after);
       let dev = 0;
       for (const q of before) dev = Math.max(dev, devTo(p, t, kappa, q));
       for (const q of after) dev = Math.max(dev, devTo(P, Tn, kn, q));
-      return { dev, kn, P, Tn };
+      return { dev, kn, P, Tn, j };
     };
     const uLo = Math.max(1e-4, uOf(p, t, kappa, Q[Math.max(iFrom, anchors[k].i1 - 6)]));
     const uHi = uOf(p, t, kappa, Q[Math.min(next.i1, next.i0 + 6)]);
@@ -873,7 +901,7 @@ function fitAnchorChain(Q, start, tol, minLen, rMin) {
     if (!(e.dev <= tol)) return null;
     out.push({ p, t, kappa, len: u });
     p = e.P; t = norm2(e.Tn); kappa = e.kn;
-    iFrom = iFrom + us.filter((x) => x <= u).length;
+    iFrom = iFrom + e.j;
   }
   // in Stück-Format (A, B, ta, tb, C, R, th) umsetzen
   return out.map(({ p: A, t: ta, kappa: kp, len: L }) => {
@@ -928,15 +956,18 @@ function mergePieces(pcs) {
 // Profil-Lage entlang der Kette: Profilkreis (Mittelpunkt c, Normale m) starr mitbewegt.
 // Für einen Vertex v die Profil-Ebene suchen, in der er liegt ((v − P(s))·m(s) = 0), dann
 // Abstand |v − P(s)| − r. Geradenstück: Ebenen parallel → linear lösbar; Bogen: Bisektion.
-function vertexResidual(v, pieces3, mOf, r) {
-  let best = Infinity;
+// Optional (out = { B }): out.phi = Profilwinkel des Vertex in seiner Profilebene, Bezug ist die
+// Bahn-Ebenen-Normale B (auf die Profilebene projiziert) — für die Facetten-Prüfung (s. fitTube).
+function vertexResidual(v, pieces3, mOf, r, out = null) {
+  let best = Infinity, bestW = null, bestM = null;
   for (const pc of pieces3) {
     if (pc.kind === 'line') {
       const m = pc.profM || mOf(pc.dir), tm = dot(pc.dir, m);
       const s = dot(sub(v, pc.p0), m) / tm;
       if (s < -0.02 || s > pc.len + 0.02) continue; // Rand-Toleranz 0.02 mm Weglänge
-      const res = len(sub(v, addv(pc.p0, mul(pc.dir, s)))) - r;
-      if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) best = res; // nur plausible Wurzel (nahe am Profil)
+      const foot = addv(pc.p0, mul(pc.dir, s));
+      const res = len(sub(v, foot)) - r;
+      if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) { best = res; if (out) { bestW = sub(v, foot); bestM = m; } } // nur plausible Wurzel (nahe am Profil)
       continue;
     }
     // Schnelltest: grober Abstand zum Bogen
@@ -956,10 +987,21 @@ function vertexResidual(v, pieces3, mOf, r) {
       if (f0 === 0 || f0 * f1 < 0) {
         let a = th0, b = th1, fa = f0;
         for (let it = 0; it < 50; it++) { const m = 0.5 * (a + b), fm = f(m); if (fa * fm <= 0) b = m; else { a = m; fa = fm; } }
-        const res = len(sub(v, P(0.5 * (a + b)))) - r;
-        if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) best = res; // nur plausible Wurzel
+        const thR = 0.5 * (a + b), Pr = P(thR);
+        const res = len(sub(v, Pr)) - r;
+        if (Math.abs(res) < 0.5 * r && Math.abs(res) < Math.abs(best)) { // nur plausible Wurzel
+          best = res;
+          if (out) { bestW = sub(v, Pr); bestM = pc.profM ? rotAbout(pc.profM, pc.axis, thR) : mOf(Tt(thR)); }
+        }
       }
       th0 = th1; f0 = f1;
+    }
+  }
+  if (out) {
+    out.phi = NaN;
+    if (bestW) {
+      const m = norm(bestM), b1 = norm(sub(out.B, mul(m, dot(out.B, m)))), b2 = cross(m, b1);
+      out.phi = Math.atan2(dot(bestW, b2), dot(bestW, b1));
     }
   }
   return best;
@@ -1053,6 +1095,9 @@ const LINE_TOL = 0.012;       // ganze Bahn innerhalb dieser Toleranz gerade →
 const MAX_KINK = 0.1 * DEG;   // erlaubter Tangenten-Knick beim Vereinfachen der Biarc-Kette
 const VERT_TOL = 0.05;        // Netz-Vertex ↔ Modell-Fläche (mm); gemessen eBike rechts bis 0.04 (Bogen)
 const MOUTH_TOL = 0.03;       // Mündungs-Loop ↔ Mündungskurve (mm)
+const GAP_TOL = 1e-6;         // γ = 0: Rand-Kurve ↔ Zylinder/Torus aus der Bahn (mm), sonst Stück als Sweep-Fläche
+const FACET_SPAN_K = 1.75;    // Dreieck quer zur Bahn breiter als K × typische Umfangsteilung → verdächtig …
+const SAG_MIN = 0.01;         // … wenn seine Sehne dabei mehr als SAG_MIN (mm) vom Profilkreis abweicht
 
 
 function fitTube(T, cand, keyOf, loops) {
@@ -1167,7 +1212,19 @@ function fitTube(T, cand, keyOf, loops) {
   const secRms = median(P.filter((s) => s.cov >= 300).map((s) => s.rms));
   if (!(secRms <= 0.02)) return fail('Querschnitt passt nicht zum Profilkreis', { secRms, gammaDeg: gamma / DEG });
   // (5) 2D-Bahn in der Bahn-Ebene
-  const o = pp.c, e1 = pp.u, e2 = cross(Bn, e1);
+  if (endA.isCircle && Math.abs(dot(sub(endA.circ.center, pp.c), Bn)) > 0.05) return fail('Profilkreis nicht in Bahn-Ebene');
+  let o = pp.c, e1 = pp.u;
+  if (gamma === 0) {
+    // γ = 0: Zylinder/Tori entstehen im Exporter aus der Bahn (to3) — deshalb Rahmen exakt
+    // orthonormal zu Bn (Bn wurde oben ggf. senkrecht zur Profilnormale nachgezogen, pp.u steht
+    // dann nicht mehr exakt ⟂ Bn: die Geraden lägen schräg zur Drehachse der Bögen, das Profil
+    // wanderte aus der Torus-Ebene) und Ursprung in der Ebene des Profilkreises (sonst liegt sein
+    // Mittelpunkt bis 0.05 mm neben der Torus-Ebene). γ ≠ 0 unverändert: die Flächen entstehen dort
+    // aus dem mitgeführten Profil selbst.
+    e1 = norm(sub(e1, mul(Bn, dot(e1, Bn))));
+    if (endA.isCircle) o = addv(o, mul(Bn, dot(sub(endA.circ.center, o), Bn)));
+  }
+  const e2 = cross(Bn, e1);
   const to2 = (p) => [dot(sub(p, o), e1), dot(sub(p, o), e2)];
   const to3 = (q) => addv(o, addv(mul(e1, q[0]), mul(e2, q[1])));
   const d2of = (t) => norm2([dot(t, e1), dot(t, e2)]);
@@ -1179,7 +1236,6 @@ function fitTube(T, cand, keyOf, loops) {
   // erste Station. Das ENDE ist immer „offen“: das letzte Stück wird durch die Mündungsebene
   // verlängert, die Mündungskurve ist dessen exakter Schnitt mit der Ebene (und wird gegen den
   // Netz-Loop geprüft) — so muss die Kette keinen gemessenen Endpunkt exakt treffen.
-  if (endA.isCircle && Math.abs(dot(sub(endA.circ.center, o), Bn)) > 0.05) return fail('Profilkreis nicht in Bahn-Ebene');
   const chainStart = endA.isCircle ? { p: to2(endA.circ.center), t: d2of(unrot(endA.m)) } : { p: sm[0].p, t: sm[0].t };
   // Biarc-Kette (rekursiv, G1) durch die geglätteten Stationen, dann vereinfacht (s. simplifyChain).
   const nodes = [{ ...chainStart, i: endA.isCircle ? -1 : 0 }];
@@ -1194,20 +1250,25 @@ function fitTube(T, cand, keyOf, loops) {
   // Stücken auskommt wie die vereinfachte Biarc-Kette. Sie wird ZUERST bestimmt, damit die
   // Vereinfachung abbrechen kann, sobald sie nicht mehr kürzer werden kann (Ergebnis wie früher).
   const anc = fitAnchorChain(Q, { ...chainStart, free: endA.isCircle }, FIT_TOL, 1.5, 1.25 * rProf);
-  const simp = simplifyChain(mergePieces(chain), Q, FIT_TOL, MAX_KINK, chainStart.t, anc ? anc.length : Infinity);
+  const merged = mergePieces(chain);
+  // γ = 0: Vereinfachung ohne Knick über das Budget hinaus (g1, s. simplifyChain)
+  const simp = simplifyChain(merged, Q, FIT_TOL, MAX_KINK, chainStart.t, anc ? anc.length : Infinity, gamma === 0);
   // Arbeitsbudget überschritten (Sicherheitsnetz, s. simplifyChain): Anker-Kette, falls vorhanden,
   // sonst bleibt der Kanal facettiert — statt den Worker unabsehbar lange zu blockieren.
   if (simp.overBudget && !anc) return fail('Bahn-Vereinfachung zu aufwendig', { biarcPieces, work: simp.work });
   let chainKind = 'Biarc (vereinfacht)';
   chain = simp.pieces || null; // null: Abbruch (tooMany/overBudget) → nur mit Anker-Kette weiter
+  if (simp.kinked) { chain = merged; chainKind = 'Biarc (G1, unvereinfacht)'; }
   if (anc && (!chain || anc.length <= chain.length)) {
     chain = mergePieces(anc); chainKind = 'Anker (Geraden/Bögen)';
     if (endA.isCircle && Math.abs(kinkOf(chainStart.t, chain[0].ta)) > 1e-9) {
       // Start-Tangente aus der Anfangs-Geraden → Profil-Neigung γ neu (Profil = Mündungskreis bleibt)
       chainStart.t = chain[0].ta;
-      // γ = 0 bleibt 0 (Kreis ⟂ Bahn → Zylinder/Torus); sonst aus der Geraden nachgeschärft
+      // γ = 0 bleibt 0 (Kreis ⟂ Bahn → Zylinder/Torus), solange die Rest-Neigung gNew im
+      // Knick-Budget liegt — das Profil steht dann um gNew gegen die Bahn gekippt (früher bis 0.5°:
+      // Kreise bis r(1−cos 0.5°) ≈ 1e-4 mm neben Zylinder/Torus); sonst aus der Geraden nachgeschärft.
       const gNew = gammaOf(d3of(chainStart.t), endA.m);
-      if (!(gamma === 0 && Math.abs(gNew) < 0.5 * DEG)) { gamma = gNew; mOf = rotG(gamma); }
+      if (!(gamma === 0 && Math.abs(gNew) <= MAX_KINK)) { gamma = gNew; mOf = rotG(gamma); }
     }
   }
   const chainEnd = { p: chain[chain.length - 1].B, t: chain[chain.length - 1].tb };
@@ -1377,21 +1438,74 @@ function fitTube(T, cand, keyOf, loops) {
       if (mn < 0.02) return fail('Übergangskreis schneidet Mündungsebene', { k, mn });
     }
   }
+  // (6b) γ = 0: Zylinder (Achse pc.dir durch profC) und Torus (Seele O/axis/R) baut der Exporter aus
+  // der BAHN, die Rand-Kurven sind das starr mitgeführte Profil. Abschluss-Gate: das Profil darf nur
+  // im Knick-Budget gegen die Bahn kippen — mehr ist ein Fehler der Bahn-Kette (früher z.B. 4.2° am
+  // U-Bogen, Kreise 0.022 mm neben ihren Flächen) → Kanal bleibt facettiert. Liegen die Rand-Kurven
+  // eines Stücks trotzdem messbar (> GAP_TOL) neben dessen Zylinder/Torus (Rest-Neigung im Budget),
+  // wird es wie bei γ ≠ 0 als Extrusions-/Rotationsfläche des mitgeführten Profils emittiert
+  // (pc.swept) — die enthält ihre Rand-Kurven per Konstruktion.
+  const curvePts = (cv) => {
+    if (cv.kind === 'bspline') return cv.ctrl.filter((_, i) => i % 3 === 0); // die exakten Schnittpunkte
+    const yd = cross(cv.axis, cv.refDir), s2 = cv.semi2 ?? cv.radius;
+    return Array.from({ length: 24 }, (_, j) => { const ph = (j / 24) * 2 * Math.PI; return addv(cv.center, addv(mul(cv.refDir, cv.radius * Math.cos(ph)), mul(yd, s2 * Math.sin(ph)))); });
+  };
+  let maxTilt = 0, maxGap = 0, swept = 0;
+  if (gamma === 0) {
+    for (let k = 0; k < nP; k++) {
+      const pc = pieces[k], m = norm(pc.profM);
+      const T0 = pc.kind === 'line' ? pc.dir : norm(cross(pc.axis, pc.ea));
+      maxTilt = Math.max(maxTilt, Math.atan2(len(cross(m, T0)), dot(m, T0)));
+      const dist = pc.kind === 'line'
+        ? (q) => { const w = sub(q, pc.profC), a = dot(w, pc.dir); return Math.abs(len(sub(w, mul(pc.dir, a))) - rProf); }
+        : (q) => { const w = sub(q, pc.O), a = dot(w, pc.axis); return Math.abs(Math.hypot(len(sub(w, mul(pc.axis, a))) - pc.R, a) - rProf); };
+      let gap = 0;
+      for (const cv of [curves[k], curves[k + 1]]) for (const q of curvePts(cv)) gap = Math.max(gap, dist(q));
+      maxGap = Math.max(maxGap, gap);
+      if (gap > GAP_TOL) { pc.swept = true; swept++; }
+    }
+    if (maxTilt > MAX_KINK + 1e-7) return fail('Profil kippt gegen die Bahn', { tiltDeg: maxTilt / DEG, chainKind });
+  }
   // (7) Vertex-Prüfung gegen das Modell (Netz-Vertices liegen bei CAD-Tessellierung exakt auf der Fläche)
   const verts = new Map();
   for (const t of cand.tris) for (let k = 0; k < 3; k++) verts.set(keyOf[t][k], T.V[t][k]);
-  const res = [];
-  for (const v of verts.values()) res.push(vertexResidual(v, pieces, mOf, rProf));
+  const res = [], phiOf = new Map(), probe = { B: Bn };
+  for (const [key, v] of verts) { res.push(vertexResidual(v, pieces, mOf, rProf, probe)); phiOf.set(key, probe.phi); }
   const absRes = res.map(Math.abs);
   const vertDev = { max: Math.max(...absRes), mean: absRes.reduce((x, y) => x + y, 0) / absRes.length, n: absRes.length, medianSigned: median(res) };
   if (!(vertDev.max <= VERT_TOL)) return fail('Netz weicht vom Modell ab', { vertDev, gammaDeg: gamma / DEG, pieces: nP, badVertices: absRes.filter((x) => !(x <= VERT_TOL)).length });
+  // (8) Facetten-Inneres quer zur Bahn: die Vertex-Prüfung sieht nur die Ecken. Eine EBENE
+  // Abflachung (D-Profil), CAD-typisch nur mit Eck-Vertices auf ihren beiden Kanten tesselliert,
+  // liegt mit allen Ecken exakt auf dem Kreis — ihre Dreiecke überspannen quer zur Bahn aber den
+  // ganzen Sehnenwinkel 2α (Abweichung in der Mitte r(1 − cos α), α = 25° → 0.23 mm), normale
+  // Facetten nur eine Umfangsteilung 2π/N (N = 48 → 0.005 mm). Je Dreieck: Spanne Δφ der
+  // Profilwinkel seiner Ecken → Sehnen-Pfeilhöhe r(1 − cos(Δφ/2)). Abgelehnt (Kanal bleibt facettiert,
+  // die Abflachung erhalten), wenn sie VERT_TOL übersteigt (dort läge das Netz weiter vom Modell
+  // weg, als ein Vertex darf), oder wenn ein Dreieck mehr als FACET_SPAN_K-mal so breit ist wie die
+  // typische Teilung des Kanals UND dabei mehr als SAG_MIN abweicht. Beide Grenzen sind fest bzw.
+  // am Kanal gemessen — sie wachsen nicht mit der Größe des geprüften Dreiecks.
+  const spans = [];
+  for (const t of cand.tris) {
+    const a = [phiOf.get(keyOf[t][0]), phiOf.get(keyOf[t][1]), phiOf.get(keyOf[t][2])];
+    if (!a.every(Number.isFinite)) continue;
+    a.sort((x, y) => x - y);
+    spans.push(2 * Math.PI - Math.max(a[1] - a[0], a[2] - a[1], 2 * Math.PI - (a[2] - a[0])));
+  }
+  const sagOf = (sp) => rProf * (1 - Math.cos(sp / 2));
+  const spanRef = median(spans.filter((x) => x > 0.1 * DEG));
+  let spanMax = 0; for (const x of spans) spanMax = Math.max(spanMax, x);
+  const facet = { spanRefDeg: spanRef / DEG, spanMaxDeg: spanMax / DEG, sagMax: sagOf(spanMax) };
+  if (facet.sagMax > VERT_TOL || (spanMax > FACET_SPAN_K * spanRef && facet.sagMax > SAG_MIN)) {
+    return fail('Facette quer zur Bahn zu breit (ebene Abflachung?)', { facet });
+  }
   return {
     radius: rProf, gamma, B: Bn, pieces, curves,
     mouths: [{ curve: 0, planeC: plA.c, planeN: plA.n, nPts: endA.loop.length }, { curve: nP, planeC: plB.c, planeN: plB.n, nPts: endB.loop.length }],
     stats: {
       gammaDeg: gamma / DEG, radius: rProf, stations: P.length, secRms, stationDev, vertDev, mouthDev, endFits,
       biarcPieces, chainKind, lines: pieces.filter((p) => p.kind === 'line').length, arcs: pieces.filter((p) => p.kind === 'arc').length,
-      mouthKinds: [curves[0].kind, curves[nP].kind],
+      mouthKinds: [curves[0].kind, curves[nP].kind], facet,
+      ...(gamma === 0 ? { profileTiltDeg: maxTilt / DEG, curveGap: maxGap, sweptPieces: swept } : {}),
     },
   };
 }

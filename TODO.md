@@ -61,9 +61,14 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
   - **Geneigte/verrundete Loch-Mündungen** — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
     (fischerEbike id=1/id=5: ~10–20° schräg) findet das Rand-Matching keinen Innen-Loop → Fallback.
     Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
-  - **Außen-Zylinder — Restfälle** (Grundfall erledigt 2026-10-26, s. Erledigt „Außenmäntel“): Zapfen auf einer
-    Platte und Stufenwelle (ein Rand ist Innen-Loop einer Fläche), gefaste/verrundete Außenkante ohne Defeaturing
-    (Kegel-Pfad wie bei Bohrungen), konvexe Kegel (`cone_*`-Samples) bleiben facettiert.
+  - **Bohrungs-Pfad härten (Funde aus Runde I)** — HOCH: verdrillte Bohrung (30°) wird als Zylinder exportiert,
+    dicht + strict 0, aber ΔV −17,3 mm³ (Repro `scratchpad/agentM-mantel/adv-twist-bore.mjs`) → `wallSpanOk`/
+    `srcPointsOk` aus dem Mantel-Pfad auch in sharpBorePlan/attemptBore/attemptBoreCurrent einsetzen. MITTEL: Achse
+    und Zentrum aus dem Fit statt aus den Deckebenen — circleOnDeck (1e-5) lehnt dadurch Bohrungen ab, die v2 exakt
+    geschärft hat (c5_r1, Drehlagen von x3/x8/x9). Erkennung: Fase flacher als ~15° zur Achse verhindert die
+    Zylinder-Erkennung (AXIS_PERP 0,26).
+  - **Kegel mit verrundeten Rändern** bleiben auch mit Toggle facettiert (v2 schärft Bänder an geneigten Kegelwänden
+    nicht). Panel 2 markiert Kegel nicht (keine Primitive). Spitzer Kegel (VERTEX_LOOP) in CST/Fusion gegentesten.
   - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
     für Bögen erweiterbar (Naht-Form aus dem Design-Plan).
 
@@ -132,24 +137,27 @@ Kreis-Kanten teilen.
   Außenkontur) = v2 des Defeaturing.
 - [ ] **Optional später: echter Torus** statt Fase (mehr Detail) — Emission ist schon belegt
   (torus-proto). GEBOGENE Löcher: seit 2026-10-24 exakt (tube-sweep.js, s. Erledigt).
-- [ ] **v2: Restfälle Senkung/Fase** — x3 (Rundung an der Kante Bohrung → Kegel) und x5 (beide Senkungskanten
-  verrundet) laufen über den Fasen-Pfad mit einem Kegel durch die Rundung (Mündung R6.010 bzw. 6.218 statt 6.0);
-  x6 (Außenfase mit beidseitig verrundeten Kanten) bleibt gerundet. Braucht „Kegel zwischen zwei Rundungen“
-  bzw. ein Band, das an einem Kegel beginnt. Offene Bänder: mehrere getrennte verrundete Abschnitte je Loop.
-  `node tests/fixtures-v2/check.mjs --only x3,x5,x6`.
+- [ ] **v2: Restfälle nach Runde I** — offene Bänder mit sehr dünnem Steg unter der Rundung (< 0,5·r, z.B. Platte
+  2,5 mit r=1,2 oben UND unten) bleiben jetzt rund (vorher korrekt geschärft; neue Seitenwand-Schranke gegen eckig
+  werdende Halbkreis-/Zylinder-Profile); Kegel/Fase zwischen Rundungen nur in einem Teil eines Loops (offenes Band
+  mit Mittel-Lage) wird nicht bearbeitet; „Senkungen/Fasen geschärft“ zählt heute in bandsDefeatured mit.
+- [ ] **Echtes Teil „Kabelhalter“ (User-STL, ~/Downloads/under_desk_cable_holder_vcd.stl — nicht ins Repo, fremde
+  Lizenz): „Verrundungen entfernen“ fällt komplett in den Rückfall.** Erkennung: 9 Verrundungen, 1 Bohrung; v1 entfernt
+  genau 1 Kanten-Verrundung an einem 0,5 mm dünnen Steg (x ≈ −39…−35, y 2,5…3,0) und setzt die neue Ecke auf
+  (−39,385 | −3,425) — die Steg-Seitenflächen werden nicht nachgezogen → 24 offene Kanten, 2 Orientierungsfehler,
+  auch ohne Bohrung (Stufe 1) → alles facettiert. Zwei Aufgaben (nach Agent F2, der gerade in defeatureBands arbeitet):
+  (1) v1-Fehler an kurzen Verrundungen dünner Stege beheben bzw. dort sicher überspringen; (2) gezielter Rückfall je
+  Merkmal (nur die Operation weglassen, an deren Flächen die offenen Kanten liegen) statt alles zu facettieren;
+  (3) warum v1/v2 die übrigen 8 Verrundungen überspringen (Gate-Gründe je Rundung) — Abdeckung bei echten Teilen.
 - [ ] **Ebenheit nur am Rand geprüft (AUS-Modus, feine Rundungen)** — m32/m64 AUS: eine Fläche ist randeben, ihr
   Inneres leicht gewölbt (flachste Bandschicht in der Deckgruppe) → B-Rep-Volumen weicht 3,6/0,9 mm³ vom Netz ab.
   Abhilfe: auch innere Dreiecksecken unveränderter Flächen prüfen.
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
-- [ ] **Gebogene Kanäle — bestätigte Review-Funde (2026-10-26)**:
-  - HOCH: **U-Bogen-Knick** — `simplifyChain` übernimmt im Rückfall `if (l === k + 1)` das Original-Stück ohne
-    Knick-Prüfung → Knick bis 4,2° (MAX_KINK 0,1°); `fitAnchorChain` teilt Stationen per Projektion und scheitert
-    bei ≥ 180°-Bögen. Folge: Übergangskreise bis 0,022 mm neben den TOROIDAL/CYLINDRICAL-Flächen (strikte
-    Importer!), wasserdicht + occt-Volumen normal. Repro im Review-Scratch (`repro-2-ubend.mjs 4.2 7 12`).
-  - MITTEL: **D-Profil-Kanal wird rund exportiert** — ebene Abflachung (Sehne, α ≤ 25°) fällt in den Querschnitten
-    als Ausreißer raus, Vertex-Prüfung sieht nur Ecken → Abflachung fehlt im STEP, ΔV −0,14 %, step-strict ok.
-    Abhilfe: Facetten-Inneres (Schwerpunkte/Kantenmitten) gegen das Modell prüfen; D-Profil als Negativ-Test.
 - [ ] **Gebogene Kanäle — Rest-Fälle** (Basis erledigt, s. Erledigt 2026-10-24 „tube-sweep.js“):
+  - Anker-Kette mit kurzen Zwischengeraden (< 1,5 mm): S-Kurve mit 1 mm Gerade bleibt eine G1-Biarc-Kette (21 Stücke,
+    teils als Rotations-/Extrusionsfläche) statt 5 exakter Stücke.
+  - Facetten-Prüfung (D-Profil-Schutz) ist bewusst konservativ: sehr unregelmäßige Tessellierung kann facettiert
+    bleiben; UI-Wunsch: Ablehnungsgrund (stats.rejected) in der Ergebniszeile zeigen.
   - Nicht-ebene Bahnen (3D-Biarcs), Sackkanäle (1 Mündung), Mündung auf gekrümmter Fläche/Verrundung,
     Kanäle in Gruppen, die sich mit anderen Flächen eine Region teilen → bleiben derzeit facettiert.
   - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
@@ -196,6 +204,16 @@ Kreis-Kanten teilen.
 ---
 
 ## Erledigt
+
+- [x] **Runde I (2026-10-27): Kanäle, Mäntel/Kegel, Senkungs-Restfälle** —
+  **Kanäle (T):** U-Bögen laufen über die Anker-Kette (3 exakte Stücke statt 15 geknickter; Kreise vorher bis 0,022 mm
+  neben ihren Flächen, jetzt ~1e-6), knickfreie Vereinfachung + Abschluss-Gate, D-Profil-Kanäle bleiben facettiert
+  (Abflachung erhalten), step-strict ohne Fehlalarm an ≥ 180°-Torus-Bändern; tube-regression 13 Fälle.
+  **Mäntel (M):** Zapfen auf Platte, Stufenwelle, konvexe Kegel als CONICAL_SURFACE (cone_frustum/flat 50 → 3, spitzer
+  Kegel 49 → 2 mit VERTEX_LOOP), Fasen/Spitzen an Wellen; Schutz gegen verdrillte Wände (wallSpanOk) und verdeckte
+  Dellen (srcPointsOk). **Senkungen (F2):** Kegel/Fase zwischen zwei Rundungen (x3, x5, x6 exakt), offene Bänder mit
+  mehreren Abschnitten, zwei Altfehler behoben (Körper ohne Rundung wurde eckig: ΔV bis +1719 mm³; Spitze der Breite 0),
+  v1 nur noch an senkrechten Kappen; Härtetest prüft jede Datei streng (61 Körper im Soll).
 
 - [x] **v0.2.1 von Mozilla signiert + GitHub-Release (2026-10-27)** — Add-on-ID `{0f69a2ea-bf50-42ba-8055-dba7d55e509f}`
   (neutrale GUID, User wollte keine Firmen-Domain), Selbstvertrieb (unlisted) über AMO, freigeschaltet nach ~20 min.
