@@ -1,8 +1,8 @@
 import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=2';
 import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
-import { recognizePrimitives } from './primitive-recognition.js?v=14';
-import { detectTubes } from './tube-sweep.js?v=3';
+import { recognizePrimitives } from './primitive-recognition.js?v=15';
+import { detectTubes } from './tube-sweep.js?v=4';
 import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=1';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
@@ -206,7 +206,12 @@ self.addEventListener('message', (event) => {
         progress: { step: 'worker', detail: 'Kanal-Erkennung: suche gebogene Kanäle …', ratio: 0.96 }
       });
       const { tubes, stats } = detectTubes(analysis.normalGroups);
-      analysis.tubeStats = { candidates: stats.candidates, tubes: tubes.length };
+      // Verworfene Kandidaten mitteilen, damit die UI sagen kann, WARUM ein Kanal facettiert blieb.
+      analysis.tubeStats = {
+        candidates: stats.candidates,
+        tubes: tubes.length,
+        rejected: (stats.rejected || []).map((x) => ({ why: String(x.why), tris: x.tris, r0: x.r0 }))
+      };
       if (tubes.length) {
         self.postMessage({
           id,
@@ -214,7 +219,7 @@ self.addEventListener('message', (event) => {
         });
       }
     } catch (e) {
-      analysis.tubeStats = { candidates: 0, tubes: 0 };
+      analysis.tubeStats = { candidates: 0, tubes: 0, rejected: [] };
     }
 
     self.postMessage({ id, ok: true, analysis });

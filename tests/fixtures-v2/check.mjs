@@ -388,6 +388,73 @@ function boreSharpVariant(body, bores, step, sharpCount) {
   };
 }
 
+// Sacklöcher (blind holes, body.holes): die Bohrung endet im Material — der Zylinder reicht nur
+// vom Lochboden (zLo) bis zur Mündung (zHi); unten liegt eine flache Ebene (Lochboden) oder ein
+// Kegel (Bohrspitze, Halbwinkel α = tipDeg/2). Je Loch: ein Zylinder Rc mit genau zwei Randkreisen
+// (zLo, zHi) auf der Lochachse; bei Spitze zusätzlich ein Kegel auf derselben Achse.
+// Volumen: Netz (Polygonzylinder, Spitzenteil als Polyeder) → analytisch (Kreis + Kegel).
+function holesVariant(body, step, sharpCount) {
+  const ent = new Map();
+  for (const line of step.split('\n')) { const m = line.match(/^#(\d+)=(.*);$/); if (m) ent.set(+m[1], m[2]); }
+  const pt = (i) => ent.get(i).match(/,\(([^()]*)\)\)$/)[1].split(',').map(Number);
+  const plac = (ref) => { const m = ent.get(+ref.slice(1)).match(/AXIS2_PLACEMENT_3D\('',(#\d+),(#\d+),(#\d+)\)/); return { loc: pt(+m[1].slice(1)), axis: pt(+m[2].slice(1)) }; };
+  // gedrehter/verschobener Körper: STEP-Punkte und -Richtungen ins Körpersystem zurückbilden
+  const inv = body.transform ? makeTransform(body.transform).inverse : null;
+  const locB = (p) => (inv ? inv(p) : p);
+  const dirB = (v) => { if (!inv) return v; const o = inv([0, 0, 0]), q = inv(v); return [q[0] - o[0], q[1] - o[1], q[2] - o[2]]; };
+  const tipHoles = body.holes.filter((h) => h.kind === 'tip');
+  const fail = (why) => ({ label: `Sackloch: ${why}`, sharpCount, bores: body.holes.length, cones: tipHoles.length, planar: false, volume: NaN, tol: tolAnalytic, target: false });
+  let v = meshVolume(buildMesh(sharpen(body))), aLat = 0, plaus = true;
+  const parts = [];
+  for (const h of body.holes) {
+    const col = body.columns[h.col];
+    const n = col.profile.length;
+    const cx = col.profile.reduce((s, p) => s + p[0], 0) / n, cy = col.profile.reduce((s, p) => s + p[1], 0) / n;
+    let Rc = null, cone = null;
+    for (const e of ent.values()) {
+      let m;
+      if ((m = e.match(/^CYLINDRICAL_SURFACE\('',(#\d+),([\d.]+)\)/))) {
+        const p = plac(m[1]), loc = locB(p.loc);
+        if (Math.hypot(loc[0] - cx, loc[1] - cy) < 0.05 && Math.abs(+m[2] - h.R) < 0.05) Rc = +m[2];
+      }
+      if ((m = e.match(/^CONICAL_SURFACE\('',(#\d+),([\d.]+),(-?[\d.]+)\)/))) {
+        const p = plac(m[1]), loc = locB(p.loc);
+        if (Math.hypot(loc[0] - cx, loc[1] - cy) < 0.05) cone = { a: Math.abs(+m[3]), dir: dirB(p.axis) };
+      }
+    }
+    if (Rc === null) return fail(`kein Zylinder (${col.name})`);
+    const circles = [];
+    for (const e of ent.values()) {
+      const m = e.match(/^CIRCLE\('',(#\d+),([\d.]+)\)/);
+      if (!m) continue;
+      const p = plac(m[1]), loc = locB(p.loc);
+      if (Math.hypot(loc[0] - cx, loc[1] - cy) < 0.05) circles.push({ r: +m[2], z: loc[2] });
+    }
+    const rim = circles.filter((c) => Math.abs(c.r - Rc) < 1e-6).map((c) => c.z).sort((x, y) => x - y);
+    if (rim.length !== 2) return fail(`Randkreise ${rim.length} (${col.name})`);
+    const [zLo, zHi] = rim;
+    const A = Math.abs(polyArea(col.profile)), H = col.z1 - col.z0;
+    v += A * H - Math.PI * Rc * Rc * (zHi - zLo);            // Polygonzylinder → Kreiszylinder
+    aLat += 2 * Math.PI * Rc * (zHi - zLo);
+    plaus = plaus && Math.abs(Rc - h.R) < 0.02 && Math.abs(zLo - col.z0) < 1e-3 && Math.abs(zHi - col.z1) < 1e-3;
+    parts.push(`R${Rc.toFixed(3)} (z ${zLo.toFixed(3)}..${zHi.toFixed(3)})`);
+    if (h.kind === 'tip') {
+      if (!cone) return fail(`kein Kegel (${col.name})`);
+      const aNom = h.tipDeg / 2 * Math.PI / 180;
+      plaus = plaus && Math.abs(cone.a - aNom) < 0.01 && Math.abs(cone.dir[2]) > 0.99;
+      const hNom = h.R / Math.tan(aNom);                       // Kegelhöhe im Netz (Polyeder)
+      v += A * hNom / 3 - Math.PI * Rc * Rc * (Rc / Math.tan(cone.a)) / 3;
+      aLat += Math.PI * Rc * (Rc / Math.sin(cone.a));          // Kegelmantel (für die Facettierungstoleranz)
+      parts[parts.length - 1] += ` + Kegel ${(cone.a * 180 / Math.PI).toFixed(2)}°`;
+    }
+  }
+  return {
+    label: `Sackloch→Zylinder ${parts.join(', ')}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
+    sharpCount, bores: body.holes.length, cones: tipHoles.length, planar: false,
+    volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: body.expect.mode === 'sharp',
+  };
+}
+
 // Außenmantel ohne Bohrung (z. B. Zapfen y2): alles scharf, das Profil-Polygon der kreisrunden Säule
 // durch den Mantel-Kreis Rm ersetzt (mantleInfo). Nur, wenn die STEP einen Mantel-Zylinder trägt.
 function mantleSharpVariant(body, step) {
@@ -687,6 +754,7 @@ async function checkBody(body, occt) {
     if (tag === 'AN' && body.countersinkBoth) {
       for (const c of body.countersinkBoth) { const cv = cskBothVariant(body, c, r.step, roundedPairs(body).filter((p) => p.c !== c.col).length); if (cv) vs.push(cv); }
     }
+    if (tag === 'AN' && body.holes) vs.push(holesVariant(body, r.step, roundedPairs(body).length));
     const m = matchVariants(r, vs, ctx);
     const res = { match: m.hit ? m.hit.label : null, tier: m.tier, target: m.hit ? m.hit.target : false, dV: m.dV, maxDist: m.maxDist };
     out[tag === 'AN' ? 'onMatch' : 'isoMatch'] = res;

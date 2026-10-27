@@ -56,18 +56,14 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 ## Mittlere Priorität
 
 - [ ] **Analytischer STEP-Export — Rest-Fälle** (Voll-Durchgangsbohrungen sind erledigt, siehe unten). Offen:
-  - **Blind­löcher** (Sackloch: 1 Rand-Loop statt 2) — braucht Boden-Cap (flach/rund). 4 der 6 fischerEbike-
-    Bohrungen sind Blindlöcher (vermutlich verrundeter Boden → nicht sauber als Zylinder+Scheibe darstellbar).
-  - **Geneigte/verrundete Loch-Mündungen** — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
+  - **Sacklöcher, Rest:** mit Fase/Senkung an der Mündung, Stufenbohrung, Kugelboden → facettiert.
+  - **Kegel–Kegel-Rundungen**, konkave Fußrundung „Kegel auf Platte“ ungetestet; Panel 2 färbt Kegel nicht.
+  - **Geneigte/verrundete Loch-Mündungen** (auch die 2 eBike-Durchgangslöcher im AUS-Modus) — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
     (fischerEbike id=1/id=5: ~10–20° schräg) findet das Rand-Matching keinen Innen-Loop → Fallback.
     Evtl. Toleranz lockern + per-Vertex-Radialtest als Schutz.
-  - **Fasen-Erkennung flacher als ~15°** (AXIS_PERP 0,26 in primitive-recognition.js) verhindert die Zylinder-
-    Erkennung — Rest aus Runde J (B), betrifft die gemeinsame Erkennung + Golden, daher bewusst offen.
   - **Profil-Bögen als Teil-Zylinder + Fasen-Kegel** — Hauptmasse der Kabelhalter-Datei (Haken-Biegungen r 3–9 mm,
     Logo-Bögen). Größter Hebel für kleinere Dateien (User 2026-10-27: „7 MB zu groß, 0,0001 mm muss nicht
     abgebildet werden“).
-  - **Kegel mit verrundeten Rändern** bleiben auch mit Toggle facettiert (v2 schärft Bänder an geneigten Kegelwänden
-    nicht). Panel 2 markiert Kegel nicht (keine Primitive). Spitzer Kegel (VERTEX_LOOP) in CST/Fusion gegentesten.
   - **Fillets als Teil-Zylinder** (full=false) — bleiben aktuell facettiert; `getOrCreateCircleEdge` ist
     für Bögen erweiterbar (Naht-Form aus dem Design-Plan).
 
@@ -153,10 +149,8 @@ Kreis-Kanten teilen.
   Abhilfe: auch innere Dreiecksecken unveränderter Flächen prüfen.
 - [ ] **Ecken, an denen 3 Verrundungen zusammenlaufen (Kugel-Eckstück)** — v1/v2 überspringen sie bewusst.
 - [ ] **Gebogene Kanäle — Rest-Fälle** (Basis erledigt, s. Erledigt 2026-10-24 „tube-sweep.js“):
-  - Anker-Kette mit kurzen Zwischengeraden (< 1,5 mm): S-Kurve mit 1 mm Gerade bleibt eine G1-Biarc-Kette (21 Stücke,
-    teils als Rotations-/Extrusionsfläche) statt 5 exakter Stücke.
   - Facetten-Prüfung (D-Profil-Schutz) ist bewusst konservativ: sehr unregelmäßige Tessellierung kann facettiert
-    bleiben; UI-Wunsch: Ablehnungsgrund (stats.rejected) in der Ergebniszeile zeigen.
+    bleiben (Ablehnungsgrund steht seit 2026-10-27 in der Ergebniszeile).
   - Nicht-ebene Bahnen (3D-Biarcs), Sackkanäle (1 Mündung), Mündung auf gekrümmter Fläche/Verrundung,
     Kanäle in Gruppen, die sich mit anderen Flächen eine Region teilen → bleiben derzeit facettiert.
   - Spline-Bahnen ergeben viele Bogenstücke (eBike: 16 + 11); ggf. B-Spline-Sweep statt Bogenkette.
@@ -169,10 +163,6 @@ Kreis-Kanten teilen.
   - Lage-Tests haben ein Budget (CONTAIN_BUDGET): riesige Mehrkörper-Netze → unentschieden → V<0-Schalen lösen den
     sicheren Rückfall aus. `shell-volume` im Prüfer überspringt Drehflächen-Schalen (stats.volumeSkipped).
   - Semantik: `watertight=false` erzwingt keinen Rückfall mehr — Downstream-Annahmen „!watertight ⇒ facettiert“ prüfen.
-- [ ] **Kanal-Naht, Rest** (OCP): Nach den Runde-I-Kanal-Fixes sind die eBike-Mikro-Bögen (TooSmallEdge/SelfIntersect)
-  WEG; es bleiben `sa gaps3d=2` — Rand-B-Splines der Kanal-SURFACE_OF_REVOLUTION ~2e-5 mm neben der Naht
-  (OCP-Erwartungsliste führt genau das). Abhilfe im Kanal-Bereich: Mündungs-B-Spline exakt auf die Fläche bzw.
-  Naht versetzen.
 - [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten — alle Dateien
   sind nach den Fixes frisch zu exportieren (dino jetzt 4 Körper ohne kaputte Zusatz-Schalen).
 - [ ] **Release 0.2.2** (nach CST-Rückmeldung zum Kabelhalter + Merge der laufenden Agenten): Version in
@@ -197,6 +187,14 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Parallel-Runde Claude + MiniMax (2026-10-27, 3 Leads)** —
+  (1) `wt/sackloch`: Sacklöcher mit flachem Boden (Kreisscheibe) und Bohrspitze 118°/120° (konkaver Kegel + VERTEX_LOOP),
+  auch bei Toggle AUS; Rückfall je Bohrung (blockedBores/boreCulprits, boresDropped, STLREV_TEST_BREAK=bore); Härtetest
+  s1–s7. Befund: das fischerEbike hat KEINE Sacklöcher (8 der 10 „Bohrungen“ sind Kanal-Stücke, 2 Durchgangslöcher mit
+  verrundeter Mündung). (2) `wt/fasen-kegel`: Fasen 10–15° störten den Radius-Fit der Erkennung → Strikt-Durchlauf
+  (Welle mit flacher Fase 130 → 4 Flächen); v2c `defeatureConeBands` schärft Rundungen an Kegelwänden (Kegelstumpf
+  834 → 3 Flächen). (3) `wt/kanal-rest`: Kanal-Naht exakt (OCP gaps3d 2 → 0, Erwartungsliste bereinigt), kurze
+  Zwischengeraden in Anker-Ketten (S-Kurve 21 → 5 Stücke), Ablehnungsgrund in der Ergebniszeile. Golden unverändert.
 - [x] **Kabelhalter-Senkung (2026-10-27, `wt/senkung-kabel`, Lead Claude + Code MiniMax)** — Fasen-Pfad (matchRims)
   ordnete Mündungskreise über Kreuz zu (Suchfenster CHAMFER_MAX 3 mm = Plattendicke) → Kegel quer durch die Bohrung,
   Kreiskanten doppelt gleichsinnig, Stufe 1. Jetzt nur Kreise axial außerhalb des eigenen Randes, nächster gewinnt;

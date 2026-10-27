@@ -7,19 +7,24 @@
 // (CST CAD Navigator, ACIS) verlieren Flächen. Der Wächter prüft je Bohrungs-Zylinder, Außenmantel,
 // Kegel-Mantel, Fasen-Kegel und Kanal-Stück (a) die effektive Normale gegen die Wicklungs-Normalen der
 // ersetzten Original-Dreiecke und (b) den Umlaufsinn der Ränder; Widerspruch →
-// report.orientationGuardFailures + Fallback (Stufe 1: ohne Bohrungen/Mäntel/Kegel/Kanäle, Defeaturing
-// bleibt; Stufe 2: facettiert).
+// report.orientationGuardFailures + Fallback (Rückfall je Bohrung: nur die betroffene Bohrung bleibt
+// facettiert; sonst Stufe 1: ohne Bohrungen/Mäntel/Kegel/Kanäle, Defeaturing bleibt; Stufe 2: facettiert).
 //
-//   Positiv:  alle Samples (AN/AUS) + Welle mit gefasten Außenkanten (gen.mjs) + Synthetik-Kanäle A–C
+//   Positiv:  alle Samples (AN/AUS) + Welle mit gefasten Außenkanten (gen.mjs) + Sacklöcher s1/s2/s5/s6/s7
+//             (gen.mjs: Zylinder + flacher Boden bzw. Kegel-Spitze) + Synthetik-Kanäle A–C
 //             aus tube-regression → kein Fehlalarm
 //   Negativ:  Test-Hook STLREV_TEST_FLIP = bore | mantle | mantlecone | cone | tube | tubecurve verdreht
-//             die Flächen ('mantlecone' = konvexe Kegel-Mäntel inkl. Kegel mit Spitze und Mantel-Fasen)
+//             die Flächen ('mantlecone' = konvexe Kegel-Mäntel inkl. Kegel mit Spitze und Mantel-Fasen;
+//             'bore' auch am Sackloch mit Bohrspitze — dort muss beim Rückfall der Kegel mit verschwinden)
 //     (1) nur melden (STLREV_TEST_GUARD_REPORT_ONLY=1): Wächter schlägt an, das Wasserdicht-
 //         Verdikt NICHT — und tests/step-strict.mjs findet den Fehler unabhängig (orient-curved)
 //     (2) mit Fallback: Export fällt sauber zurück — wasserdicht, streng ohne Orientierungs-
-//         Verstöße, die verdrehte Flächenart ist nicht mehr enthalten, Defeaturing bleibt (Stufe 1)
+//         Verstöße, die verdrehte Flächenart ist nicht mehr enthalten, Defeaturing bleibt
 //   Rückfall je Merkmal: Test-Hook STLREV_TEST_BREAK = v1 | v2 | v2b verdirbt EINE Entrundung (offene
 //             Hülle) → nur sie bleibt facettiert, die übrigen bleiben scharf, keine Fallback-Stufe
+//   Rückfall je Bohrung: Test-Hook STLREV_TEST_BREAK = bore verdirbt EINE Bohrung (ihre Mündung
+//             bleibt ungetaggt → offene Kreis-Kante) → nur sie bleibt facettiert, die übrigen bleiben
+//             analytisch, keine Fallback-Stufe (u. a. Sackloch-Mix s7: 2 Sacklöcher + Durchgangsloch)
 //   Laufzeit: Wächter-Anteil am Export (eBike; mit --stress zusätzlich 50k-Torus)
 //
 // Ausführen:  npm run test:orient          (Exit 0 = grün)
@@ -136,6 +141,19 @@ for (const on of [true, false]) {
   check(r.orientationGuardFailures === 0 && r.fallbackStage === 0 && r.mantlesConverted === 1 && r.mantleChamfersConverted === 2,
     `${'Welle mit gefasten Außenkanten (gen.mjs)'.padEnd(48)} ${on ? 'AN ' : 'AUS'}  Wächter 0 (analytisch: ${r.mantlesConverted} Mantel, ${r.mantleChamfersConverted} Fasen-Kegel)`);
 }
+// Sacklöcher (blind holes, Härtetest s1/s2/s5/s6/s7 aus gen.mjs): Zylinder + flacher Boden bzw.
+// Kegel-Spitze (VERTEX_LOOP); s5/s6 sind gedreht/verschoben, s7 hat 3 Bohrungen (2 Sacklöcher
+// + 1 Durchgangsloch) → kein Fehlalarm, kein Fallback, alle Bohrungen analytisch.
+for (const id of ['s1', 's2', 's5', 's6', 's7']) {
+  const body = G.BODIES.find((b) => b.id === id);
+  const want = id === 's7' ? 3 : 1;
+  for (const on of [true, false]) {
+    const { res } = exportWith(genGroups(id, body), on);
+    const r = res.report;
+    check(r.orientationGuardFailures === 0 && r.fallbackStage === 0 && r.boresConverted === want,
+      `${('Härtetest ' + id + ' (Sackloch)').padEnd(48)} ${on ? 'AN ' : 'AUS'}  Wächter 0 (analytisch: ${r.boresConverted} Bohrungen)`);
+  }
+}
 for (const letter of ['A', 'B', 'C']) {
   const { res } = exportWith(synthGroups(letter), true);
   const r = res.report;
@@ -149,6 +167,10 @@ const NEG = [
   { flip: 'bore', on: true, src: () => sampleGroups('block_with_hole.stl'), name: 'block_with_hole', gone: (r) => r.boresConverted === 0 },
   { flip: 'bore', on: false, src: () => sampleGroups('washer_thin.stl'), name: 'washer_thin', gone: (r) => r.boresConverted === 0 },
   { flip: 'bore', on: true, src: () => sampleGroups(EBIKE), name: 'eBike verrundet', gone: (r) => r.boresConverted === 0, keepsDefeature: true },
+  // Sackloch mit Bohrspitze: Zylinder + Kegel (VERTEX_LOOP) — der Kegel muss beim Rückfall mit
+  // verschwinden, sonst bliebe eine CONICAL_SURFACE im Export stehen.
+  { flip: 'bore', on: true, src: () => genGroups('s2', G.BODIES.find((b) => b.id === 's2')), name: 'Härtetest s2 (Sackloch mit Bohrspitze: Zylinder + Kegel mit VERTEX_LOOP)', gone: (r, s) => r.boresConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
+  { flip: 'bore', on: false, src: () => genGroups('s2', G.BODIES.find((b) => b.id === 's2')), name: 'Härtetest s2 (Sackloch mit Bohrspitze: Zylinder + Kegel mit VERTEX_LOOP)', gone: (r, s) => r.boresConverted === 0 && count(s, /CONICAL_SURFACE\(/g) === 0 },
   { flip: 'mantle', on: true, src: () => sampleGroups('cylinder.stl'), name: 'cylinder', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: false, src: () => sampleGroups('washer_thin.stl'), name: 'washer_thin', gone: (r) => r.mantlesConverted === 0 },
   { flip: 'mantle', on: true, src: () => sampleGroups('washer_filleted.stl'), name: 'washer_filleted (Mantel + Bohrung + Kegel)', gone: (r) => r.mantlesConverted === 0 },
@@ -180,10 +202,10 @@ for (const n of NEG) {
   const { res } = exportWith(g, n.on, n.flip, false);
   const r = res.report, s = strictKinds(res.step);
   const orientBad = (s['orient-curved'] || 0) + (s['orient-plane'] || 0) + (s['loop-chain'] || 0) + (s['edge-use'] || 0) + (s['outer-bound'] || 0);
-  check(r.orientationGuardFailures > 0 && r.fallbackStage >= 1, `Fallback ausgelöst (Stufe ${r.fallbackStage}, Wächter ${r.orientationGuardFailures})`);
+  check(r.orientationGuardFailures > 0 && (r.fallbackStage >= 1 || r.boresDropped > 0), `Fallback ausgelöst (Stufe ${r.fallbackStage}, ${r.boresDropped} Bohrungen zurückgenommen, Wächter ${r.orientationGuardFailures})`);
   check(r.watertight && orientBad === 0, `Ergebnis wasserdicht, streng ohne Topologie-/Orientierungs-Verstöße ${JSON.stringify(s)}`);
   check(n.gone(r, res.step), 'verdrehte Flächenart nicht mehr im Export');
-  if (n.keepsDefeature) check(r.fallbackStage === 1 && (r.bandsDefeatured > 0 || r.filletsDefeatured > 0), `Defeaturing bleibt erhalten (Stufe 1, ${r.bandsDefeatured} Bänder, ${r.cornersDefeatured} Ecken)`);
+  if (n.keepsDefeature) check((r.fallbackStage === 1 || r.boresDropped > 0) && (r.bandsDefeatured > 0 || r.filletsDefeatured > 0), `Defeaturing bleibt erhalten (Stufe ${r.fallbackStage}, ${r.bandsDefeatured} Bänder, ${r.cornersDefeatured} Ecken)`);
 }
 
 // ── Rückfall je Merkmal (Entrundung) ────────────────────────────────────────
@@ -209,6 +231,41 @@ for (const b of BREAK) {
   check(r.filletsDefeatured === b.want.fillets && r.bandsDefeatured === b.want.bands && r.cornersDefeatured === b.want.corners,
     `übrige Entrundungen bleiben (v1 ${r.filletsDefeatured}/${b.want.fillets}, v2 ${r.bandsDefeatured}/${b.want.bands}, v2b ${r.cornersDefeatured}/${b.want.corners})`);
   check(r.watertight && Object.keys(s).length === 0, `wasserdicht, streng ohne Verstöße ${JSON.stringify(s)}`);
+}
+
+// ── Rückfall je Bohrung ────────────────────────────────────────────────────
+// Test-Hook STLREV_TEST_BREAK = 'bore' verdirbt die ERSTE umgewandelte Bohrung: ihre Mündung bleibt
+// ohne circleRim-Tag → die Kreis-Kante wird nur vom Zylinder genutzt (offene Kreis-Kante). Soll: nur
+// diese Bohrung bleibt facettiert, die übrigen bleiben analytisch — keine Fallback-Stufe, wasserdicht,
+// streng sauber (vorher: ALLES Bohrungen facettiert, globaler Fallback).
+const BORE_CASES = [
+  { on: true, src: () => fixtureGroups('v2_x_drei_loecher.stl'), name: 'v2_x_drei_loecher (3 Bohrungen)', n: 3, bands: false },
+  // AUS: die Mündungen des Härtetests tragen eine Rundung r=0.8 — ohne Entrundung liegt der
+  // Bohrungs-Rand NICHT in der Deckebene, die Bohrung bleibt dort facettiert (n = 0). Der eBike
+  // OHNE Rundungen hat scharfe Mündungen → 2 Bohrungen, auch im AUS-Pfad analytisch.
+  { on: false, src: () => sampleGroups(EBIKE_PLAIN), name: 'eBike ohne Rundungen (2 Bohrungen)', n: 2, bands: false },
+  { on: true, src: () => sampleGroups(EBIKE), name: 'eBike verrundet (2 Bohrungen)', n: 2, bands: true },
+  // Sackloch-Mix: 2 Sacklöcher (flach + Spitze) + 1 Durchgangsloch = 3 Bohrungen
+  { on: true, src: () => genGroups('s7', G.BODIES.find((b) => b.id === 's7')), name: 'Härtetest s7 (Sackloch flach + Sackloch Spitze + Durchgangsloch)', n: 3, bands: false },
+  { on: false, src: () => genGroups('s7', G.BODIES.find((b) => b.id === 's7')), name: 'Härtetest s7 (Sackloch flach + Sackloch Spitze + Durchgangsloch)', n: 3, bands: false },
+];
+for (const c of BORE_CASES) {
+  origLog(`\nRückfall je Bohrung STLREV_TEST_BREAK=bore — ${c.name} (${c.on ? 'AN' : 'AUS'})`);
+  const g = c.src();
+  // (1) ohne Hook: alle Bohrungen analytisch → n (Bezug)
+  delete process.env.STLREV_TEST_BREAK;
+  const base = exportWith(g, c.on).res.report;
+  const n = base.boresConverted;
+  if (c.n !== null) check(n === c.n, `ohne Hook: ${n} Bohrungen analytisch (erwartet ${c.n}) — Stufe ${base.fallbackStage}, ${base.featuresDropped} Merkmale, ${base.boresDropped} Bohrungen zurückgenommen`);
+  // (2) mit Hook: die erste Bohrung ist verdorben
+  process.env.STLREV_TEST_BREAK = 'bore';
+  let res;
+  try { res = quiet(() => buildVolumeStepBrepV2({ normalGroups: g, defeature: c.on })); } finally { delete process.env.STLREV_TEST_BREAK; }
+  const r = res.report, s = strictKinds(res.step);
+  check(r.fallbackStage === 0 && r.boresDropped === 1 && r.boresConverted === n - 1 && r.featureRetries >= 1,
+    `nur die verdorbene Bohrung zurückgenommen (Stufe ${r.fallbackStage}, ${r.boresDropped} gesperrt, ${r.boresConverted}/${n} analytisch, ${r.featureRetries} Neubau)`);
+  check(r.watertight && Object.keys(s).length === 0, `wasserdicht, streng ohne Verstöße ${JSON.stringify(s)}`);
+  if (c.bands) check(r.bandsDefeatured > 0, `übrige Bänder bleiben erhalten (${r.bandsDefeatured})`);
 }
 
 // ── Laufzeit ────────────────────────────────────────────────────────────────

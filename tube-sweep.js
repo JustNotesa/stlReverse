@@ -837,6 +837,45 @@ const devTo = (p, t, kappa, q) => { const n = [-t[1], t[0]], d = sub2(q, p); if 
 // Bogenlängen-Parameter der Projektion von q auf das Stück
 const uOf = (p, t, kappa, q) => { const d = sub2(q, p); if (Math.abs(kappa) < 1e-12) return dot2(d, t); const n = [-t[1], t[0]], C = add2(p, mul2(n, 1 / kappa)); const a0 = sub2(p, C), w = sub2(q, C); let th = Math.atan2(cr2(a0, w), dot2(a0, w)) * Math.sign(kappa); if (th < -Math.PI / 2) th += 2 * Math.PI; return th / Math.abs(kappa); };
 
+// Kurze Zwischengerade (< minLen) zwischen zwei Bögen: Bogen (Start p,t, Krümmung neu gefittet) →
+// Gerade (Länge L) → Bogen (tangential, Krümmung gefittet). Gesucht über Stations-Indizes j1 (erste
+// Station der Geraden) und j2 (erste Station des nächsten Bogens) plus feine u/L-Raster dazwischen.
+function tryLineInsert(p, t, kappa, pts, jLo, jHi, tol, maxLen) {
+  let best = null;
+  for (let j1 = Math.max(3, jLo); j1 <= Math.min(jHi, pts.length - 4); j1++) {
+    const before = pts.slice(0, j1);
+    const kc = tangentArcFit(p, t, before).kappa;          // Krümmung OHNE die Geraden-Stationen
+    let dev1 = 0, ss1 = 0; for (const q of before) { const d = devTo(p, t, kc, q); dev1 = Math.max(dev1, d); ss1 += d * d; }
+    if (dev1 > tol) continue;
+    const uA = uOf(p, t, kc, pts[j1 - 1]), uB = uOf(p, t, kc, pts[j1]);
+    for (let a = 0; a <= 6; a++) {
+      const u = uA + (uB - uA) * a / 6;
+      if (!(u > 1e-6)) continue;
+      const P1 = pointOn(p, t, kc, u), T1 = norm2(tangentOn(t, kc, u));
+      let devL = 0, ssL = 0;
+      for (let j2 = j1; j2 <= pts.length - 3; j2++) {
+        if (j2 > j1) { const d = Math.abs(cr2(T1, sub2(pts[j2 - 1], P1))); devL = Math.max(devL, d); ssL += d * d; }
+        if (devL > tol) break;
+        const lA = j2 > j1 ? dot2(sub2(pts[j2 - 1], P1), T1) : 0, lB = dot2(sub2(pts[j2], P1), T1);
+        if (lA > maxLen) break;
+        for (let b = 0; b <= 6; b++) {
+          const L = lA + (lB - lA) * b / 6;
+          if (!(L >= 0.05) || L > maxLen) continue;
+          const P2 = add2(P1, mul2(T1, L)), after = pts.slice(j2);
+          const kn = tangentArcFit(P2, T1, after).kappa;
+          // Auswahl nach Fehlerquadratsumme (nicht nach der Max-Abweichung): die Stationen rauschen
+          // ~0.005 mm, der Minimax-Sieger lag gemessen um 0.1 mm in L daneben (S14: L 1.3 statt 1.4,
+          // Bogen 2 R 8.08 statt 8) → Endrichtung verkippt, fitTube hängte ein Extra-Endstück an.
+          let dev = Math.max(dev1, devL), ss = ss1 + ssL;
+          for (const q of after) { const d = devTo(P2, T1, kn, q); dev = Math.max(dev, d); ss += d * d; if (dev > tol || (best && ss >= best.ss)) break; }
+          if (dev <= tol && (!best || ss < best.ss)) best = { dev, ss, kc, u, P1, T1, L, P2, kn, j2 };
+        }
+      }
+    }
+  }
+  return best;
+}
+
 function fitAnchorChain(Q, start, tol, minLen, rMin) {
   const s = [0]; for (let i = 1; i < Q.length; i++) s.push(s[i - 1] + len2(sub2(Q[i], Q[i - 1])));
   const anchors = findAnchors(Q, s, tol, minLen, rMin);
@@ -855,6 +894,7 @@ function fitAnchorChain(Q, start, tol, minLen, rMin) {
   }
   let kappa = kappaFor(p, t, anchors[0].kind, Q.slice(0, anchors[0].i1 + 1));
   let iFrom = 0; // erste Station, die das aktuelle Stück abdecken muss
+  let inserted = false; // mindestens eine kurze Zwischengerade eingefügt (→ polishChain)
   for (let k = 0; k < anchors.length; k++) {
     const next = anchors[k + 1];
     if (!next) {
@@ -875,10 +915,10 @@ function fitAnchorChain(Q, start, tol, minLen, rMin) {
     const us = ptsAll.map((q) => uOf(p, t, kappa, q));
     const splitAt = (u) => { let j = 0; while (j < us.length && us[j] <= u) j++; return j; };
     const evalU = (u) => {
-      const P = pointOn(p, t, kappa, u), Tn = tangentOn(t, kappa, u);
       const j = splitAt(u);
       const before = ptsAll.slice(0, j), after = ptsAll.slice(j);
       if (after.length < 2) return { dev: Infinity };
+      const P = pointOn(p, t, kappa, u), Tn = tangentOn(t, kappa, u);
       const kn = kappaFor(P, Tn, next.kind, after);
       let dev = 0;
       for (const q of before) dev = Math.max(dev, devTo(p, t, kappa, q));
@@ -898,17 +938,96 @@ function fitAnchorChain(Q, start, tol, minLen, rMin) {
       else { a = x1; x1 = x2; f1 = f2; x2 = a + gr * (b - a); f2 = evalU(x2).dev; }
     }
     const u = 0.5 * (a + b), e = evalU(u);
-    if (!(e.dev <= tol)) return null;
+    if (!(e.dev <= tol)) {
+      // Direkter Übergang Bogen→Bogen passt nicht: kurze Zwischengerade versuchen (S-/C-Kurven
+      // mit Geraden < minLen, die kein eigener Anker werden)
+      let ins = null, kJump = k;
+      if (anchors[k].kind === 'arc' && next.kind === 'arc') {
+        // Der erste Bogen-Anker danach kann die Zwischengerade mitgeschluckt haben (sein Kreis
+        // fasst Geraden-Anfang und Bogen-Anfang) → alle unmittelbar folgenden Bogen-Anker gehören
+        // zum selben Bogen; der eingefügte Bogen deckt sie alle ab.
+        let last = k + 1;
+        while (last + 1 < anchors.length && anchors[last + 1].kind === 'arc') last++;
+        const ptsExt = Q.slice(iFrom, anchors[last].i1 + 1);
+        ins = tryLineInsert(p, t, kappa, ptsExt, Math.max(anchors[k].i1 - 12, iFrom) - iFrom, Math.min(next.i0 + 8, anchors[last].i1) - iFrom, tol, 2 * minLen);
+        if (ins) kJump = last;
+      }
+      if (!ins) return null;
+      out.push({ p, t, kappa: ins.kc, len: ins.u });
+      out.push({ p: ins.P1, t: ins.T1, kappa: 0, len: ins.L });
+      p = ins.P2; t = ins.T1; kappa = ins.kn;
+      iFrom = iFrom + ins.j2;
+      k = kJump - 1; // continue → nächstes Stück = erster Anker NACH den abgedeckten Bögen
+      inserted = true;
+      continue;
+    }
     out.push({ p, t, kappa, len: u });
     p = e.P; t = norm2(e.Tn); kappa = e.kn;
     iFrom = iFrom + e.j;
   }
-  // in Stück-Format (A, B, ta, tb, C, R, th) umsetzen
+  // Mit eingefügter Zwischengerade: Kette global nachschärfen (s. polishChain)
+  const fin = inserted ? polishChain(Q, out, tol, !!start.free) : out;
+  return toPieces2(fin);
+}
+// Kette (p, t, κ, Länge je Stück) in Stück-Format (A, B, ta, tb, C, R, th) umsetzen
+function toPieces2(out) {
   return out.map(({ p: A, t: ta, kappa: kp, len: L }) => {
     const B = pointOn(A, ta, kp, L), tb = tangentOn(ta, kp, L);
     if (Math.abs(kp) < 1e-12) return { kind: 'line', A, B, ta, tb: ta };
     return { kind: 'arc', A, B, C: add2(A, mul2([-ta[1], ta[0]], 1 / kp)), R: 1 / Math.abs(kp), th: kp * L, ta, tb };
   });
+}
+// G1-Kette global nachschärfen: Krümmungen, Stücklängen (und bei freiem Start die Startrichtung)
+// per Koordinatenabstieg auf die Fehlerquadratsumme der Stationen, Nebenbedingung max ≤ tol.
+// Grund: die Kette wird Stück für Stück aufgebaut; mit kurzen Zwischengeraden summieren sich die
+// Richtungsfehler der Bögen (Stationsrauschen ~0.005 mm) auf ~0.1° — die Endgerade verkippt und
+// fitTube hängt dann ein Extra-Endstück an (gemessen S14/SA: 6 statt 5 Stücke).
+function polishChain(Q, out0, tol, freeStart) {
+  const n = out0.length;
+  const x = { ang: 0, k: out0.map((o) => o.kappa), L: out0.map((o) => o.len) };
+  const build = (s) => {
+    const res = []; let p = out0[0].p, t = rot2(out0[0].t, s.ang);
+    for (let i = 0; i < n; i++) {
+      let L = s.L[i];
+      if (i === n - 1) { L = uOf(p, t, s.k[i], Q[Q.length - 1]); if (!(L > 1e-6)) return null; }
+      if (!(L > 1e-6)) return null;
+      res.push({ p, t, kappa: s.k[i], len: L });
+      p = pointOn(p, t, s.k[i], L); t = norm2(tangentOn(t, s.k[i], L));
+    }
+    return res;
+  };
+  const score = (s) => {
+    const o = build(s); if (!o) return null;
+    const pcs = toPieces2(o);
+    let ss = 0, mx = 0;
+    for (const q of Q) { const d = distToChain2(q, pcs); ss += d * d; if (d > mx) mx = d; }
+    return mx <= tol ? { ss, o } : null;
+  };
+  let cur = score(x);
+  if (!cur) return out0;
+  const isArc = out0.map((o) => Math.abs(o.kappa) >= 1e-12);
+  const step = { ang: 0.05 * DEG, k: out0.map((o) => 0.002 * Math.abs(o.kappa)), L: out0.map(() => 0.02) };
+  for (let round = 0; round < 40; round++) {
+    let improved = false;
+    const tryMove = (apply) => {
+      for (const sg of [1, -1]) {
+        const y = { ang: x.ang, k: [...x.k], L: [...x.L] };
+        apply(y, sg);
+        const r = score(y);
+        if (r && r.ss < cur.ss) { Object.assign(x, y); cur = r; improved = true; return; }
+      }
+    };
+    if (freeStart) tryMove((y, sg) => { y.ang += sg * step.ang; });
+    for (let i = 0; i < n; i++) {
+      if (isArc[i]) tryMove((y, sg) => { y.k[i] += sg * step.k[i]; });
+      if (i < n - 1) tryMove((y, sg) => { y.L[i] += sg * step.L[i]; });
+    }
+    if (!improved) {
+      step.ang /= 2; step.k = step.k.map((v) => v / 2); step.L = step.L.map((v) => v / 2);
+      if (step.L[0] < 1e-4) break;
+    }
+  }
+  return cur.o;
 }
 
 // Rekursive Biarc-Kette zwischen den Knoten (Abweichung der Roh-Stationen ≤ tol)
@@ -1386,7 +1505,15 @@ function fitTube(T, cand, keyOf, loops) {
   };
   if (!endA.isCircle && !extendEnd(true, plA, inA)) return fail('Anfangs-Stück erreicht Mündung A nicht');
   if (!extendEnd(false, plB, inB)) return fail('End-Stück erreicht Mündung B nicht');
-  for (let k = 0; k < nP; k++) { pieces[k].profC = profs[k].c; pieces[k].profM = profs[k].m; }
+  for (let k = 0; k < nP; k++) {
+    pieces[k].profC = profs[k].c; pieces[k].profM = profs[k].m;
+    // Seam-Referenz des Profilkreises im Profil-Frame (refOf) mitführen: das Profil wird starr
+    // mitgeführt (Bögen: Drehung um Achsen ∥ Bn, Geraden: Verschiebung) → refOf wird konsistent
+    // transportiert. Die Naht der SURFACE_OF_REVOLUTION (v = 0) läuft dann durch den refDir-Vertex
+    // beider Übergangskreise und durch den Mündungs-Vertex. Sonst schneidet OCCT die
+    // B-Spline-Mündung neben der Naht → 3D-Lücke ~2e-5 mm (> 1e-6).
+    pieces[k].profRef = refOf(profs[k].m);
+  }
   // Kurven: 0 = Mündung A, 1..nP−1 = Übergänge, nP = Mündung B. sense +1 = Umlauf positiv um die
   // Bahnrichtung (Kurvenachse ≈ +T), −1 = negativ (Achse ≈ −T).
   const curves = profs.map((pf) => ({ kind: 'circle', center: pf.c, axis: pf.m, refDir: refOf(pf.m), radius: rProf, sense: 1 }));
@@ -1416,7 +1543,14 @@ function fitTube(T, cand, keyOf, loops) {
       const p = X(0.5 * (a + b));
       pts.push(sub(p, mul(pl.n, dot(sub(p, pl.c), pl.n))));
     }
-    if (!isStart) pts.reverse();
+    if (!isStart) {
+      pts.reverse();
+      // End-Mündung: φ = 0 wieder an den Anfang drehen (Start-Vertex = p(0) auf der Naht).
+      // Nach dem Umdrehen wäre pts[0] = p(71) (φ = 355°) — der Mündungs-Vertex läge dann neben
+      // der Naht der Rotationsfläche; OCCT müsste den B-Spline dort auftrennen → 3D-Lücke
+      // ~2e-5 mm (> 1e-6). Reihenfolge [p(0), p(71), p(70), …, p(1)] (Umlaufsinn bleibt).
+      const p0 = pts.pop(); pts.unshift(p0);
+    }
     let c = [0, 0, 0]; for (const p of pts) c = addv(c, p); c = mul(c, 1 / N);
     const sp = closedCubicSpline(pts);
     if (!sp) return null;
