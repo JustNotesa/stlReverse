@@ -190,6 +190,156 @@ export function fitCircle2d(pts) {
   return { c: [cxO, cyO], r: rO, maxRes };
 }
 
+/**
+ * Kreis-Fit mehrerer Ebenen mit GEMEINSAMER Mitte (spec-T2d):
+ * eine Mitte c, je Ebene ein eigener Radius r_l.
+ *
+ * Der Einzelfit einer kurzen Ebene ist entlang der Mittelsenkrechten schlecht
+ * bestimmt (Fehler ∝ Rauschen / Bogenwinkel) — der gemeinsame Fit über alle
+ * Ebenen nutzt die Kopplung der Radien (bei einem Kegel: R_lo − R_hi genau
+ * bekannt) und liefert eine viel bessere Mitte.
+ *
+ * Algebraisch (linear): u² + v² = 2·cu·u + 2·cv·v + k_l  (k_l = r_l² − |c|²)
+ * → kleinste Quadrate über (cu, cv, k_1..k_L) per Normalgleichungen (die
+ * Punkte vorher um den Gesamtschwerpunkt verschoben und skaliert wie in
+ * fitCircle2d). Danach 4 Gauss-Newton-Schritte geometrisch (Residuen
+ * |p − c| − r_l, Unbekannte (cu, cv, r_1..r_L)).
+ *
+ * levels: [[ [u,v],… ], …] (je Ebene ≥ 2 Punkte)
+ * → { c:[u,v], r:[r_l], maxRes } | null (zu wenig Punkte, singulär, unbrauchbare Radien)
+ */
+export function fitCoaxial2d(levels) {
+  const Lv = [];
+  for (const lv of (levels || [])) if (lv && lv.length >= 2) Lv.push(lv);
+  if (!Lv.length) return null;
+  const L = Lv.length;
+  let n = 0;
+  for (const lv of Lv) n += lv.length;
+  if (n < 3) return null;
+
+  // Schwerpunkt + Skalierung (wie fitCircle2d — sonst Kasa gegen große Werte)
+  let mx = 0, my = 0;
+  for (const lv of Lv) for (const p of lv) {
+    if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) return null;
+    mx += p[0]; my += p[1];
+  }
+  mx /= n; my /= n;
+  let scale = 0;
+  for (const lv of Lv) for (const p of lv) scale = Math.max(scale, Math.hypot(p[0] - mx, p[1] - my));
+  if (!(scale > 0) || !Number.isFinite(scale)) return null;
+  const N = Lv.map((lv) => lv.map((p) => [(p[0] - mx) / scale, (p[1] - my) / scale]));
+
+  // ── algebraisch: Normalgleichungen für (cu, cv, k_1..k_L) ──────────────────
+  const dim = 2 + L;
+  const M = [], B = new Array(dim).fill(0);
+  for (let i = 0; i < dim; i++) M.push(new Array(dim).fill(0));
+  for (let l = 0; l < L; l++) {
+    for (const p of N[l]) {
+      const x = p[0], y = p[1];
+      const idx = [0, 1, 2 + l];
+      const val = [2 * x, 2 * y, 1];
+      const yv = x * x + y * y;
+      for (let a = 0; a < 3; a++) {
+        if (!val[a]) continue;
+        B[idx[a]] += val[a] * yv;
+        for (let b = 0; b < 3; b++) M[idx[a]][idx[b]] += val[a] * val[b];
+      }
+    }
+  }
+  const sol = solveLin(M, B);
+  if (!sol) return null;
+  let cu = sol[0] / 2, cv = sol[1] / 2;
+  const rr = new Array(L);
+  for (let l = 0; l < L; l++) {
+    const r2 = sol[2 + l] + cu * cu + cv * cv;
+    if (!(r2 > 0) || !Number.isFinite(r2)) return null;
+    rr[l] = Math.sqrt(r2);
+  }
+
+  // ── 4 Gauss-Newton-Schritte (geometrisch: ‖p − c‖ − r_l minimieren) ────────
+  for (let it = 0; it < 4; it++) {
+    const G = [], GG = new Array(dim).fill(0);
+    for (let i = 0; i < dim; i++) G.push(new Array(dim).fill(0));
+    const sjx = new Array(L).fill(0), sjy = new Array(L).fill(0);
+    const sres = new Array(L).fill(0), cnt = new Array(L).fill(0);
+    let m00 = 0, m01 = 0, m11 = 0, g0 = 0, g1 = 0, bad = false;
+    for (let l = 0; l < L; l++) {
+      for (const p of N[l]) {
+        const dx = cu - p[0], dy = cv - p[1];
+        const dist = Math.hypot(dx, dy);
+        if (!(dist > 0)) { bad = true; break; }
+        const res = dist - rr[l];
+        const jx = dx / dist, jy = dy / dist;
+        m00 += jx * jx; m01 += jx * jy; m11 += jy * jy;
+        sjx[l] += jx; sjy[l] += jy; sres[l] += res; cnt[l]++;
+        g0 += jx * res; g1 += jy * res;
+      }
+      if (bad) break;
+    }
+    if (bad) return null;
+    G[0][0] = m00; G[0][1] = m01; G[1][0] = m01; G[1][1] = m11;
+    for (let l = 0; l < L; l++) {
+      G[0][2 + l] = -sjx[l]; G[2 + l][0] = -sjx[l];
+      G[1][2 + l] = -sjy[l]; G[2 + l][1] = -sjy[l];
+      G[2 + l][2 + l] = cnt[l];
+    }
+    GG[0] = g0; GG[1] = g1;
+    for (let l = 0; l < L; l++) GG[2 + l] = -sres[l];
+    const ds = solveLin(G, GG);
+    if (!ds) break;                       // singulär: algebraische Schätzung behalten
+    cu -= ds[0]; cv -= ds[1];
+    for (let l = 0; l < L; l++) rr[l] -= ds[2 + l];
+    if (!Number.isFinite(cu) || !Number.isFinite(cv)) return null;
+    for (let l = 0; l < L; l++) if (!(rr[l] > 0) || !Number.isFinite(rr[l])) return null;
+  }
+
+  // zurück in die Ausgangskoordinaten
+  const cxO = cu * scale + mx, cyO = cv * scale + my;
+  if (!Number.isFinite(cxO) || !Number.isFinite(cyO)) return null;
+  const rO = rr.map((r) => r * scale);
+  let maxRes = 0;
+  for (let l = 0; l < L; l++) {
+    for (const p of Lv[l]) {
+      const e = Math.abs(Math.hypot(p[0] - cxO, p[1] - cyO) - rO[l]);
+      if (!Number.isFinite(e)) return null;
+      if (e > maxRes) maxRes = e;
+    }
+  }
+  return { c: [cxO, cyO], r: rO, maxRes };
+}
+
+/**
+ * lineares System M·x = b (n×n) per Gauß-Elimination mit Spaltenpivot —
+ * null bei singulärer Matrix (Pivot < 1e-12 · größter Startwert)
+ */
+function solveLin(M, b) {
+  const n = b.length;
+  const A = M.map((row, i) => row.slice().concat([b[i]]));
+  let ref = 0;
+  for (const row of A) for (const v of row) ref = Math.max(ref, Math.abs(v));
+  if (!(ref > 0)) return null;
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+    if (!(Math.abs(A[piv][c]) > 1e-12 * ref)) return null;      // singulär
+    if (piv !== c) { const t = A[c]; A[c] = A[piv]; A[piv] = t; }
+    const d = A[c][c];
+    for (let r = c + 1; r < n; r++) {
+      const f = A[r][c] / d;
+      if (f === 0) continue;
+      for (let k = c; k <= n; k++) A[r][k] -= f * A[c][k];
+    }
+  }
+  const x = new Array(n);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = A[r][n];
+    for (let k = r + 1; k < n; k++) s -= A[r][k] * x[k];
+    x[r] = s / A[r][r];
+    if (!Number.isFinite(x[r])) return null;
+  }
+  return x;
+}
+
 // Fläche trägt schon Bogen-Kanten (fd.arcEdges) → nicht als Achsen-Quelle nutzen
 const hasArcEdges = (fd) => {
   const a = fd.arcEdges;
@@ -1225,9 +1375,14 @@ export function applyArcBands(fds, det, opts) {
  * Prüfungen (sonst null): Radius = level.r (Toleranz), alle Polygonzug-Punkte auf der
  * Kreislinie, Summe der Segmentwinkel = sweep.
  *
+ * hint2d (optional) — Mittelpunkt-Hinweis [u, v] im Rahmen des Bogens (die
+ * gemeinsame Achse des Bogen-Stapels). Ohne ihn wird level.c2 (Kreis-Fit der
+ * eigenen Ebene) benutzt; bei kurzen Bögen ist der Fit entlang der
+ * Mittelsenkrechten schlecht bestimmt (Fehler ∝ Rauschen / Bogenwinkel).
+ *
  * → { key, A, B, Aw, Bw, center, axis, refDir, radius, sweep } | null
  */
-export function arcGeometry(arc, Aw, Bw, opts) {
+export function arcGeometry(arc, Aw, Bw, opts, hint2d) {
   const o = { ...ARC_DEFAULTS, ...opts };
   if (!arc || !Array.isArray(Aw) || !Array.isArray(Bw)) return null;
   const pts = arc.pts || [];
@@ -1246,7 +1401,9 @@ export function arcGeometry(arc, Aw, Bw, opts) {
   u = norm(u);
   const frame = arc.frame, level = arc.level;
   if (!frame || !frame.e1 || !frame.e2 || !level || !level.c2) return null;
-  const C0 = add(add(mul(frame.e1, level.c2[0]), mul(frame.e2, level.c2[1])), mul(d, level.t));
+  const hint = (hint2d && hint2d.length >= 2 && Number.isFinite(hint2d[0]) && Number.isFinite(hint2d[1]))
+    ? hint2d : level.c2;
+  const C0 = add(add(mul(frame.e1, hint[0]), mul(frame.e2, hint[1])), mul(d, level.t));
   const s = dot(sub(C0, M), u);
   const center = add(M, mul(u, s));
   const vA = sub(Aw, center);
@@ -1426,6 +1583,119 @@ function chainAngles(pts, g) {
   return out;
 }
 
+// ── Gemeinsame Achse je Bogen-Stapel (spec-T2c) ────────────────────────────
+// Ein Stapel = Zusammenhangskomponente des Graphen Band — Bogen: ein Bogen
+// verbindet seine Eigentümer-Bänder. Alle Bänder eines Stapels haben dieselbe
+// Achse d und damit denselben Rahmen.
+
+/** Union-Find: Wurzel finden (Pfadkompression) */
+const ufRoot = (parent, x) => {
+  while (parent.get(x) !== x) {
+    parent.set(x, parent.get(parent.get(x)));
+    x = parent.get(x);
+  }
+  return x;
+};
+
+/**
+ * Stapel der Bänder: ein Bogen verbindet seine Eigentümer-Bänder (rec.owners[].band).
+ * → { rootOf: Map<bandId, rootId>, groups: Map<rootId, Band[]> }
+ */
+function arcStacks(bands, arcs) {
+  const parent = new Map();
+  for (const b of bands) parent.set(b.id, b.id);
+  for (const rec of arcs.values()) {
+    const ow = (rec && rec.owners) || [];
+    for (let i = 1; i < ow.length; i++) {
+      const a = ow[0].band, b = ow[i].band;
+      if (!parent.has(a) || !parent.has(b)) continue;
+      const ra = ufRoot(parent, a), rb = ufRoot(parent, b);
+      if (ra !== rb) parent.set(rb, ra);
+    }
+  }
+  const rootOf = new Map(), groups = new Map();
+  for (const b of bands) {
+    const r = ufRoot(parent, b.id);
+    rootOf.set(b.id, r);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(b);
+  }
+  return { rootOf, groups };
+}
+
+/**
+ * Ebenen (Höhen) eines Stapels: die arc-Polygonzüge je Höhe t (± levelTol).
+ * Bänder und Bögen eines Stapels teilen sich Ebenen (ein Kegel-Band und das
+ * Zylinder-Band darüber liegen auf derselben Höhe) — die Punkte werden nach
+ * vtxKey entdoppelt.
+ * → [{ t, pts: [p3d, …] }]
+ */
+export function stackLevels(bands, vkey, o) {
+  const groups = [];
+  for (const b of bands) {
+    for (const seg of b.segs || []) {
+      if (seg.type !== 'arc') continue;
+      const lvl = b.levels && b.levels[seg.level];
+      if (!lvl || !Number.isFinite(lvl.t)) continue;
+      let g = null;
+      for (const gg of groups) if (Math.abs(gg.t - lvl.t) <= o.levelTol) { g = gg; break; }
+      if (!g) { g = { t: lvl.t, pts: [], seen: new Set() }; groups.push(g); }
+      for (const p of seg.pts || []) {
+        const k = vkey(p);
+        if (g.seen.has(k)) continue;
+        g.seen.add(k);
+        g.pts.push(p);
+      }
+    }
+  }
+  return groups;
+}
+
+/**
+ * Gemeinsame Achse eines Stapels (2D im Rahmen des Stapels):
+ * EIN gemeinsamer Kreis-Fit über ALLE Ebenen des Stapels (fitCoaxial2d) —
+ * eine Mitte, je Ebene ein eigener Radius. Der Einzelfit einer kurzen Ebene ist
+ * entlang der Mittelsenkrechten schlecht bestimmt; der gemeinsame Fit nutzt die
+ * Kopplung der Radien (Kegel: R_lo − R_hi) und liefert eine bessere Mitte.
+ * Passt der Fit nicht (maxRes > tol), wird der Stapel-Hinweis verworfen
+ * (je Bogen dann level.c2 wie früher).
+ * → [u, v] | null
+ */
+function stackAxis(bands, frame, o, vkey) {
+  const groups = stackLevels(bands, vkey, o);
+  const levels2d = [];
+  for (const g of groups) {
+    const pts = [];
+    for (const p of g.pts) {
+      const l = toLocal(frame, p);
+      pts.push([l[0], l[1]]);
+    }
+    if (pts.length >= 2) levels2d.push(pts);
+  }
+  if (!levels2d.length) return null;
+  const K = fitCoaxial2d(levels2d);
+  if (!K) return null;
+  const rMax = Math.max(...K.r);
+  const tol = Math.max(o.tolFitAbs, o.tolFitRel * rMax);
+  if (K.maxRes > tol) return null;
+  return K.c;
+}
+
+/**
+ * Mittelpunkt-Hinweis für einen Bogen: die gemeinsame Achse seines Stapels,
+ * umgerechnet in den Rahmen des Bogens (die Rahmen sind je Stapel gleich).
+ * → [u, v] | null
+ */
+function arcHint(rec, info) {
+  if (!info || !info.c || !rec || !rec.frame || !rec.level) return null;
+  const fs = info.frame, fa = rec.frame;
+  const t = rec.level.t;
+  if (!Number.isFinite(t)) return null;
+  const tS = t * dot(fs.d, fa.d);                         // Höhe im Stapel-Rahmen
+  const P = add(add(mul(fs.e1, info.c[0]), mul(fs.e2, info.c[1])), mul(fs.d, tS));
+  return [dot(P, fa.e1), dot(P, fa.e2)];
+}
+
 /**
  * Pläne je gültigem Band bauen.
  *
@@ -1447,13 +1717,30 @@ export function buildArcPlans(fds2, det, written, opts) {
   const failed = new Set();
   const geoms = new Map();
 
+  // 0. Gemeinsame Achse je Bogen-Stapel → Mittelpunkt-Hinweis je Bogen
+  const { rootOf, groups } = arcStacks((det && det.bands) || [], arcs);
+  const stackInfo = new Map();                             // root → { frame, c }
+  for (const [root, bs] of groups) {
+    const frame = bs[0] && bs[0].frame;
+    if (!frame) continue;
+    stackInfo.set(root, { frame, c: stackAxis(bs, frame, o, vkey) });
+  }
+  const hints = new Map();                                 // arcKey → [u,v]
+  for (const [key, rec] of arcs) {
+    const ow = (rec && rec.owners) || [];
+    const root = ow.length ? rootOf.get(ow[0].band) : undefined;
+    const h = arcHint(rec, root === undefined ? null : stackInfo.get(root));
+    if (h) hints.set(key, h);
+  }
+
   // 1. Exakte Geometrie je Bogen (aus den geschriebenen Endpunkten)
   for (const [key, rec] of arcs) {
     const raw = (rec && rec.pts) || [];
     if (raw.length < 2) { geoms.set(key, null); failOwners(rec, failed); continue; }
     const Aw = wr(raw[0]);
     const Bw = wr(raw[raw.length - 1]);
-    const g = (Array.isArray(Aw) && Array.isArray(Bw)) ? arcGeometry(rec, Aw, Bw, o) : null;
+    const g = (Array.isArray(Aw) && Array.isArray(Bw))
+      ? arcGeometry(rec, Aw, Bw, o, hints.get(key)) : null;
     geoms.set(key, g);
     if (!g) failOwners(rec, failed);
   }

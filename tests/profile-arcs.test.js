@@ -4,6 +4,7 @@ import {
   ARC_DEFAULTS, findArcBands, fitCircle2d, makeFrame, toLocal, axisCandidates,
   validateArcBands, applyArcBands, edgeCanonKey,
   arcGeometry, arcSamples, bandSurface, buildArcPlans, expandArcLoop,
+  fitCoaxial2d, stackLevels,
 } from '../profile-arcs.js';
 
 const vtxKey = (p) => p.map((x) => (+x.toFixed(4) || 0).toFixed(4)).join(',');
@@ -50,17 +51,19 @@ function makeXform(anglesDeg, shift) {
 }
 
 // ── Generator: Extrusion entlang z von „Ringen“ ───────────────────────────
+// Fläche aus einem Punktloop (Normalen aus den ersten drei Punkten)
+const face = (pts, normal) => {
+  const nn = normal || norm3(cross3(sub3(pts[1], pts[0]), sub3(pts[2], pts[1])));
+  const c = [0, 1, 2].map((k) => pts.reduce((s, p) => s + p[k], 0) / pts.length);
+  return { outer: pts, inner: [], normal: nn, centroid: c };
+};
+
 // rings: [{ z, pts2d }] — alle Ringe mit gleicher Punktzahl, CCW.
 // Facetten = Vierecke zwischen Ring k und k+1; Deckflächen unten (−z) / oben (+z).
 function extrude(rings, xf) {
   const n = rings[0].pts2d.length;
   const map = xf ? (p) => xf.p(p) : (p) => p.slice();
   const P = rings.map((r) => r.pts2d.map(([x, y]) => map([x, y, r.z])));
-  const face = (pts, normal) => {
-    const nn = normal || norm3(cross3(sub3(pts[1], pts[0]), sub3(pts[2], pts[1])));
-    const c = [0, 1, 2].map((k) => pts.reduce((s, p) => s + p[k], 0) / pts.length);
-    return { outer: pts, inner: [], normal: nn, centroid: c };
-  };
   const fds = [];
   for (let k = 0; k + 1 < rings.length; k++) {
     for (let i = 0; i < n; i++) {
@@ -71,6 +74,21 @@ function extrude(rings, xf) {
   const z = xf ? xf.v([0, 0, 1]) : [0, 0, 1];
   fds.push(face(P[0].slice().reverse(), [-z[0], -z[1], -z[2]]));      // unten → −z
   fds.push(face(P[P.length - 1].slice(), z));                          // oben → +z
+  return fds;
+}
+
+// Gleiche Extrusion, aber mit fertigen 3D-Ringen (für verrauschte Netze)
+function extrude3(rings3) {
+  const n = rings3[0].length;
+  const fds = [];
+  for (let k = 0; k + 1 < rings3.length; k++) {
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      fds.push(face([rings3[k][i], rings3[k][j], rings3[k + 1][j], rings3[k + 1][i]]));
+    }
+  }
+  fds.push(face(rings3[0].slice().reverse(), [0, 0, -1]));            // unten → −z
+  fds.push(face(rings3[rings3.length - 1].slice(), [0, 0, 1]));       // oben → +z
   return fds;
 }
 
@@ -134,6 +152,44 @@ function regularPolygon(r, n) {
     pts.push([r * Math.cos(a), r * Math.sin(a)]);
   }
   return pts;
+}
+
+// Deterministisches Rauschen (LCG, fester Seed) — reproduzierbar
+function lcg(seed) {
+  let s = (seed >>> 0) || 1;
+  return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+// Profil mit EINEM flachen Bogen (R über 15°) zwischen zwei Geraden (spec-T2c):
+// die Tangenten an den Bogenenden laufen senkrecht auseinander, links schließt
+// eine Kante das Profil. `inset` → Fasen-Ring: Bogenradius −inset, alle
+// Stützgeraden −inset (echter Parallelversatz → 45°-Fase).
+function flatArcProfile(R, inset, segs) {
+  const half = 7.5 * Math.PI / 180;
+  const r = R - inset;
+  const arc = [];
+  for (let i = 0; i <= segs; i++) {
+    const a = -half + (2 * half) * i / segs;
+    arc.push([r * Math.cos(a), r * Math.sin(a)]);
+  }
+  // Stützgeraden (Außennormale n, Gleichung p·n = c)
+  const lines = [
+    { n: [Math.cos(-half), Math.sin(-half)], c: r },      // Tangente am Bogenanfang
+    { n: [Math.cos(half), Math.sin(half)], c: r },        // Tangente am Bogenende
+    { n: [0, 1], c: 62 - inset },                        // oben
+    { n: [-1, 0], c: 30 - inset },                       // links
+    { n: [0, -1], c: 62 - inset },                       // unten
+  ];
+  const isect = (l1, l2) => {
+    const d = l1.n[0] * l2.n[1] - l1.n[1] * l2.n[0];
+    const s = (l2.c - l1.c * (l1.n[0] * l2.n[0] + l1.n[1] * l2.n[1])) / d;
+    return [l1.c * l1.n[0] - s * l1.n[1], l1.c * l1.n[1] + s * l1.n[0]];
+  };
+  const Ap = isect(lines[0], lines[4]);                  // Tangente unten
+  const Bp = isect(lines[1], lines[2]);                  // Tangente oben
+  const T = isect(lines[2], lines[3]);                   // links oben
+  const Lb = isect(lines[3], lines[4]);                  // links unten
+  return [Ap, ...arc, Bp, T, Lb];                        // CCW
 }
 
 // ── Profil: Ecke aus zwei tangential aneinanderstoßenden Bögen (spec-T1f) ────
@@ -598,6 +654,121 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     const prof2 = prof.map((q, i) => (i === 3 ? moved : q));
     const fds = extrude([{ z: 0, pts2d: prof2 }, { z: 8, pts2d: prof }]);
     expect(run(fds).bands.length).toBe(0);
+  });
+
+  test('TMP-DIAG', () => {
+    const full = flatArcProfile(20, 0, 5);
+    const ins = flatArcProfile(20, 0.5, 5);
+    const rnd = lcg(20261027);
+    const nz = () => (rnd() * 2 - 1) * 1e-6;
+    const rings = [
+      { z: 0, p: ins, planar: true },
+      { z: 0.5, p: full, planar: false },
+      { z: 9.5, p: full, planar: false },
+      { z: 10, p: ins, planar: true },
+    ];
+    const fds = extrude3(rings.map((r) => r.p.map(([x, y]) => [
+      x + nz(), y + nz(), r.z + (r.planar ? 0 : nz()),
+    ])));
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    console.log('DIAG bands', JSON.stringify(det.bands.map((b) => ({
+      id: b.id, kind: b.kind, loT: b.levels.lo.t, loR: b.levels.lo.r, loC: b.levels.lo.c2,
+      hiT: b.levels.hi.t, hiR: b.levels.hi.r, hiC: b.levels.hi.c2,
+      nLo: b.segs[0].pts.length, nHi: b.segs[2].pts.length,
+    }))));
+    const o = { ...ARC_DEFAULTS, vtxKey };
+    const groups = stackLevels(det.bands, vtxKey, o);
+    console.log('DIAG groups', JSON.stringify(groups.map((g) => ({ t: g.t, n: g.pts.length }))));
+    const frame = det.bands[0].frame;
+    const lv = groups.map((g) => g.pts.map((p) => {
+      const l = toLocal(frame, p);
+      return [l[0], l[1]];
+    }));
+    console.log('DIAG coaxial', JSON.stringify(fitCoaxial2d(lv)));
+    const { plans, geoms, failed } = buildArcPlans(fds, det, written9, { vtxKey });
+    console.log('DIAG failed', [...failed], 'plans', plans.length);
+    console.log('DIAG centers', JSON.stringify([...geoms.values()].map((g) => g && g.center)));
+  });
+
+  // ── Gemeinsame Achse je Bogen-Stapel (spec-T2c) ───────────────────────────
+  // Kurzer flacher Bogen (R20 über 15°, 5 Segmente) zwischen zwei Geraden,
+  // Fasen 0.5 oben/unten, alle Netzpunkte um ±1e-6 mm verrauscht. Der Fit der
+  // einzelnen Ebene ist bei so kurzen Bögen schlecht bestimmt → die Bögen eines
+  // Stapels müssen eine GEMEINSAME Achse bekommen.
+  test('20: kurzer flacher Bogen (R20/15°) mit Rauschen → 3 Pläne (1 Zylinder, 2 Kegel), failed leer', () => {
+    const full = flatArcProfile(20, 0, 5);
+    const ins = flatArcProfile(20, 0.5, 5);
+    const rnd = lcg(20261027);
+    const nz = () => (rnd() * 2 - 1) * 1e-6;
+    // Deckflächen bleiben in ihrer Ebene (nur u,v verrauscht)
+    const rings = [
+      { z: 0, p: ins, planar: true },
+      { z: 0.5, p: full, planar: false },
+      { z: 9.5, p: full, planar: false },
+      { z: 10, p: ins, planar: true },
+    ];
+    const fds = extrude3(rings.map((r) => r.p.map(([x, y]) => [
+      x + nz(), y + nz(), r.z + (r.planar ? 0 : nz()),
+    ])));
+
+    const det = run(fds);
+    expect(det.bands.length).toBe(3);
+    expect(det.stats.cyl).toBe(1);
+    expect(det.stats.cone).toBe(2);
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(3);
+    expect(det.stats.valid).toBe(3);
+    expect(det.arcs.size).toBe(4);                       // z = 0, 0.5, 9.5, 10
+
+    const { plans, geoms, failed } = buildArcPlans(fds, det, written9, { vtxKey });
+    expect(failed.size).toBe(0);
+    expect(plans.length).toBe(3);
+    expect(plans.filter((p) => p.kind === 'cyl').length).toBe(1);
+    expect(plans.filter((p) => p.kind === 'cone').length).toBe(2);
+    expect(geoms.size).toBe(4);
+    for (const g of geoms.values()) expect(g).toBeTruthy();
+
+    // Radien/Semi-Winkel: Zylinder R20, Kegel 19,5 → 20 (unten) bzw. 20 → 19,5 (oben)
+    const cyl = plans.filter((p) => p.kind === 'cyl');
+    expect(Math.abs(cyl[0].surf.radius - 20)).toBeLessThan(1e-4);
+    for (const p of plans.filter((x) => x.kind === 'cone')) {
+      expect(Math.abs(p.surf.radius - 20)).toBeLessThan(1e-4);
+      expect(Math.abs(p.surf.semiAngle - Math.PI / 4)).toBeLessThan(1e-4);
+    }
+
+    // GEMEINSAME Achse: alle vier Bögen des Stapels haben dieselbe 2D-Mitte
+    const frame = det.bands[0].frame;
+    const uv = [...geoms.values()].map((g) => {
+      const l = toLocal(frame, g.center);
+      return [l[0], l[1]];
+    });
+    let maxSpread = 0;
+    for (const a of uv) for (const b of uv) {
+      maxSpread = Math.max(maxSpread, Math.hypot(a[0] - b[0], a[1] - b[1]));
+    }
+    expect(maxSpread).toBeLessThan(1e-4);
+
+    // Abstand der Bogen-Punkte zur Bandfläche (das Kriterium von bandSurface)
+    const surfDist = (surf, p) => {
+      const x = sub3(p, surf.loc);
+      const h = x[0] * surf.axis[0] + x[1] * surf.axis[1] + x[2] * surf.axis[2];
+      const perp = [
+        x[0] - surf.axis[0] * h, x[1] - surf.axis[1] * h, x[2] - surf.axis[2] * h,
+      ];
+      const rho = len3(perp);
+      const R = surf.kind === 'cone' ? surf.radius + h * Math.tan(surf.semiAngle) : surf.radius;
+      return Math.abs(rho - R) * (surf.kind === 'cone' ? Math.cos(surf.semiAngle) : 1);
+    };
+    let maxDev = 0;
+    for (const p of plans) {
+      for (const seg of p.band.segs) {
+        if (seg.type !== 'arc') continue;
+        const g = geoms.get(seg.arcKey);
+        for (const q of arcSamples(g, 9)) maxDev = Math.max(maxDev, surfDist(p.surf, q));
+      }
+    }
+    expect(maxDev).toBeLessThan(1e-9);
   });
 });
 
