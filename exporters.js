@@ -995,6 +995,55 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     return true;
   };
+  // Freigang der Kreis-Umwandlung (Review-Fund): der Kreis durch die Polygon-Ecken ragt um die
+  // Pfeilhöhe R·(1−cos(π/n)) über das Netz-Polygon (bei 42°-Segmenten bis 0.066·R). Bei dünnem Steg
+  // schnitt er so einen Nachbar-Loop der Deckfläche (zweite Bohrung, Plattenkante, Außenmantel) —
+  // Loops und Zylinder durchdrangen sich, die Datei blieb aber wasserdicht (Wächter 0, occt −33 %).
+  // Der Kreis (center, R, ⟂ axis, in der Ebene von fd), der `loop` von fd ersetzen soll, muss darum zu
+  // allen ANDEREN Loops der Fläche mindestens CIRCLE_CLEAR_TOL Abstand halten und richtig liegen: ein
+  // Loch-Kreis im Außen-Loop und außerhalb der übrigen Löcher, ein Außenkreis (Mantel) um alle Löcher
+  // herum. Bereits gesetzte Kreise (circleRim) zählen exakt als Kreis. Scheitert es → facettiert lassen.
+  const CIRCLE_CLEAR_TOL = 0.01; // mm (= distance_accuracy_value der STEP-Datei)
+  const circleClear = (center, R, axis, fd, loop) => {
+    if (!fd || !(R > 0)) return false;
+    const to2 = projector2d(_norm3(fd.normal), center);      // Kreismittelpunkt → Ursprung
+    const isOuter = loop === fd.outer, tol = CIRCLE_CLEAR_TOL;
+    // Abstand der Kreislinie (Ursprung, R) zur Strecke a–b: die Abstände der Streckenpunkte zum
+    // Ursprung bilden das Intervall [dmin, dmax]
+    const segDist = (a, b) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / l2)) : 0;
+      const dmin = Math.hypot(a[0] + t * dx, a[1] + t * dy), dmax = Math.max(Math.hypot(a[0], a[1]), Math.hypot(b[0], b[1]));
+      return R < dmin ? dmin - R : (R > dmax ? R - dmax : 0);
+    };
+    for (const L of [fd.outer, ...fd.inner]) {
+      if (L === loop) continue;
+      const otherOuter = L === fd.outer;
+      let P2;
+      if (L.circleRim) {
+        const g = L.circleRim;
+        if (!g.kind || g.kind === 'circle') {
+          const c2 = to2(g.center), d = Math.hypot(c2[0], c2[1]), Rg = g.radius;
+          if (isOuter) { if (!(d + Rg <= R - tol)) return false; }        // Loch-Kreis im Außenkreis
+          else if (otherOuter) { if (!(d + R <= Rg - tol)) return false; } // im Außenkreis (Mantel)
+          else if (!(d >= R + Rg + tol)) return false;                     // zwei Löcher disjunkt
+          continue;
+        }
+        P2 = rimPoints(g).map(to2);                                         // Kanal-Mündung (Ellipse/B-Spline)
+      } else P2 = L.map(to2);
+      if (P2.length < 3) continue;
+      for (let i = 0; i < P2.length; i++) if (segDist(P2[i], P2[(i + 1) % P2.length]) < tol) return false;
+      if (isOuter) { if (!P2.every((p) => Math.hypot(p[0], p[1]) < R)) return false; }       // Loch im Kreis
+      else if (otherOuter) { if (!pointInPoly2d([0, 0], P2)) return false; }                 // Kreis im Außen-Loop
+      else if (Math.hypot(P2[0][0], P2[0][1]) < R || pointInPoly2d([0, 0], P2)) return false; // Löcher disjunkt
+    }
+    return true;
+  };
+  // Freigang beider Rand-Kreise eines Plans an seinen Deck-Loops (scharfe Bohrung, Außenmantel)
+  const rimsClear = (rims, decks) => rims.every((rim, r) => {
+    const fd = faceDefs.find((f) => f.outer === decks[r] || f.inner.includes(decks[r]));
+    return circleClear(rim.center, rim.radius, rim.axis, fd, decks[r]);
+  });
   const innerMatchesRim = (loop, normal, rim) => {
     if (Math.abs(_dot3(normal, rim.axis)) < 0.985) return false; // Wand ~⟂ zur Achse (≤10°)
     let cx = 0, cy = 0, cz = 0; for (const p of loop) { cx += p[0]; cy += p[1]; cz += p[2]; }
@@ -1074,7 +1123,7 @@ export function buildVolumeStepBrepV2(analysis) {
         // Kreis-Achse ist hier die des Primitiv-Fits; ein leicht gekippter Fit stünde sonst neben
         // der Deckfläche → strikte Importer verwerfen die Fläche)
         let hit = null;
-        for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd)) { hit = inner; break; } } if (hit) break; }
+        for (const fd of faceDefs) { for (const inner of fd.inner) { if (inner.circleRim || claimed.has(inner)) continue; if (innerMatchesRim(inner, fd.normal, rim) && circleOnDeck(rim.center, rim.radius, rim.axis, fd) && circleClear(rim.center, rim.radius, rim.axis, fd, inner)) { hit = inner; break; } } if (hit) break; }
         if (hit) { claimed.add(hit); matched.push({ rim, inner: hit, mode: 'direct' }); continue; }
         // (2) Chamfer: koaxialer Kreis R2>R, axial nahe (|dz| ≤ CHAMFER_MAX) — nur mit Defeaturing-Toggle
         let cham = null;
@@ -1092,6 +1141,7 @@ export function buildVolumeStepBrepV2(analysis) {
             const dz = circ.meanT;
             if (Math.abs(dz) < CHAMFER_MIN || Math.abs(dz) > CHAMFER_MAX) continue;
             if (!circleOnDeck(circ.center, circ.radius, rim.axis, fd)) continue; // Flach-Kreis in der Deckebene
+            if (!circleClear(circ.center, circ.radius, rim.axis, fd, inner)) continue; // … und mit Freigang
             cham = { inner, circ, dz }; break;
           }
           if (cham) break;
@@ -2744,7 +2794,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const entry of boreById.values()) {
       let res = null;
       try { res = sharpBorePlan(entry, owners, fdsOfGroup, drop); } catch (_) { res = null; }
-      if (!res) continue;
+      if (!res || !rimsClear(res.plan.rims, res.decks)) continue;
       for (const fi of res.wall) drop.add(fi);
       res.decks[0].circleRim = res.plan.rims[0];
       res.decks[1].circleRim = res.plan.rims[1];
@@ -3014,7 +3064,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const entry of mantleById.values()) {
       let res = null;
       try { res = sharpMantlePlan(entry, owners, fdsOfGroup, drop, allOwners); } catch (_) { res = null; }
-      if (!res) continue;
+      if (!res || !rimsClear(res.deckRims, res.decks)) continue;
       for (const fi of res.wall) drop.add(fi);
       res.decks.forEach((L, i) => { L.circleRim = res.deckRims[i]; });
       mantlePlans.push(res.plan);
@@ -3325,7 +3375,7 @@ export function buildVolumeStepBrepV2(analysis) {
       if (seed.loop.circleRim || drop.has(seed.fi)) continue;
       let res = null;
       try { res = sharpConePlan(seed, owners, drop); } catch (_) { res = null; }
-      if (!res) continue;
+      if (!res || !rimsClear(res.rims, res.decks)) continue;
       for (const fi of res.wall) drop.add(fi);
       res.decks.forEach((L, i) => { L.circleRim = res.rims[i]; });
       mantleConePlans.push(res.plan);
@@ -3420,17 +3470,23 @@ export function buildVolumeStepBrepV2(analysis) {
 
   // Auf die Ebenen gesetzte Eckpunkte (snapToPlanes, je assemble-Aufruf) — Schlüssel → Punkt
   let vertexSnap = null;
+  // Schalen-Analyse (unten, 2. Durchgang von assemble): Kanten-Schlüssel → Komponenten-Kennung. Jede
+  // Kante gehört genau einer Zusammenhangskomponente; ihre Ecken werden dann je Komponente angelegt —
+  // zwei Körper, die sich in einer Ecke/Kante berühren, teilen sich so keinen VERTEX_POINT.
+  let edgeScope = null;
   // w = die Koordinaten, wie sie in der Datei stehen (gerundet; bei gleichem Schlüssel die des
   // zuerst gesehenen Punkts) — LINE-Richtungen werden daraus berechnet.
-  const getVertex = (pt) => {
-    const key = ptKey(pt);
-    if (!ptRegistry.has(key)) {
-      const q = (vertexSnap && vertexSnap.get(key)) || pt;
+  const getVertex = (pt, tag = '') => {
+    const pk = ptKey(pt), key = tag ? `${tag}@${pk}` : pk;
+    let v = ptRegistry.get(key);
+    if (!v) {
+      const q = (vertexSnap && vertexSnap.get(pk)) || pt;
       const ptId = addPoint(q);
       const vtxId = addVertex(ptId);
-      ptRegistry.set(key, { ptId, vtxId, w: q.map((v) => +toStep(v)) });
+      v = { ptId, vtxId, w: q.map((x) => +toStep(x)) };
+      ptRegistry.set(key, v);
     }
-    return ptRegistry.get(key);
+    return v;
   };
 
   // Canonical edge key: smaller ptKey first → direction-independent dedup
@@ -3454,8 +3510,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // Schlüssel und damit eine eigene EDGE_CURVE zwischen denselben Ecken.
   const getOrCreateEdge = (p1, p2, key = edgeCanonKey(p1, p2)) => {
     if (!edgeRegistry.has(key)) {
-      const { vtxId: sv, ptId: startPtId, w: a } = getVertex(p1);
-      const { vtxId: ev, w: b } = getVertex(p2);
+      const tag = edgeScope ? edgeScope.get(key) || '' : '';
+      const { vtxId: sv, ptId: startPtId, w: a } = getVertex(p1, tag);
+      const { vtxId: ev, w: b } = getVertex(p2, tag);
       // Richtung aus den GESCHRIEBENEN Endpunkten: die LINE läuft dann exakt durch beide
       // CARTESIAN_POINTs (aus den ungerundeten Werten lag das Ende bis 1.2e-6 mm daneben).
       const dir = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
@@ -3504,7 +3561,7 @@ export function buildVolumeStepBrepV2(analysis) {
           geom.center[2] + geom.radius * geom.refDir[2],
         ];
       }
-      const v = getVertex(vpt);
+      const v = getVertex(vpt, edgeScope ? edgeScope.get(`c:${rimKey}`) || '' : '');
       const ecId = addEdgeCurve(v.vtxId, v.vtxId, circleId);
       circleRegistry.set(rimKey, { ecId });
     }
@@ -3522,7 +3579,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // ---- Step 3: Build ADVANCED_FACEs ----
   // fold (optional, aus enforcePlanarity): { id, keys } — Kanten zwischen Teilflächen einer
   // zerlegten Fläche, die im Netz non-manifold sind, laufen über eine eigene Kanten-Instanz.
-  const buildLoopEdges = (points, fold) => {
+  // split (optional, Schalen-Analyse): Map Schlüssel → eigener Schlüssel dieser Fläche — eine Kante,
+  // an der sich zwei Körper berühren (4 Nutzungen), wird je Körper-Fächer eine eigene Instanz.
+  const buildLoopEdges = (points, fold, split = null) => {
     const oeIds = [];
     const n = points.length;
     for (let i = 0; i < n; i++) {
@@ -3530,6 +3589,7 @@ export function buildVolumeStepBrepV2(analysis) {
       if (ptKey(p1) === ptKey(p2)) continue; // skip degenerate
       let ck = edgeCanonKey(p1, p2);
       if (fold && fold.keys.has(ck)) ck += `#fold${fold.id}`;
+      if (split) { const s = split.get(ck); if (s) ck = s; }
       const edge = getOrCreateEdge(p1, p2, ck);
       const forward = ptKey(p1) === edge.startKey;
       const u = edgeUse.get(ck) || { fwd: 0, rev: 0 };
@@ -3849,15 +3909,22 @@ export function buildVolumeStepBrepV2(analysis) {
   // neu bauen kann. Setzt id/entities/Registries zurück und baut von vorn. (Vor dem ersten
   // Aufruf wurde noch nichts emittiert → entMark/idMark sind der Ausgangszustand.)
   const entMark = entities.length, idMark = id;
-  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = [], mantleConesArg = []) => {
+  // shellOpts (optional, 2. Durchgang der Schalen-Analyse, s. assembleSolids): { drop: Set<faceDef>
+  // (Schale verworfen), flip: Set<faceDef> (umgedreht ausgeben), split: Map<faceDef, Map<Schlüssel,
+  // eigener Schlüssel>>, scope: Map<Kanten-Schlüssel, Komponente> (Ecken je Komponente) }.
+  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = [], mantleConesArg = [], shellOpts = null) => {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
-    const snapRes = snapToPlanes(faceDefsArg);
+    edgeScope = shellOpts && shellOpts.scope ? shellOpts.scope : null;
+    // verworfene Schalen (2. Durchgang) setzen keine Eckpunkte — ihre Ebenen zählen nicht mit
+    const snapRes = snapToPlanes(shellOpts && shellOpts.drop && shellOpts.drop.size ? faceDefsArg.filter((fd) => !shellOpts.drop.has(fd)) : faceDefsArg);
     vertexSnap = snapRes.snap;
-    const faceIds = [], faceKeys = [];
-    // Fläche aufnehmen + ihre Kanten-Schlüssel (buildLoopEdges/useCircle sammeln in faceKeySink)
-    const emitFace = (fid) => { faceIds.push(fid); faceKeys.push(faceKeySink); faceKeySink = []; };
+    const faceIds = [], faceKeys = [], faceSrc = [];
+    // Fläche aufnehmen + ihre Kanten-Schlüssel (buildLoopEdges/useCircle sammeln in faceKeySink);
+    // src beschreibt die Fläche für die Schalen-Analyse (Volumen, Lage) — ohne src gilt ihre Schale
+    // als nicht auswertbar (Körper wie bisher).
+    const emitFace = (fid, src = null) => { faceIds.push(fid); faceKeys.push(faceKeySink); faceSrc.push(src); faceKeySink = []; };
     faceKeySink = [];
     let guardFailures = 0, guardMs = 0;
     // Emittierte same_sense-Werte (korrekt bzw. vom Test-Hook gedreht) — der Wächter prüft
@@ -3882,7 +3949,11 @@ export function buildVolumeStepBrepV2(analysis) {
     // an Bohrungen/Kanälen und am Fuß eines Zapfens/einer Wellenstufe, der Außen-Loop an konvexen
     // Mänteln und Kegeln). Richtung je Loop-Art: Außen-Loop gegen, Innen-Loop im Uhrzeigersinn um
     // die Flächennormale — die analytische Nachbarfläche nutzt die Kante gegenläufig.
-    for (const { outer, inner, normal, centroid, fold } of faceDefsArg) {
+    for (const fd of faceDefsArg) {
+      if (shellOpts && shellOpts.drop && shellOpts.drop.has(fd)) continue;           // verworfene Schale
+      const flip = !!(shellOpts && shellOpts.flip && shellOpts.flip.has(fd));
+      const { outer, inner, normal, centroid, fold } = flip ? flippedFaceDef(fd) : fd;
+      const split = shellOpts && shellOpts.split ? shellOpts.split.get(fd) || null : null;
       let outerBound;
       if (outer.circleRim) {
         const rim = outer.circleRim;
@@ -3891,7 +3962,7 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(rim.rimKey, fwd);
         outerBound = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)]));
       } else {
-        const outerOe = buildLoopEdges(outer, fold);
+        const outerOe = buildLoopEdges(outer, fold, split);
         if (outerOe.length < 3) { faceKeySink = []; continue; }
         outerBound = addFaceOuterBound(addEdgeLoop(outerOe));
       }
@@ -3905,12 +3976,12 @@ export function buildVolumeStepBrepV2(analysis) {
           bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)])));
           continue;
         }
-        const innerOe = buildLoopEdges(innerLoop, fold);
+        const innerOe = buildLoopEdges(innerLoop, fold, split);
         if (innerOe.length < 3) continue;
         bounds.push(addFaceBound(addEdgeLoop(innerOe)));
       }
       const placId = addAxis2Placement3D(centroid, normal, computeRefDir(normal));
-      emitFace(addAdvancedFace(bounds, addPlane(placId), true));
+      emitFace(addAdvancedFace(bounds, addPlane(placId), true), { fd, key: fd });
     }
 
     // Zylinder-Mantelflächen (nahtlos: 1 CYLINDRICAL_SURFACE, 2 volle Kreis-Bounds). Die STEP-
@@ -3935,7 +4006,7 @@ export function buildVolumeStepBrepV2(analysis) {
         bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
         rimLoops.push({ geom: rim, fwd });
       }
-      emitFace(addAdvancedFace(bounds, cylSurf, ssBore));
+      emitFace(addAdvancedFace(bounds, cylSurf, ssBore), { band: plan.rims, sgn: ssBore ? 1 : -1, key: plan });
       { // Wächter: (a) Wand-Facetten der Bohrung gegen die emittierte Mantel-Orientierung,
         // (b) Umlaufsinn beider Ränder (Fläche zwischen den Rändern = Richtung zum anderen Rand)
         const tg = nowMs();
@@ -3965,7 +4036,7 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(cr.flatDesc.rimKey, fFlat);
         const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ceRim.ecId, fRim)]));
         const ib = addFaceBound(addEdgeLoop([addOrientedEdge(ceFlat.ecId, fFlat)]));
-        emitFace(addAdvancedFace([ob, ib], coneSurf, ssCone));
+        emitFace(addAdvancedFace([ob, ib], coneSurf, ssCone), { band: [cr.rimDesc, cr.flatDesc], sgn: ssCone ? 1 : -1, key: cr });
         { // Wächter: (a) die von der Chamfer-Zone verdrängten Original-Facetten gegen den Kegel,
           // (b) Umlaufsinn von Rand- und Flach-Kreis
           const tg = nowMs();
@@ -4004,7 +4075,7 @@ export function buildVolumeStepBrepV2(analysis) {
         bounds.push(r === 0 ? addFaceOuterBound(loopId) : addFaceBound(loopId));
         rimLoops.push({ geom: rim, fwd });
       }
-      emitFace(addAdvancedFace(bounds, cylSurf, ssMantle));
+      emitFace(addAdvancedFace(bounds, cylSurf, ssMantle), { band: plan.rims, sgn: ssMantle ? 1 : -1, key: plan });
       { // Wächter wie bei der Bohrung: Wand-Facetten gegen die Mantel-Orientierung, Umlaufsinn beider Ränder
         const tg = nowMs();
         const nAt = cylGuardNormal(plan.surfCenter, ax, ssMantle ? 1 : -1);
@@ -4044,10 +4115,12 @@ export function buildVolumeStepBrepV2(analysis) {
         rimLoops.push({ geom: sm, fwd: fS, d: _sub3(lg.center, sm.center) });
       } else {
         const vl = id++;
-        entities.push(`#${vl}=VERTEX_LOOP('',#${getVertex(cp.apex).vtxId});`);
+        entities.push(`#${vl}=VERTEX_LOOP('',#${getVertex(cp.apex, edgeScope ? edgeScope.get(`c:${lg.rimKey}`) || '' : '').vtxId});`);
         bounds.push(addFaceBound(vl));
       }
-      emitFace(addAdvancedFace(bounds, surf, ssMantleCone));
+      // Schalen-Analyse: Band zwischen großem Rand und kleinem Rand bzw. Spitze (Kreis mit Radius 0)
+      emitFace(addAdvancedFace(bounds, surf, ssMantleCone),
+        { band: [lg, cp.small || { center: cp.apex, radius: 0, axis: lg.axis, refDir: lg.refDir }], sgn: ssMantleCone ? 1 : -1, key: cp });
       { // Wächter: (a) Wand-Facetten (nur Dreiecke im Kegel-Bereich) gegen die emittierte Kegel-
         // Orientierung, (b) Umlaufsinn der Ränder (Fläche = Richtung zum anderen Rand bzw. zur Spitze)
         const tg = nowMs();
@@ -4110,7 +4183,7 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(keyOf(k), f0); useCircle(keyOf(k + 1), f1);
         const ob = addFaceOuterBound(addEdgeLoop([addOrientedEdge(e0.ecId, f0)]));
         const ib = addFaceBound(addEdgeLoop([addOrientedEdge(e1.ecId, f1)]));
-        emitFace(addAdvancedFace([ob, ib], surf, sameSense));
+        emitFace(addAdvancedFace([ob, ib], surf, sameSense), { tube: tp, k, key: tp });
       });
       { // Wächter je Stück: (a) Kanal-Facetten gegen die emittierte Flächen-Orientierung,
         // (b) Umlaufsinn beider Ränder (Fläche liegt vom Anfangsrand aus in Bahnrichtung, vom
@@ -4152,7 +4225,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const shellMap = new Map();
     faceIds.forEach((f, i) => { const r = find(i), s = shellMap.get(r); if (s) s.push(f); else shellMap.set(r, [f]); });
     return {
-      faceIds,
+      faceIds, faceKeys, faceSrc,
       shells: [...shellMap.values()],
       report: {
         faceCount: faceIds.length,
@@ -4176,6 +4249,419 @@ export function buildVolumeStepBrepV2(analysis) {
         snapMaxMove: Math.round(snapRes.maxMove * 1e9) / 1e9,
       },
     };
+  };
+
+  // ==== Schalen-Analyse: was ist jede Zusammenhangskomponente? ====
+  // assemble() trennt die Flächen per Union-Find nur nach ZUSAMMENHANG. Früher wurde daraus pauschal
+  // je Komponente ein Körper — auch Hohlräume (Würfel mit innerem Hohlraum: occt 9000 statt 7000),
+  // invertierte Netze (block_edge_fillet) und Null-Volumen-Finnen; und ein einziger offener Fremdteil
+  // machte ALLE Körper zu OPEN_SHELLs (und warf deren Bohrungen in die facettierte Basislinie). Jetzt:
+  //   dicht, mittlere Dicke 3|V|/A < DEGEN_THICK (Finne, flacher Tetraeder) → verwerfen
+  //   dicht, nicht in einer anderen dichten Komponente → Körper; V < 0 → Netz invertiert: umdrehen
+  //   dicht, innerhalb einer Komponente mit ENTGEGENGESETZTEM Vorzeichen → deren Hohlraum (bzw. Insel
+  //     in einem Hohlraum); gleiches Vorzeichen → eigener (eingeschlossener) Körper
+  //   Hohlraum, der seinen Körper berührt (gemeinsame Ecke, Falt-Kante — dino) → kein gültiger Hohlraum
+  //     (Schalen müssen disjunkt sein); bis POCKET_DROP_REL des Körpervolumens verworfen, sonst Hohlraum
+  //     mit Hinweis
+  //   offen/non-manifold → OPEN_SHELL in einem eigenen Flächenmodell neben den Körpern
+  // Jede ausgegebene CLOSED_SHELL umschließt V > 0; Hohlräume stehen als ORIENTED_CLOSED_SHELL(.F.) in
+  // einem BREP_WITH_VOIDS (ISO 10303-42; so schreibt auch OpenCascade). Volumen und Lage kommen aus den
+  // emittierten Flächen (Divergenzsatz bzw. Raumwinkel; Kreise mit SHELL_SEG Punkten, Kanal-Stücke über
+  // ihre Original-Facetten). Eine Kante mit 2·m Nutzungen (zwei Körper berühren sich entlang einer
+  // Kante) wird nach Material-Keilen gepaart und je Paar eine eigene Kanten-Instanz (wie fold); Ecken
+  // legt der 2. Durchgang je Komponente an (edgeScope) — sich berührende Körper teilen nichts.
+  const SHELL_SEG = 128;            // Abtastung analytischer Kreise für Volumen und Lage
+  const DEGEN_THICK = 1e-3;         // mm — mittlere Dicke 3|V|/A darunter: Blech ohne Volumen
+  const POCKET_DROP_REL = 1e-4;     // berührender Hohlraum bis zu diesem Anteil am Körpervolumen → verwerfen
+  const CONTAIN_BUDGET = 3e7;       // Raumwinkel-Auswertungen (Probepunkte × Dreiecke) für die Lage-Tests
+  // Punkte einer Rand-Kurve in natürlicher Laufrichtung (CIRCLE/ELLIPSE gegen den Uhrzeigersinn um die
+  // Achse ab refDir — wie emittiert, B-Spline in Stützpunkt-Reihenfolge)
+  const rimPoints = (g) => {
+    if (g.kind === 'bspline') return Array.isArray(g.samples) ? g.samples : [];
+    const z = _norm3(g.axis), rd = g.refDir, rz = _dot3(rd, z);
+    const x = _norm3([rd[0] - z[0] * rz, rd[1] - z[1] * rz, rd[2] - z[2] * rz]), y = _cross3(z, x);
+    const a = g.radius, b = g.kind === 'ellipse' && Number.isFinite(g.semi2) ? g.semi2 : g.radius;
+    const out = [];
+    for (let j = 0; j < SHELL_SEG; j++) {
+      const u = 2 * Math.PI * j / SHELL_SEG, ca = a * Math.cos(u), sb = b * Math.sin(u);
+      out.push([g.center[0] + ca * x[0] + sb * y[0], g.center[1] + ca * x[1] + sb * y[1], g.center[2] + ca * x[2] + sb * y[2]]);
+    }
+    return out;
+  };
+  // Eckpunkt einer geschlossenen Rand-Kurve (wie getOrCreateCircleEdge)
+  const rimVertex = (g) => (g.kind === 'bspline' ? g.vertex : [g.center[0] + g.radius * g.refDir[0], g.center[1] + g.radius * g.refDir[1], g.center[2] + g.radius * g.refDir[2]]);
+  // Dreiecke einer emittierten Fläche, orientiert wie ihre effektive Normale (eben: Fächer je Rand vom
+  // Ebenenpunkt aus, Kreise im emittierten Umlaufsinn; Zylinder/Kegel: Streifen zwischen den Rand-
+  // Kreisen; Kanal: Original-Facetten, einmal je Kanal) + Flächeninhalt. null = Fläche unbekannt.
+  const faceTris = (src) => {
+    if (!src) return null;
+    const tris = [];
+    if (src.fd) {
+      const fd = src.fd, n = fd.normal, p0 = fd.centroid;
+      let vx = 0, vy = 0, vz = 0;
+      [fd.outer, ...fd.inner].forEach((L, li) => {
+        let P = L;
+        if (L.circleRim) {
+          // Umlaufsinn wie emittiert (tests/step-strict.mjs orient-plane): Außenrand gegen, Loch im
+          // Uhrzeigersinn um die Flächennormale
+          P = rimPoints(L.circleRim);
+          let s = 0;
+          for (let i = 0; i < P.length; i++) s += _dot3(_cross3(P[i], P[(i + 1) % P.length]), n);
+          if ((li === 0) !== (s > 0)) P = P.slice().reverse();
+        }
+        for (let i = 0; i < P.length; i++) {
+          const a = P[i], b = P[(i + 1) % P.length];
+          tris.push([p0, a, b]);
+          const c = _cross3(_sub3(a, p0), _sub3(b, p0)); vx += c[0]; vy += c[1]; vz += c[2];
+        }
+      });
+      return { tris, area: Math.hypot(vx, vy, vz) / 2 };
+    }
+    if (src.band) {
+      // koaxiale Ränder; liegt der zweite nicht im selben Rahmen (Achse/refDir), wird er im Rahmen des
+      // ersten abgetastet — sonst verdrillte der Streifen
+      const [A, B] = src.band, PA = rimPoints(A), m = PA.length;
+      const same = _dot3(_norm3(A.axis), _norm3(B.axis)) > 1 - 1e-9 && _dot3(A.refDir, B.refDir) > 1 - 1e-9;
+      const PB = rimPoints(same ? B : { ...B, axis: A.axis, refDir: A.refDir });
+      if (m < 3 || PB.length !== m) return null;
+      const z = _norm3(A.axis);
+      let flip = null, area = 0;
+      for (let j = 0; j < m; j++) {
+        const a0 = PA[j], a1 = PA[(j + 1) % m], b0 = PB[j], b1 = PB[(j + 1) % m];
+        const n1 = _cross3(_sub3(a1, a0), _sub3(b1, a0)), n2 = _cross3(_sub3(b1, a0), _sub3(b0, a0));
+        if (flip === null) {                     // Streifen-Normale radial wie die effektive Normale (sgn)?
+          const w = _sub3([(a0[0] + a1[0] + b1[0]) / 3, (a0[1] + a1[1] + b1[1]) / 3, (a0[2] + a1[2] + b1[2]) / 3], A.center), al = _dot3(w, z);
+          flip = Math.sign(_dot3(n1, [w[0] - z[0] * al, w[1] - z[1] * al, w[2] - z[2] * al])) !== src.sgn;
+        }
+        if (flip) tris.push([a0, b1, a1], [a0, b0, b1]); else tris.push([a0, a1, b1], [a0, b1, b0]);
+        area += (Math.hypot(n1[0], n1[1], n1[2]) + Math.hypot(n2[0], n2[1], n2[2])) / 2;
+      }
+      return { tris, area };
+    }
+    if (src.tube) {
+      let area = 0;
+      if (src.k === 0) {
+        for (const g of src.tube.groups) {
+          const vs = g.vertices;
+          for (let t = 0; t + 2 < vs.length; t += 3) {
+            const a = vs[t], b = vs[t + 1], c = vs[t + 2], cr = _cross3(_sub3(b, a), _sub3(c, a));
+            tris.push([a, b, c]); area += Math.hypot(cr[0], cr[1], cr[2]) / 2;
+          }
+        }
+      }
+      return { tris, area };
+    }
+    return null;
+  };
+  // Ecken einer emittierten Fläche (Schlüssel wie ptRegistry)
+  const faceVertexKeys = (src, out) => {
+    if (src.fd) {
+      for (const L of [src.fd.outer, ...src.fd.inner]) {
+        if (L.circleRim) { const v = rimVertex(L.circleRim); if (v) out.add(ptKey(v)); } else for (const p of L) out.add(ptKey(p));
+      }
+    } else if (src.band) {
+      for (const g of src.band) { const v = rimVertex(g); if (v) out.add(ptKey(v)); }
+    } else if (src.tube) {
+      for (const g of src.tube.spec.curves) { const v = rimVertex(g); if (v) out.add(ptKey(v)); }
+    }
+  };
+  // Raumwinkel des Dreiecks (a,b,c) von q aus (Van Oosterom/Strackee) — positiv, wenn die Normale von
+  // q wegzeigt; Summe über eine geschlossene, außen orientierte Hülle = 4π innen, 0 außen.
+  const solidAngle = (q, a, b, c) => {
+    const r1 = _sub3(a, q), r2 = _sub3(b, q), r3 = _sub3(c, q);
+    const l1 = Math.hypot(r1[0], r1[1], r1[2]), l2 = Math.hypot(r2[0], r2[1], r2[2]), l3 = Math.hypot(r3[0], r3[1], r3[2]);
+    const num = _dot3(r1, _cross3(r2, r3));
+    const den = l1 * l2 * l3 + _dot3(r1, r2) * l3 + _dot3(r1, r3) * l2 + _dot3(r2, r3) * l1;
+    return 2 * Math.atan2(num, den);
+  };
+  // Netz-Kanten, die schon in der Eingabe defekt sind (Rand, > 2 Nutzungen, gleichsinnig) → ihre
+  // Ecken. Offene Ränder der Ausgabe auf solchen Ecken stammen aus dem Netz, nicht aus der Umwandlung.
+  let inputDefectV = null;
+  const inputDefectVerts = () => {
+    if (inputDefectV) return inputDefectV;
+    const cnt = new Map();
+    for (const g of normalGroups) {
+      const vs = g.vertices;
+      for (let t = 0; t + 2 < vs.length; t += 3) {
+        for (const [p, q] of [[vs[t], vs[t + 1]], [vs[t + 1], vs[t + 2]], [vs[t + 2], vs[t]]]) {
+          const ia = vid(p), ib = vid(q);
+          if (ia === ib) continue;
+          const k = ia < ib ? ia * VID_M + ib : ib * VID_M + ia, s = ia < ib ? 1 : -1, e = cnt.get(k);
+          if (e) { e[0]++; e[1] += s; } else cnt.set(k, [1, s]);
+        }
+      }
+    }
+    inputDefectV = new Set();
+    for (const [k, [nU, s]] of cnt) if (nU !== 2 || s !== 0) { inputDefectV.add(vidKeys[Math.floor(k / VID_M)]); inputDefectV.add(vidKeys[k % VID_M]); }
+    return inputDefectV;
+  };
+  const defectFromInput = (k) => {
+    if (k.startsWith('c:')) return false;                                  // Kreis-Kanten gibt es im Netz nicht
+    const [k1, k2] = k.split('#')[0].split('||'), D = inputDefectVerts();
+    return D.has(k1) && D.has(k2);
+  };
+  // Kante k mit 2·m Nutzungen (m ≥ 2, nur ebene Flächen): Nutzungen nach dem Winkel um die Kante sortieren,
+  // Material-Keile abwechselnd; je Keil die beiden begrenzenden Flächen paaren → [[fi, fi], …] | null.
+  const pairEdgeUses = (k, faceIdx, faceSrc) => {
+    const uses = [];
+    for (const fi of new Set(faceIdx)) {
+      const src = faceSrc[fi];
+      if (!src || !src.fd) return null;
+      const fd = src.fd;
+      let found = 0;
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim) continue;
+        for (let i = 0; i < L.length; i++) {
+          const p1 = L[i], p2 = L[(i + 1) % L.length];
+          if (ptKey(p1) === ptKey(p2)) continue;
+          let ck = edgeCanonKey(p1, p2);
+          if (fd.fold && fd.fold.keys.has(ck)) ck += `#fold${fd.fold.id}`;
+          if (ck !== k) continue;
+          found++;
+          uses.push({ fi, t: _norm3(_sub3(p2, p1)), n: _norm3(fd.normal) });
+        }
+      }
+      if (found !== 1) return null;
+    }
+    if (uses.length < 4 || uses.length % 2) return null;
+    const e = uses[0].t;
+    for (const u of uses) u.d = _norm3(_cross3(u.n, u.t));                  // vom Rand in die Fläche hinein
+    const u0 = uses[0].d, w0 = _cross3(e, u0);
+    for (const u of uses) {
+      u.th = Math.atan2(_dot3(u.d, w0), _dot3(u.d, u0));
+      u.mat = _dot3(u.n, _cross3(e, u.d)) < 0;                               // Material im Keil danach (+Winkel)?
+    }
+    uses.sort((p, q) => p.th - q.th);
+    const pairs = [];
+    for (let j = 0; j < uses.length; j++) {
+      const p = uses[j], q = uses[(j + 1) % uses.length];
+      if (p.mat === q.mat) return null;                                      // Keile wechseln nicht ab
+      const dth = q.th - p.th + (j === uses.length - 1 ? 2 * Math.PI : 0);
+      if (!(dth > 1e-6)) return null;                                        // deckungsgleiche Flächen
+      if (p.mat) { if (!(_dot3(p.t, q.t) < 0)) return null; pairs.push([p.fi, q.fi]); }
+    }
+    return pairs;
+  };
+  // Zusammenhangskomponenten + Kanten-Bilanz je Komponente (über die aktuellen edgeUse/circleUse —
+  // direkt nach dem assemble()-Aufruf, zu dem faceKeys gehört).
+  const componentsOf = (faceKeys, splitKeys = null) => {
+    const nF = faceKeys.length, par = Array.from({ length: nF }, (_, i) => i);
+    const find = (i) => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+    const owner = new Map();
+    faceKeys.forEach((ks, i) => {
+      for (const k of ks) { const o = owner.get(k); if (o === undefined) owner.set(k, i); else { const ra = find(i), rb = find(o); if (ra !== rb) par[ra] = rb; } }
+    });
+    const compOf = new Int32Array(nF), comps = [], idx = new Map();
+    for (let i = 0; i < nF; i++) {
+      const r = find(i);
+      let c = idx.get(r);
+      if (c === undefined) { c = comps.length; idx.set(r, c); comps.push({ idx: c, faces: [], bE: 0, nmE: 0, oD: 0, nonInput: false }); }
+      compOf[i] = c; comps[c].faces.push(i);
+    }
+    const tally = (k, fwd, rev) => {
+      const fi = owner.get(k);
+      if (fi === undefined) return;
+      const c = comps[compOf[fi]], tot = fwd + rev;
+      if (tot === 1) c.bE++; else if (tot > 2) c.nmE++; else if (tot === 2 && fwd !== 1) c.oD++; else return;
+      if (!c.nonInput && !defectFromInput(k)) c.nonInput = true;
+    };
+    for (const [k, u] of edgeUse) if (!splitKeys || !splitKeys.has(k)) tally(k, u.fwd, u.rev);
+    for (const [rk, u] of circleUse) tally(`c:${rk}`, u.fwd, u.rev);
+    for (const c of comps) c.closed = c.bE === 0 && c.nmE === 0 && c.oD === 0;
+    return { comps, compOf };
+  };
+  const analyzeShells = (a) => {
+    const nF = a.faceIds.length, src = a.faceSrc;
+    // (1) Kanten mit 2·m Nutzungen je Material-Fächer aufteilen
+    const keyFaces = new Map();
+    a.faceKeys.forEach((ks, i) => { for (const k of ks) { const l = keyFaces.get(k); if (l) l.push(i); else keyFaces.set(k, [i]); } });
+    const split = new Map(), splitKeys = new Set();
+    let faceKeys = a.faceKeys;
+    for (const [k, u] of edgeUse) {
+      if (u.fwd + u.rev <= 2 || u.fwd !== u.rev) continue;
+      const pairs = pairEdgeUses(k, keyFaces.get(k) || [], src);
+      if (!pairs || pairs.length * 2 !== u.fwd + u.rev) continue;
+      if (faceKeys === a.faceKeys) faceKeys = a.faceKeys.slice();
+      splitKeys.add(k);
+      pairs.forEach((pr, j) => {
+        const nk = `${k}#nm${j}`;
+        for (const fi of pr) {
+          faceKeys[fi] = faceKeys[fi].map((x) => (x === k ? nk : x));
+          let m = split.get(src[fi].fd);
+          if (!m) { m = new Map(); split.set(src[fi].fd, m); }
+          m.set(k, nk);
+        }
+      });
+    }
+    // (2) Komponenten, Dichtheit, Umwandlung
+    const { comps, compOf } = componentsOf(faceKeys, splitKeys);
+    for (const c of comps) {
+      c.converted = c.faces.some((i) => { const s = src[i]; return !s || !s.fd || s.fd.untouched !== true || !!s.fd.outer.circleRim || s.fd.inner.some((L) => L.circleRim); });
+      c.planar = c.faces.every((i) => { const s = src[i]; return s && s.fd && !s.fd.outer.circleRim && !s.fd.inner.some((L) => L.circleRim); });
+      c.kind = c.closed ? 'koerper' : 'offen';
+      c.V = NaN;
+    }
+    // (3) Volumen + Fläche dichter Komponenten (Divergenzsatz, Bezugspunkt je Komponente)
+    for (const c of comps) {
+      if (!c.closed) continue;
+      let V = 0, A = 0, o = null, ok = true;
+      for (const i of c.faces) {
+        const ft = faceTris(src[i]);
+        if (!ft) { ok = false; break; }
+        A += ft.area;
+        for (const [p, q, r] of ft.tris) {
+          if (!o) o = p;
+          const pa = _sub3(p, o), pb = _sub3(q, o), pc = _sub3(r, o);
+          V += _dot3(pa, _cross3(pb, pc)) / 6;
+        }
+      }
+      if (ok && o) { c.V = V; c.A = A; c.thick = A > 0 ? 3 * Math.abs(V) / A : 0; }
+    }
+    const known = comps.filter((c) => c.closed && Number.isFinite(c.V));
+    for (const c of known) if (c.thick < DEGEN_THICK) c.kind = 'flach';
+    const solids = known.filter((c) => c.kind !== 'flach');
+    // (4) Lage: liegt c in einer anderen dichten Komponente? Probe = eine Ecke von c, die keiner anderen
+    //     Komponente gehört; Windungszahl über deren Flächen (Raumwinkel-Summe / 4π).
+    const vkeys = comps.length > 1 ? comps.map((c) => { const s = new Set(); for (const i of c.faces) if (src[i]) faceVertexKeys(src[i], s); return s; }) : null;
+    const vOwner = new Map();
+    if (vkeys) vkeys.forEach((s, ci) => { for (const k of s) { const o = vOwner.get(k); vOwner.set(k, o === undefined ? ci : (o === ci ? o : -1)); } });
+    let undecided = false;
+    if (solids.length > 1) {
+      let work = 0;
+      for (const c of solids) { c.tris = []; for (const i of c.faces) for (const t of faceTris(src[i]).tris) c.tris.push(t); work += c.tris.length; }
+      if (work * solids.length > CONTAIN_BUDGET) undecided = true;
+      else {
+        for (const c of solids) {
+          const bb = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+          for (const t of c.tris) for (const p of t) for (let d = 0; d < 3; d++) { if (p[d] < bb[d]) bb[d] = p[d]; if (p[d] > bb[d + 3]) bb[d + 3] = p[d]; }
+          c.bb = bb;
+        }
+        for (const c of solids) {
+          const ci = c.idx;
+          let q = null;
+          for (const i of c.faces) {
+            const s = src[i];
+            const L = s && s.fd ? [s.fd.outer, ...s.fd.inner].find((LL) => !LL.circleRim) : null;
+            if (L) for (const p of L) if (vOwner.get(ptKey(p)) === ci) { q = p; break; }
+            if (q) break;
+          }
+          if (!q) { const t = c.tris[0]; q = [(t[0][0] + t[1][0] + t[2][0]) / 3, (t[0][1] + t[1][1] + t[2][1]) / 3, (t[0][2] + t[1][2] + t[2][2]) / 3]; }
+          c.containers = [];
+          for (const P of solids) {
+            if (P === c || q[0] < P.bb[0] || q[1] < P.bb[1] || q[2] < P.bb[2] || q[0] > P.bb[3] || q[1] > P.bb[4] || q[2] > P.bb[5]) continue;
+            let w = 0;
+            for (const [ta, tb, tc] of P.tris) w += solidAngle(q, ta, tb, tc);
+            w /= 4 * Math.PI;
+            if (Math.abs(Math.abs(w) - Math.round(Math.abs(w))) > 0.25) undecided = true;   // Hülle nicht sauber geschlossen
+            if (Math.abs(w) > 0.5) c.containers.push(P);
+          }
+        }
+      }
+      for (const c of solids) c.tris = null;
+    }
+    // (5) Typ von außen nach innen: Gegenvorzeichen zum innersten Behälter = dessen Hohlraum (bzw. Insel)
+    const notes = [];
+    if (!undecided) {
+      solids.sort((p, q) => (p.containers ? p.containers.length : 0) - (q.containers ? q.containers.length : 0));
+      for (const c of solids) {
+        if (!c.containers || !c.containers.length) continue;
+        let P = c.containers[0];
+        for (const Q of c.containers) if (Math.abs(Q.V) < Math.abs(P.V)) P = Q;
+        if (Math.sign(c.V) === Math.sign(P.V)) { if (P.kind === 'hohlraum') notes.push({ art: 'unklar', flaechen: c.faces.length, volumen: c.V }); continue; }
+        if (P.kind !== 'koerper') continue;                                   // Insel im Hohlraum → Körper
+        c.kind = 'hohlraum'; c.parent = P;
+        const touches = vkeys && [...vkeys[c.idx]].some((k) => vOwner.get(k) === -1);
+        if (touches) {
+          if (Math.abs(c.V) <= POCKET_DROP_REL * Math.abs(P.V)) c.kind = 'tasche';
+          else notes.push({ art: 'hohlraum-beruehrt', flaechen: c.faces.length, volumen: c.V });
+        }
+      }
+    }
+    // (6) umdrehen / verwerfen — nur rein ebene Komponenten (Kreis-Kanten und analytische Flächen
+    //     tragen ihre Orientierung aus der Umwandlung; ein Widerspruch dort = Wächter-Fall → Rückfall)
+    const drop = new Set(), flip = new Set();
+    let shellFail = false;
+    for (const c of known) {
+      if (c.kind === 'flach' || c.kind === 'tasche') {
+        if (c.planar) { for (const i of c.faces) drop.add(src[i].fd); notes.push({ art: c.kind, flaechen: c.faces.length, volumen: c.V }); }
+        else { shellFail = true; c.kind = 'koerper'; }
+        continue;
+      }
+      if (undecided && c.V < 0) { shellFail = true; continue; }                // Lage unklar → nicht raten
+      if (c.V < 0) {
+        if (c.planar) { c.flip = true; for (const i of c.faces) flip.add(src[i].fd); if (c.kind === 'koerper') notes.push({ art: 'invertiert', flaechen: c.faces.length, volumen: c.V }); }
+        else shellFail = true;
+      }
+    }
+    // (7) Ecken je Komponente, sobald sich ausgegebene Komponenten Ecken teilen
+    let scope = null;
+    if (vkeys) {
+      const out = comps.map((c) => c.kind !== 'flach' && c.kind !== 'tasche');
+      let shared = false;
+      const vo = new Map();
+      vkeys.forEach((s, ci) => { if (!out[ci] || shared) return; for (const k of s) { const o = vo.get(k); if (o === undefined) vo.set(k, ci); else if (o !== ci) { shared = true; break; } } });
+      if (shared) {
+        scope = new Map();
+        comps.forEach((c, ci) => { for (const i of c.faces) for (const k of faceKeys[i]) scope.set(k, `K${ci}`); });
+      }
+    }
+    // Kennung je Fläche (über beide Durchgänge stabil) → Komponente
+    const compOfKey = new Map();
+    for (let i = 0; i < nF; i++) if (src[i]) compOfKey.set(src[i].key, compOf[i]);
+    const convFailed = comps.some((c) => !c.closed && (c.converted || c.nonInput));
+    return {
+      comps, compOfKey, notes, shellFail, convFailed,
+      opts: { split, drop, flip, scope },
+      pass2: split.size > 0 || drop.size > 0 || flip.size > 0 || scope !== null,
+    };
+  };
+  // Endgültige Schalen-Struktur eines Zusammenbaus (direkt nach dessen assemble()-Aufruf):
+  // Körper (Außenschale + Hohlräume) und offene Schalen, Typen aus der Analyse.
+  const shellsOf = (a, an) => {
+    const { comps } = componentsOf(a.faceKeys);
+    const bodies = [], opens = [], byComp = new Map(), pendingVoids = [];
+    let mismatch = false;
+    for (const c of comps) {
+      const fids = c.faces.map((i) => a.faceIds[i]);
+      let ac = null;
+      for (const i of c.faces) { const s = a.faceSrc[i]; const ci = s ? an.compOfKey.get(s.key) : undefined; if (ci !== undefined) { ac = an.comps[ci]; break; } }
+      if (ac && ac.closed !== c.closed) mismatch = true;
+      if (!c.closed) { opens.push(fids); continue; }
+      if (ac && ac.kind === 'hohlraum' && ac.parent) { pendingVoids.push({ ac, fids }); continue; }
+      const b = { faces: fids, voids: [] };
+      bodies.push(b);
+      if (ac) byComp.set(ac, b);
+    }
+    for (const { ac, fids } of pendingVoids) {
+      const b = byComp.get(ac.parent);
+      if (b) b.voids.push(fids); else { mismatch = true; bodies.push({ faces: fids, voids: [] }); }
+    }
+    return { bodies, opens, mismatch };
+  };
+  // Flächen gesetzt umgedreht ausgeben (Schalen-Analyse: invertiertes Netz, Hohlraum-Schale)
+  const flippedFaceDef = (fd) => ({
+    outer: fd.outer.slice().reverse(), inner: fd.inner.map((L) => L.slice().reverse()),
+    normal: [-fd.normal[0], -fd.normal[1], -fd.normal[2]], centroid: fd.centroid, fold: fd.fold,
+  });
+  // Zusammenbau + Schalen-Analyse (+ 2. Durchgang, wenn Kanten aufgeteilt, Schalen verworfen/umgedreht
+  // oder Ecken je Komponente angelegt werden müssen). failed() liest convFailed/shellFail.
+  const assembleSolids = (fds, plans, tubes = [], mantles = [], mantleCones = []) => {
+    let a = assemble(fds, plans, tubes, mantles, mantleCones);
+    const an = analyzeShells(a);
+    if (an.pass2) a = assemble(fds, plans, tubes, mantles, mantleCones, an.opts);
+    const sh = shellsOf(a, an);
+    a.bodies = sh.bodies; a.opens = sh.opens;
+    a.convFailed = an.convFailed || sh.mismatch;
+    a.shellFail = an.shellFail;
+    const r = a.report;
+    r.shells = sh.bodies.reduce((n, b) => n + 1 + b.voids.length, 0) + sh.opens.length;
+    r.solids = sh.bodies.length;
+    r.voids = sh.bodies.reduce((n, b) => n + b.voids.length, 0);
+    r.openShells = sh.opens.length;
+    r.invertedShells = an.notes.filter((x) => x.art === 'invertiert').length;
+    r.droppedShells = an.notes.filter((x) => x.art === 'flach' || x.art === 'tasche').length;
+    r.shellNotes = an.notes.slice(0, 20).map((x) => ({ art: x.art, flaechen: x.flaechen, volumen: Math.round(x.volumen * 1e6) / 1e6 }));
+    return a;
   };
 
   // ---- Kollineare Zwischenpunkte auf geraden Kanten entfernen ----
@@ -4436,6 +4922,7 @@ export function buildVolumeStepBrepV2(analysis) {
           f.normal = P.n;
         }
         f.group = fd.group;
+        f.untouched = !!fd.untouched && !(moves && moves.size);   // Schalen-Analyse: Teil einer unveränderten Fläche
         parts.push(f);
       }
     }
@@ -4506,23 +4993,37 @@ export function buildVolumeStepBrepV2(analysis) {
     report.nonPlanarMaxDev = Math.round(st.restMax * 1e7) / 1e7;
   };
 
+  // Schalen-Analyse: welche Flächen sind seit der Extraktion unverändert (nicht umgewandelt — dieselben
+  // Loop-Punkte wie im Herkunfts-Schnappschuss)? Vor enforcePlanarity/removeCollinearPoints markieren —
+  // beide ändern nichts an der Form (Teilflächen der Zerlegung erben die Marke, s. splitPlanar).
+  const markUntouched = (fds) => {
+    const same = (L, S) => { if (!S || L.circleRim || L.length !== S.length) return false; for (let i = 0; i < L.length; i++) if (L[i] !== S[i]) return false; return true; };
+    for (const fd of fds) {
+      const s = fd.src;
+      fd.untouched = !!s && fd.inner.length === s.inner.length && same(fd.outer, s.outer) && fd.inner.every((L, j) => same(L, s.inner[j]));
+    }
+  };
   const assembleCurrent = () => {
+    markUntouched(faceDefs);
     const pl = enforcePlanarity(faceDefs);
     faceDefs = pl.fds;
     removeCollinearPoints(faceDefs);
-    const a = assemble(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
+    const a = assembleSolids(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
     planarReport(a.report, pl.st);
     return a;
   };
-  // Ein Zusammenbau gilt als gescheitert, wenn die Hülle offen ist ODER der Orientierungs-Wächter
-  // eine analytische Fläche verworfen hat (s. assemble) — beides löst dieselben Fallback-Stufen
-  // aus. Die Wächter-Befunde aller Stufen werden aufsummiert (Report: orientationGuardFailures,
+  // Ein Zusammenbau gilt als gescheitert, wenn eine Schale offen ist, in der umgewandelt wurde bzw.
+  // deren offene Kanten nicht schon im Netz offen sind (convFailed, je Schale — ein loses Dreieck neben
+  // einem dichten Körper wirft dessen Bohrungen nicht mehr weg), ODER der Orientierungs-Wächter eine
+  // analytische Fläche verworfen hat (s. assemble), ODER eine Schale mit analytischen Flächen
+  // umgedreht/verworfen werden müsste (shellFail, Schalen-Analyse) — alles löst dieselben Fallback-
+  // Stufen aus. Die Wächter-Befunde aller Stufen werden aufsummiert (Report: orientationGuardFailures,
   // fallbackStage 0 = keiner, 1 = ohne Bohrungen/Mäntel/Kegel/Kanäle, 2 = facettiert).
   let guardTotal = 0, guardMsTotal = 0, fallbackStage = 0;
-  const failed = (a) => !a.report.watertight || (GUARD_FALLBACK && a.report.orientationGuardFailures > 0);
+  const failed = (a) => !!a.convFailed || (GUARD_FALLBACK && (a.report.orientationGuardFailures > 0 || !!a.shellFail));
   const tracked = (a) => { guardTotal += a.report.orientationGuardFailures; guardMsTotal += a.report.orientationGuardMs; return a; };
   runPipeline(true);
   let asm = tracked(assembleCurrent());
@@ -4543,16 +5044,20 @@ export function buildVolumeStepBrepV2(analysis) {
   let stage1Tried = false;
   if (converted && failed(asm)) {
     const stage1 = DEFEATURE && (finalPlans.length > 0 || tubePlans.length > 0 || mantlePlans.length > 0 || mantleConePlans.length > 0);
-    const pl = enforcePlanarity(buildFaceDefs(null));
+    const freshDefs = buildFaceDefs(null);
+    markUntouched(freshDefs);
+    const pl = enforcePlanarity(freshDefs);
     const fallbackDefs = pl.fds;
     removeCollinearPoints(fallbackDefs);
-    const base = tracked(assemble(fallbackDefs, []));
+    const base = tracked(assembleSolids(fallbackDefs, []));
     base.report.filletsDefeatured = 0;
     base.report.bandsDefeatured = 0;
     base.report.cornersDefeatured = 0;
     planarReport(base.report, pl.st);
     asm = base; fallbackStage = 2;
-    if (stage1 && !failed(base)) {
+    // Stufe 1 nur über einer vollständig dichten Basislinie (s. o.): eine schon im Netz offene Schale
+    // bleibt offen, eine Umwandlung darin scheitert in Stufe 1 genauso.
+    if (stage1 && !failed(base) && base.report.watertight) {
       stage1Tried = true;
       const baseEntities = entities.slice(entMark), baseId = id;
       runPipeline(false);
@@ -4591,32 +5096,54 @@ export function buildVolumeStepBrepV2(analysis) {
   const ctxId = id++;
   entities.push(`#${ctxId}=( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${uncId})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenUnitId},#${angUnitId},#${solUnitId})) REPRESENTATION_CONTEXT('','3D') );`);
 
-  // ---- Step 5: Wasserdicht → echter Volumenkörper (CLOSED_SHELL + MANIFOLD_SOLID_BREP),
-  // sonst offenes Flächenmodell (OPEN_SHELL) als Fallback, das das CAD selbst zu nähen versuchen kann.
-  // Je zusammenhängender Schale ein Körper (bzw. eine offene Schale); ein Körper = Ausgabe wie bisher.
-  const shells = asm.shells && asm.shells.length ? asm.shells : [allFaceIds];
+  // ---- Step 5: je dichter Schale ein echter Volumenkörper (CLOSED_SHELL + MANIFOLD_SOLID_BREP; mit
+  // Hohlräumen BREP_WITH_VOIDS, Hohlraum-Schale als ORIENTED_CLOSED_SHELL .F.), offene Schalen als
+  // Flächenmodell (OPEN_SHELL), das das CAD selbst zu nähen versuchen kann — neben Körpern als eigene
+  // Darstellung, über SHAPE_REPRESENTATION_RELATIONSHIP an dieselbe Produkt-Darstellung gebunden. Ein
+  // Körper ohne Hohlraum = Ausgabe wie bisher. (Typen: Schalen-Analyse, assembleSolids.)
+  const bodies = asm.bodies || [], opens = asm.opens || [];
   const refs = (ids) => ids.map((x) => `#${x}`).join(',');
-  let shapeRepId;
-  if (report.watertight) {
-    const solidIds = shells.map((fs) => {
-      const shellId = id++;
-      entities.push(`#${shellId}=CLOSED_SHELL('',(${refs(fs)}));`);
-      const solidId = id++;
-      entities.push(`#${solidId}=MANIFOLD_SOLID_BREP('V2 Solid',#${shellId});`);
-      return solidId;
-    });
-    shapeRepId = id++;
-    entities.push(`#${shapeRepId}=ADVANCED_BREP_SHAPE_REPRESENTATION('V2 Volume',(${refs(solidIds)}),#${ctxId});`);
-  } else {
-    const shellIds = shells.map((fs) => {
+  const addSurfaceModel = (name) => {
+    const shellIds = opens.map((fs) => {
       const shellId = id++;
       entities.push(`#${shellId}=OPEN_SHELL('',(${refs(fs)}));`);
       return shellId;
     });
     const surfaceModelId = id++;
     entities.push(`#${surfaceModelId}=SHELL_BASED_SURFACE_MODEL('V2 Reconstruction',(${refs(shellIds)}));`);
+    const repId = id++;
+    entities.push(`#${repId}=MANIFOLD_SURFACE_SHAPE_REPRESENTATION('${name}',(#${surfaceModelId}),#${ctxId});`);
+    return repId;
+  };
+  let shapeRepId;
+  if (bodies.length) {
+    const solidIds = bodies.map((b) => {
+      const shellId = id++;
+      entities.push(`#${shellId}=CLOSED_SHELL('',(${refs(b.faces)}));`);
+      const solidId = id++;
+      if (!b.voids.length) {
+        entities.push(`#${solidId}=MANIFOLD_SOLID_BREP('V2 Solid',#${shellId});`);
+        return solidId;
+      }
+      const voidIds = b.voids.map((vf) => {
+        const vsId = id++;
+        entities.push(`#${vsId}=CLOSED_SHELL('',(${refs(vf)}));`);
+        const ocsId = id++;
+        entities.push(`#${ocsId}=ORIENTED_CLOSED_SHELL('',*,#${vsId},.F.);`);
+        return ocsId;
+      });
+      entities.push(`#${solidId}=BREP_WITH_VOIDS('V2 Solid',#${shellId},(${refs(voidIds)}));`);
+      return solidId;
+    });
     shapeRepId = id++;
-    entities.push(`#${shapeRepId}=MANIFOLD_SURFACE_SHAPE_REPRESENTATION('V2 Volume',(#${surfaceModelId}),#${ctxId});`);
+    entities.push(`#${shapeRepId}=ADVANCED_BREP_SHAPE_REPRESENTATION('V2 Volume',(${refs(solidIds)}),#${ctxId});`);
+    if (opens.length) {
+      const surfRepId = addSurfaceModel('V2 Restflaechen');
+      const relId = id++;
+      entities.push(`#${relId}=SHAPE_REPRESENTATION_RELATIONSHIP('','',#${shapeRepId},#${surfRepId});`);
+    }
+  } else {
+    shapeRepId = addSurfaceModel('V2 Volume');
   }
 
   const appCtxId = id++;
