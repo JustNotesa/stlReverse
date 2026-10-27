@@ -248,6 +248,19 @@ function revolveBody(profile, n = 64, transform = null) {
   const T = G.makeTransform(transform), memo = new Map();
   return out.map((tr) => tr.map((p) => { let q = memo.get(p); if (!q) { q = T.apply(p); memo.set(p, q); } return q; }));
 }
+// Kegelstumpf/Zylinder (n Segmente) mit einem Innenpunkt je Wand-Facette (Fächer aus 4 Dreiecken), um `dent`
+// nach innen gedrückt — das Region-Growing hält die Facette bei kleiner Delle als EINE Ebene zusammen
+function dentedBody({ R0, R1, H, n = 16, dent = 0 }) {
+  const ring = (r, z) => Array.from({ length: n }, (_, i) => [r * Math.cos(2 * PI * i / n), r * Math.sin(2 * PI * i / n), z]);
+  const lo = ring(R0, 0), hi = ring(R1, H), out = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, m = [0, 1].map((k) => (lo[i][k] + lo[j][k] + hi[i][k] + hi[j][k]) / 4), rr = Math.hypot(m[0], m[1]);
+    const c = [m[0] * (1 - dent / rr), m[1] * (1 - dent / rr), H / 2];
+    out.push([lo[i], lo[j], c], [lo[j], hi[j], c], [hi[j], hi[i], c], [hi[i], lo[i], c]);
+  }
+  for (let i = 0; i < n; i++) out.push([[0, 0, 0], lo[(i + 1) % n], lo[i]], [[0, 0, H], hi[i], hi[(i + 1) % n]]);
+  return out;
+}
 // exaktes Volumen des Drehkörpers (Summe der Kegelstümpfe je Profilkante)
 const revolveVol = (pr) => pr.slice(1).reduce((v, [r2, z2], j) => { const [r1, z1] = pr[j]; return v + PI / 3 * (z2 - z1) * (r1 * r1 + r1 * r2 + r2 * r2); }, 0);
 // Formschräge-Säule aus gen.mjs (draftDeg): Eckradius oben = R − H·tan(α)/cos(π/n)
@@ -278,6 +291,10 @@ const MANTLE_OK = [
 ];
 for (const [name, body, vol, nCyl] of MANTLE_OK) {
   both(name, groupsOfMesh(meshOfTris(tris(body))), { mantles: 1, bores: nCyl - 1, cyl: nCyl, cone: 0, faces: nCyl + 2, vol });
+}
+{ // Innenpunkt je Wand-Facette (Fächer): liegt zwischen Sehnen-Polygon und Mantel → weiter ein Zylinder
+  const t = dentedBody({ R0: 10, R1: 10, H: 4 });
+  runCase('Welle R10 H4 (16 Seg.), Innenpunkt je Facette', groupsOfMesh(meshOfTris(t)), true, { mantles: 1, cyl: 1, faces: 3, vol: PI * 100 * 4, volTol: 1e-5, volX: true });
 }
 // verrundete Außenkanten: mit Toggle schärft v2 die Bänder → Mantel; ohne Toggle facettiert
 {
@@ -341,6 +358,7 @@ const CONE_OK = [
   ['Kegel mit Spitze gedreht + verschoben', coneBody({ R0: 5, R1: 0, H: 7, transform: { rot: [-40, 15, 70], t: [-120, 40, 33] } }), frustumVol(5, 0, 7), 2, false],
   ['Kegelstumpf auf Platte (Rand = Innen-Loop)', tris({ columns: [col(rectProfile(-15, -10, 30, 20), 0, 5), col(circleProfile(0, 0, 6, 64), 5, 14, { draftDeg: 15 })], caps: onPlateCaps }), 3000 + frustumVol(6, draftTop(6, 9, 15, 64), 9), 8, true],
   ['Kegel-Scheibe mit Bohrung (Kegel + Bohrungs-Zylinder)', tris({ columns: [col(circleProfile(0, 0, 8, 64), 0, 5, { draftDeg: 20 }), col(circleProfile(0, 0, 3, 32, true), 0, 5)] }), frustumVol(8, draftTop(8, 5, 20, 64), 5) - PI * 9 * 5, 4, true, 1],
+  ['Kegelstumpf 16 Seg. mit Innenpunkt je Facette (keine Delle)', dentedBody({ R0: 10, R1: 9, H: 4 }), frustumVol(10, 9, 4), 3, false],
 ];
 for (const [name, t, vol, faces, aus, nCyl = 0] of CONE_OK) {
   const groups = groupsOfMesh(meshOfTris(t));
@@ -360,10 +378,15 @@ const CONE_NO = [
   // Verdrillung: alle Punkte auf den Randkreisen, die Facetten aber auf einem Hyperboloid (wallSpanOk)
   ['Kegelstumpf, Wand 6° verdrillt', coneBody({ R0: 6, R1: 2.5, H: 9, twist: 6 })],
   ['Welle R5, Wand 15° verdrillt (Hyperboloid)', coneBody({ R0: 5, R1: 5, H: 20, twist: 15 })],
+  // verdeckte Delle: Innenpunkt der Facette 0.024 mm (> tol 0.02) innerhalb des Sehnen-Polygons. (Soll-Volumen
+  // = Netz OHNE Delle: auch der facettierte Export glättet sie — das Region-Growing fasst die Facette mit ihrem
+  // Innenpunkt bis 0.05 mm Unebenheit zu EINER Ebene zusammen, emittiert wird deren Rand.)
+  ['Welle R10 H4, Delle 0.024 mm im Facetten-Inneren', dentedBody({ R0: 10, R1: 10, H: 4, dent: 0.024 }), meshVol(dentedBody({ R0: 10, R1: 10, H: 4 }))],
+  ['Kegelstumpf R10→R9 H4, Delle 0.024 mm im Facetten-Inneren', dentedBody({ R0: 10, R1: 9, H: 4, dent: 0.024 }), meshVol(dentedBody({ R0: 10, R1: 9, H: 4 }))],
   ['konisches Loch (konkav) in einer Platte', tris({ columns: [col(rectProfile(-15, -10, 30, 20), 0, 8), col(circleProfile(0, 0, 4, 48, true), 0, 8, { draftDeg: -10 })] })],
 ];
-for (const [name, t] of CONE_NO) {
-  both(name, groupsOfMesh(meshOfTris(t)), { mantles: 0, mantleCones: 0, cyl: 0, cone: 0, vol: meshVol(t), volTol: 1e-5 });
+for (const [name, t, vol = meshVol(t)] of CONE_NO) {
+  both(name, groupsOfMesh(meshOfTris(t)), { mantles: 0, mantleCones: 0, cyl: 0, cone: 0, vol, volTol: 1e-5 });
 }
 
 // ════ 3c. Fasen an Zylinder-Mänteln (Kegel zwischen Mantel-Rand und Deckfläche) ════
