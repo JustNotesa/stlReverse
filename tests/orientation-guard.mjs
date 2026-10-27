@@ -18,6 +18,8 @@
 //         Verdikt NICHT — und tests/step-strict.mjs findet den Fehler unabhängig (orient-curved)
 //     (2) mit Fallback: Export fällt sauber zurück — wasserdicht, streng ohne Orientierungs-
 //         Verstöße, die verdrehte Flächenart ist nicht mehr enthalten, Defeaturing bleibt (Stufe 1)
+//   Rückfall je Merkmal: Test-Hook STLREV_TEST_BREAK = v1 | v2 | v2b verdirbt EINE Entrundung (offene
+//             Hülle) → nur sie bleibt facettiert, die übrigen bleiben scharf, keine Fallback-Stufe
 //   Laufzeit: Wächter-Anteil am Export (eBike; mit --stress zusätzlich 50k-Torus)
 //
 // Ausführen:  npm run test:orient          (Exit 0 = grün)
@@ -182,6 +184,31 @@ for (const n of NEG) {
   check(r.watertight && orientBad === 0, `Ergebnis wasserdicht, streng ohne Topologie-/Orientierungs-Verstöße ${JSON.stringify(s)}`);
   check(n.gone(r, res.step), 'verdrehte Flächenart nicht mehr im Export');
   if (n.keepsDefeature) check(r.fallbackStage === 1 && (r.bandsDefeatured > 0 || r.filletsDefeatured > 0), `Defeaturing bleibt erhalten (Stufe 1, ${r.bandsDefeatured} Bänder, ${r.cornersDefeatured} Ecken)`);
+}
+
+// ── Rückfall je Merkmal (Entrundung) ────────────────────────────────────────
+// Test-Hook STLREV_TEST_BREAK = v1 | v2 | v2b verdirbt die erste angewandte Entrundung dieser Art (eine
+// Nachbarfläche wird nicht nachgezogen → offene Hülle). Soll: genau DIESE Rundung bleibt facettiert,
+// alle anderen bleiben scharf — keine Fallback-Stufe, wasserdicht, streng sauber (früher: alles facettiert).
+const BREAK = [
+  { brk: 'v1', src: () => sampleGroups('plate_4fillets.stl'), name: 'plate_4fillets (4× v1)', want: { fillets: 3, bands: 0, corners: 0 } },
+  { brk: 'v1', src: () => genGroups('k1', G.BODIES.find((b) => b.id === 'k1')), name: 'Härtetest k1 (flache Tasche, 4× v1)', want: { fillets: 3, bands: 0, corners: 0 } },
+  { brk: 'v1', src: () => genGroups('k2', G.BODIES.find((b) => b.id === 'k2')), name: 'Härtetest k2 (Eckrundungen mit gefasten Enden, 4× v1)', want: { fillets: 3, bands: 0, corners: 0 } },
+  { brk: 'v2', src: () => fixtureGroups('v2_a_rechteck_r1.5.stl'), name: 'Härtetest a (2 Bänder)', want: { fillets: 0, bands: 1, corners: 0 } },
+  { brk: 'v2', src: () => fixtureGroups('v2_b_rechteck_bohrung.stl'), name: 'Härtetest b (4 Bänder + Bohrung)', want: { fillets: 0, bands: 3, corners: 0 } },
+  { brk: 'v2b', src: () => fixtureGroups('v2_c_rundrechteck_r1.stl'), name: 'Härtetest c (2 Bänder, 4 Ecken)', want: { fillets: 0, bands: 2, corners: 3 } },
+  { brk: 'v2b', src: () => sampleGroups(EBIKE), name: 'eBike verrundet (6 Bänder, 6 Ecken)', want: { fillets: 0, bands: 6, corners: 5 } },
+];
+for (const b of BREAK) {
+  origLog(`\nRückfall je Merkmal STLREV_TEST_BREAK=${b.brk} — ${b.name}`);
+  process.env.STLREV_TEST_BREAK = b.brk;
+  let res;
+  try { res = quiet(() => buildVolumeStepBrepV2({ normalGroups: b.src(), defeature: true })); } finally { delete process.env.STLREV_TEST_BREAK; }
+  const r = res.report, s = strictKinds(res.step);
+  check(r.fallbackStage === 0 && r.featuresDropped === 1 && r.featureRetries >= 1, `nur die verdorbene Entrundung zurückgenommen (Stufe ${r.fallbackStage}, ${r.featuresDropped} gesperrt, ${r.featureRetries} Neubau)`);
+  check(r.filletsDefeatured === b.want.fillets && r.bandsDefeatured === b.want.bands && r.cornersDefeatured === b.want.corners,
+    `übrige Entrundungen bleiben (v1 ${r.filletsDefeatured}/${b.want.fillets}, v2 ${r.bandsDefeatured}/${b.want.bands}, v2b ${r.cornersDefeatured}/${b.want.corners})`);
+  check(r.watertight && Object.keys(s).length === 0, `wasserdicht, streng ohne Verstöße ${JSON.stringify(s)}`);
 }
 
 // ── Laufzeit ────────────────────────────────────────────────────────────────
