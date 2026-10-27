@@ -825,14 +825,17 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       }
     }
   };
-  // Zwei Durchläufe über alle Seeds: erst mit Regel-Scharnier, dann (it ≥ T) nur mit Ausweich-
-  // Scharnier (siehe seedHinge). Der Ausweich-Durchlauf sieht nur, was der erste übrig ließ —
-  // dessen Ergebnisse bleiben damit unverändert. Ausweich-Scharniere schon im ersten Durchlauf
-  // zerlegten z.B. die gebogene Bohrung des eBike-Halters anders (−1 Bohrung, empirisch belegt).
-  for (let it = 0; it < 2 * T; it++) {
-    const fallback = it >= T;
-    const seed = fallback ? it - T : it;
+  // Drei Durchläufe über alle Seeds: erst mit Regel-Scharnier, dann (it ≥ T) nur mit Ausweich-
+  // Scharnier (siehe seedHinge), drittens (it ≥ 2T) der „Strikt-Durchlauf": dort kommt der
+  // Radius-Fit NUR aus exakt ⊥ Facetten — und nur, wenn die übrigen Boot-Facetten eine einheitlich
+  // geneigte Fasen-Reihe bilden (flache Fasen < 15° an Wellen verfälschten sonst den Radius-Fit).
+  // Der dritte Durchlauf sieht nur, was Durchlauf 1+2 übrig ließen → bisherige Ergebnisse unverändert.
+  for (let it = 0; it < 3 * T; it++) {
+    const strictPass = it >= 2 * T;
+    const fallback = it >= T && !strictPass;
+    const seed = it % T;
     if (it === T) { p1fallback = true; p1tried.fill(0); edgeAxisState.fill(0); } // neue Start-Achsen
+    if (it === 2 * T) { p1fallback = false; p1tried.fill(0); edgeAxisState.fill(0); } // Strikt: Regel-Scharnier
     if (visited[seed] || p1tried[seed]) continue;
     if (growWork > PHASE1_BUDGET) { phase1Truncated = true; break; }
     // Saat-Scharnier (gemeinsame Kante seed↔nb → Achsrichtung), nur über freie Nachbarn
@@ -865,7 +868,22 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     let strictN = 0;
     for (const ti of boot) if (Math.abs(dot(tris[ti].n, axis0)) <= STRICT_PERP) strictN++;
     if (strictN < 4) continue;
-    const circ0 = robustFitTris(boot, axis0);
+    let fitSet = boot;
+    if (strictPass) {
+      const sb = boot.filter((ti) => Math.abs(dot(tris[ti].n, axis0)) <= STRICT_PERP);
+      if (sb.length < 6 || sb.length === boot.length) continue;
+      // Die übrigen (geneigten) Boot-Facetten müssen je Seite EINE Kegel-Reihe sein (Fase): je Vorzeichen
+      // von n·axis0 Streuung ≤ 0.02 und |Wert| ≥ 0.05 — ein gebogener Kanal/Torus hat wechselnde Neigung und fällt heraus.
+      let lo1 = Infinity, hi1 = -Infinity, lo2 = Infinity, hi2 = -Infinity;
+      for (const ti of boot) {
+        const d = dot(tris[ti].n, axis0);
+        if (Math.abs(d) <= STRICT_PERP) continue;
+        if (d > 0) { if (d < lo1) lo1 = d; if (d > hi1) hi1 = d; } else { if (d < lo2) lo2 = d; if (d > hi2) hi2 = d; }
+      }
+      if ((hi1 >= lo1 && (hi1 - lo1 > 0.02 || lo1 < 0.05)) || (hi2 >= lo2 && (hi2 - lo2 > 0.02 || hi2 > -0.05))) continue;
+      fitSet = sb;
+    }
+    const circ0 = robustFitTris(fitSet, axis0);
     if (!circ0 || !(circ0.radius >= MIN_RADIUS && circ0.radius <= MAX_RADIUS)) continue;
     // Wachsen + Nachfitten (enge Toleranz — die Achse ist ja exakt)
     p1tried[seed] = 1; // derselbe Seed wird in Phase 1 nie zweimal probiert
