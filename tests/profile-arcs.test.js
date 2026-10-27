@@ -3,6 +3,7 @@
 import {
   ARC_DEFAULTS, findArcBands, fitCircle2d, makeFrame, toLocal, axisCandidates,
   validateArcBands, applyArcBands, edgeCanonKey,
+  arcGeometry, arcSamples, bandSurface, buildArcPlans, expandArcLoop,
 } from '../profile-arcs.js';
 
 const vtxKey = (p) => p.map((x) => (+x.toFixed(4) || 0).toFixed(4)).join(',');
@@ -18,6 +19,7 @@ const norm3 = (a) => {
   const l = Math.hypot(a[0], a[1], a[2]);
   return l > 0 ? [a[0] / l, a[1] / l, a[2] / l] : [0, 0, 0];
 };
+const len3 = (a) => Math.hypot(a[0], a[1], a[2]);
 
 // Rodrigues-Drehung um die Achse a (wird normiert), Winkel in rad
 function rotAxis(a, ang) {
@@ -494,6 +496,108 @@ describe('profile-arcs.js — Band-Erkennung', () => {
       const kinds = rec.owners.map((ow) => det.bands[ow.band].kind).sort();
       if (kinds[0] === 'cyl' && kinds[1] === 'cone') expect(rec.owners.length).toBe(2);
     }
+  });
+
+  // ── Exakte Geometrie + Pläne (spec-T2, Abschnitt 3/4) ─────────────────────
+  const written9 = (p) => p.map((x) => +x.toFixed(9));
+
+  test('16: Fall 3 — buildArcPlans: 12 Pläne, failed leer, Radien/Semi-Winkel exakt', () => {
+    const fds = fall3();
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    const { plans, geoms, failed } = buildArcPlans(fds, det, written9, { vtxKey });
+    expect(failed.size).toBe(0);
+    expect(plans.length).toBe(12);
+    expect(geoms.size).toBe(16);
+    for (const g of geoms.values()) {
+      expect(g).toBeTruthy();
+      expect(Math.abs(len3(sub3(g.Aw, g.center)) - g.radius)).toBeLessThan(1e-9);
+      expect(Math.abs(len3(sub3(g.Bw, g.center)) - g.radius)).toBeLessThan(1e-9);
+      expect([4.5, 5].some((r) => Math.abs(g.radius - r) < 1e-6)).toBe(true);
+    }
+    const cyl = plans.filter((p) => p.kind === 'cyl');
+    const cone = plans.filter((p) => p.kind === 'cone');
+    expect(cyl.length).toBe(4);
+    expect(cone.length).toBe(8);
+    for (const p of cyl) {
+      expect(p.surf.kind).toBe('cyl');
+      expect(Math.abs(p.surf.radius - 5)).toBeLessThan(1e-6);
+      expect(Math.abs(p.area - (Math.PI / 2) * 5 * 9)).toBeLessThan(0.05);
+    }
+    for (const p of cone) {
+      expect(p.surf.kind).toBe('cone');
+      expect(Math.abs(p.surf.semiAngle - Math.PI / 4)).toBeLessThan(1e-6);
+    }
+    for (const p of plans) {
+      expect(p.sag).toBeGreaterThan(0.02);
+      expect(p.sag).toBeLessThan(0.03);
+      expect(p.dV).toBeGreaterThan(0);
+      expect(p.tris.length).toBe(2 * Math.max(8, 2 * p.band.nSegs));
+      expect(p.sig).toBeTruthy();
+      expect(p.segs).toBe(p.band.segs);
+      expect(p.sense).toBe(1);
+    }
+  });
+
+  test('17: gedrehter Fall — 12 Pläne, failed leer', () => {
+    const full = roundedRect(40, 30, [5, 5, 5, 5], 8);
+    const ins = roundedRect(39, 29, [4.5, 4.5, 4.5, 4.5], 8);
+    const xf = makeXform([20, 35, 10], [50, -20, 7]);
+    const fds = extrude([
+      { z: 0, pts2d: ins }, { z: 0.5, pts2d: full },
+      { z: 9.5, pts2d: full }, { z: 10, pts2d: ins },
+    ], xf);
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    const { plans, geoms, failed } = buildArcPlans(fds, det, written9, { vtxKey });
+    expect(failed.size).toBe(0);
+    expect(plans.length).toBe(12);
+    expect(geoms.size).toBe(16);
+    for (const p of plans.filter((x) => x.kind === 'cyl')) {
+      expect(Math.abs(p.surf.radius - 5)).toBeLessThan(1e-6);
+    }
+    for (const p of plans.filter((x) => x.kind === 'cone')) {
+      expect(Math.abs(p.surf.semiAngle - Math.PI / 4)).toBeLessThan(1e-6);
+    }
+  });
+
+  test('18: expandArcLoop — 4·(16−1) zusätzliche Punkte, alle auf ihren Kreisen', () => {
+    const fds = fall3();
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    const res = applyArcBands(fds, det, { vtxKey });
+    const { geoms } = buildArcPlans(fds, det, written9, { vtxKey });
+    const caps = res.fds.filter((fd) => fd.arcEdges instanceof Map && fd.arcEdges.size);
+    expect(caps.length).toBe(2);
+    for (const cap of caps) {
+      const expanded = expandArcLoop(cap.outer, cap.arcEdges, geoms, vtxKey, 16);
+      expect(expanded.length).toBe(cap.outer.length + 4 * 15);
+      const circles = [...cap.arcEdges.values()].map((k) => geoms.get(k));
+      expect(circles.every(Boolean)).toBe(true);
+      for (const p of expanded) {
+        const on = circles.some((g) => Math.abs(len3(sub3(p, g.center)) - g.radius) < 1e-6);
+        expect(on).toBe(true);
+      }
+      // die 15 inneren Proben je Bogen stecken in der Liste
+      for (const g of circles) {
+        for (const p of arcSamples(g, 16).slice(1, -1)) {
+          expect(expanded.some((q) => vtxKey(q) === vtxKey(p))).toBe(true);
+        }
+      }
+      // Original unverändert
+      expect(cap.outer.length).toBe(8);
+    }
+  });
+
+  test('19: gestörte Geometrie — lo-Punkt radial um 0.05 verschoben → kein Band', () => {
+    const prof = roundedRect(20, 10, [3, 0, 0, 0], 6);
+    const c = [20 / 2 - 3, -10 / 2 + 3];
+    const a = -45 * Math.PI / 180;
+    expect(Math.abs(prof[3][0] - (c[0] + 3 * Math.cos(a)))).toBeLessThan(1e-9);
+    const moved = [c[0] + 3.05 * Math.cos(a), c[1] + 3.05 * Math.sin(a)];
+    const prof2 = prof.map((q, i) => (i === 3 ? moved : q));
+    const fds = extrude([{ z: 0, pts2d: prof2 }, { z: 8, pts2d: prof }]);
+    expect(run(fds).bands.length).toBe(0);
   });
 });
 
