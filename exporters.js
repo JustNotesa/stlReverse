@@ -13,6 +13,8 @@ import {
   defaultBounds, rectangleFromBounds
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=3';
+// Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, arcSamples, expandArcLoop } from './profile-arcs.js';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
@@ -223,6 +225,10 @@ export function buildVolumeStepBrepV2(analysis) {
   // v2 nicht schärfen kann (z.B. echte Fase), → Kegel-Fase (Chamfer-Pfad).
   // OFF = Verrundungen bleiben (facettiert); nur exakte Direkt-Treffer konvertieren weiter.
   const DEFEATURE = analysis?.defeature !== false;
+  // Profil-Bögen (profile-arcs.js): Schalter + Sperrliste
+  const ARCS = analysis?.profileArcs !== false;   // Profil-Bögen (profile-arcs.js)
+  const arcBlocked = new Set();                     // Band-Signaturen, die facettiert bleiben (Rückfall)
+  let arcStats = { tried: 0, retries: 0, dropped: 0 };
 
   // ---- Test-Hooks (nur Tests/Node, tests/orientation-guard.mjs): STLREV_TEST_FLIP='bore'|'mantle'|
   // 'mantlecone'|'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen
@@ -3993,17 +3999,49 @@ export function buildVolumeStepBrepV2(analysis) {
     faceKeySink.push(`c:${rimKey}`);
   };
 
+  // Profil-Bögen (profile-arcs.js): Registry der Bogen-Kanten (EDGE_CURVE mit CIRCLE) + Nutzungszähler
+  const arcRegistry = new Map();   // arcKey → { ecId, startKey }
+  const arcUse = new Map();        // arcKey → { fwd, rev }
+  let arcGeoms = null;             // Map arcKey → geom (aus buildArcPlans) für den laufenden Zusammenbau
+  const getOrCreateArcEdge = (g) => {
+    if (!arcRegistry.has(g.key)) {
+      const tag = edgeScope ? edgeScope.get(`a:${g.key}`) || '' : '';
+      const vA = getVertex(g.A, tag), vB = getVertex(g.B, tag);
+      const circleId = addCircle(addAxis2Placement3D(g.center, g.axis, g.refDir), g.radius);
+      arcRegistry.set(g.key, { ecId: addEdgeCurve(vA.vtxId, vB.vtxId, circleId), startKey: ptKey(g.A) });
+    }
+    return arcRegistry.get(g.key);
+  };
+  const useArc = (key, forward) => {
+    const u = arcUse.get(key) || { fwd: 0, rev: 0 };
+    if (forward) u.fwd++; else u.rev++;
+    arcUse.set(key, u);
+    faceKeySink.push(`a:${key}`);
+  };
+
   // ---- Step 3: Build ADVANCED_FACEs ----
   // fold (optional, aus enforcePlanarity): { id, keys } — Kanten zwischen Teilflächen einer
   // zerlegten Fläche, die im Netz non-manifold sind, laufen über eine eigene Kanten-Instanz.
   // split (optional, Schalen-Analyse): Map Schlüssel → eigener Schlüssel dieser Fläche — eine Kante,
   // an der sich zwei Körper berühren (4 Nutzungen), wird je Körper-Fächer eine eigene Instanz.
-  const buildLoopEdges = (points, fold, split = null) => {
+  const buildLoopEdges = (points, fold, split = null, arcEdges = null) => {
     const oeIds = [];
     const n = points.length;
     for (let i = 0; i < n; i++) {
       const p1 = points[i], p2 = points[(i + 1) % n];
       if (ptKey(p1) === ptKey(p2)) continue; // skip degenerate
+      // Profil-Bögen (profile-arcs.js): Kante mit Bogen-Geometrie → CIRCLE-Kante statt LINE
+      if (arcEdges) {
+        const ak = arcEdges.get(edgeCanonKey(p1, p2));
+        if (ak !== undefined) {
+          const g = arcGeoms && arcGeoms.get(ak);
+          if (!g) throw new Error('Bogen ohne Geometrie: ' + ak);
+          const e = getOrCreateArcEdge(g), fwd = ptKey(p1) === e.startKey;
+          useArc(ak, fwd);
+          oeIds.push(addOrientedEdge(e.ecId, fwd));
+          continue;
+        }
+      }
       let ck = edgeCanonKey(p1, p2);
       if (fold && fold.keys.has(ck)) ck += `#fold${fold.id}`;
       if (split) { const s = split.get(ck); if (s) ck = s; }
@@ -4329,10 +4367,12 @@ export function buildVolumeStepBrepV2(analysis) {
   // shellOpts (optional, 2. Durchgang der Schalen-Analyse, s. assembleSolids): { drop: Set<faceDef>
   // (Schale verworfen), flip: Set<faceDef> (umgedreht ausgeben), split: Map<faceDef, Map<Schlüssel,
   // eigener Schlüssel>>, scope: Map<Kanten-Schlüssel, Komponente> (Ecken je Komponente) }.
-  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = [], mantleConesArg = [], shellOpts = null) => {
+  const assemble = (faceDefsArg, plans, tubesArg = [], mantlesArg = [], mantleConesArg = [], shellOpts = null, arcsArg = null) => {
     entities.length = entMark; id = idMark;
     ptRegistry.clear(); edgeRegistry.clear(); edgeUse.clear();
     circleRegistry.clear(); circleUse.clear();
+    // Profil-Bögen (profile-arcs.js): Bogen-Kanten und ihre Geometrie für diesen Zusammenbau
+    arcRegistry.clear(); arcUse.clear(); arcGeoms = arcsArg ? arcsArg.geoms : null;
     edgeScope = shellOpts && shellOpts.scope ? shellOpts.scope : null;
     // verworfene Schalen (2. Durchgang) setzen keine Eckpunkte — ihre Ebenen zählen nicht mit
     const snapRes = snapToPlanes(shellOpts && shellOpts.drop && shellOpts.drop.size ? faceDefsArg.filter((fd) => !shellOpts.drop.has(fd)) : faceDefsArg);
@@ -4369,7 +4409,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const fd of faceDefsArg) {
       if (shellOpts && shellOpts.drop && shellOpts.drop.has(fd)) continue;           // verworfene Schale
       const flip = !!(shellOpts && shellOpts.flip && shellOpts.flip.has(fd));
-      const { outer, inner, normal, centroid, fold } = flip ? flippedFaceDef(fd) : fd;
+      const { outer, inner, normal, centroid, fold, arcEdges } = flip ? flippedFaceDef(fd) : fd;
       const split = shellOpts && shellOpts.split ? shellOpts.split.get(fd) || null : null;
       let outerBound;
       if (outer.circleRim) {
@@ -4379,7 +4419,7 @@ export function buildVolumeStepBrepV2(analysis) {
         useCircle(rim.rimKey, fwd);
         outerBound = addFaceOuterBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)]));
       } else {
-        const outerOe = buildLoopEdges(outer, fold, split);
+        const outerOe = buildLoopEdges(outer, fold, split, arcEdges || null);
         if (outerOe.length < 3) { faceKeySink = []; continue; }
         outerBound = addFaceOuterBound(addEdgeLoop(outerOe));
       }
@@ -4393,7 +4433,7 @@ export function buildVolumeStepBrepV2(analysis) {
           bounds.push(addFaceBound(addEdgeLoop([addOrientedEdge(ce.ecId, fwd)])));
           continue;
         }
-        const innerOe = buildLoopEdges(innerLoop, fold, split);
+        const innerOe = buildLoopEdges(innerLoop, fold, split, arcEdges || null);
         if (innerOe.length < 3) continue;
         bounds.push(addFaceBound(addEdgeLoop(innerOe)));
       }
@@ -4619,6 +4659,35 @@ export function buildVolumeStepBrepV2(analysis) {
       }
     }
 
+    // Profil-Bögen (profile-arcs.js): je Band EINE CYLINDRICAL_/CONICAL_SURFACE, Rand = Bogen–Gerade–Bogen–Gerade
+    // in Facetten-Umlaufrichtung (Fläche links), same_sense aus den Facetten-Normalen
+    for (const pl of (arcsArg ? arcsArg.plans : [])) {
+      const s = pl.surf;
+      const plac = addAxis2Placement3D(s.loc, s.axis, s.refDir);
+      const surf = s.kind === 'cyl' ? addCylindricalSurface(plac, s.radius) : addConicalSurface(plac, s.radius, s.semiAngle);
+      const oe = [];
+      for (const seg of pl.segs) {
+        if (seg.type === 'arc') {
+          const g = arcGeoms.get(seg.arcKey);
+          const e = getOrCreateArcEdge(g), fwd = ptKey(seg.pts[0]) === e.startKey;
+          useArc(seg.arcKey, fwd);
+          oe.push(addOrientedEdge(e.ecId, fwd));
+        } else {
+          for (let i = 0; i + 1 < seg.pts.length; i++) {
+            const p1 = seg.pts[i], p2 = seg.pts[i + 1];
+            if (ptKey(p1) === ptKey(p2)) continue;
+            let ck = edgeCanonKey(p1, p2);
+            if (shellOpts && shellOpts.split) { /* nichts: Bänder werden nicht aufgeteilt */ }
+            const edge = getOrCreateEdge(p1, p2, ck), fwd = ptKey(p1) === edge.startKey;
+            const u = edgeUse.get(ck) || { fwd: 0, rev: 0 }; if (fwd) u.fwd++; else u.rev++; edgeUse.set(ck, u);
+            faceKeySink.push(ck);
+            oe.push(addOrientedEdge(edge.ecId, fwd));
+          }
+        }
+      }
+      emitFace(addAdvancedFace([addFaceOuterBound(addEdgeLoop(oe))], surf, pl.sense > 0), { arcBand: pl, key: pl });
+    }
+
     // Wasserdicht-Verdikt: Linien-Kanten (edgeUse) UND Kreis-Kanten (circleUse) nach denselben
     // Regeln zählen (1× = Randkante, >2 = non-manifold, 2 aber nicht 1fwd/1rev = Orientierungsfehler).
     let bE = 0, nmE = 0, oD = 0;
@@ -4630,6 +4699,7 @@ export function buildVolumeStepBrepV2(analysis) {
     };
     for (const u of edgeUse.values()) tally(u.fwd, u.rev);
     for (const u of circleUse.values()) tally(u.fwd, u.rev);
+    for (const u of arcUse.values()) tally(u.fwd, u.rev);   // Profil-Bögen (profile-arcs.js)
     // Zusammenhangskomponenten über gemeinsame Kanten: ein Netz aus mehreren Körpern (dino: 4)
     // wird zu mehreren Schalen — ein CLOSED_SHELL muss zusammenhängend sein (ISO 10303-42), eine
     // zerfallene Schale lehnen strikte Importer ab bzw. zerlegen sie still.
@@ -4647,7 +4717,7 @@ export function buildVolumeStepBrepV2(analysis) {
       report: {
         faceCount: faceIds.length,
         shells: shellMap.size,
-        edgeCount: edgeUse.size + circleUse.size,
+        edgeCount: edgeUse.size + circleUse.size + arcUse.size,
         boundaryEdges: bE, nonManifoldEdges: nmE, orientationDefects: oD,
         watertight: bE === 0 && nmE === 0 && oD === 0,
         boresConverted: plans.length,
@@ -4664,6 +4734,12 @@ export function buildVolumeStepBrepV2(analysis) {
         // snapToPlanes: auf ihre Ebenen gesetzte Eckpunkte / nicht setzbare (Rest bleibt) / größter Weg
         snappedVertices: snapRes.moved, snapKept: snapRes.kept,
         snapMaxMove: Math.round(snapRes.maxMove * 1e9) / 1e9,
+        // Profil-Bögen (profile-arcs.js): Bänder → echte Zylinder-/Kegel-Flächen (statt Facetten)
+        arcCylinders: arcsArg ? arcsArg.plans.filter((p) => p.kind === 'cyl').length : 0,
+        arcCones: arcsArg ? arcsArg.plans.filter((p) => p.kind === 'cone').length : 0,
+        arcFacetsReplaced: arcsArg ? arcsArg.plans.reduce((n, p) => n + ((p.band && p.band.facets) || []).length, 0) : 0,
+        arcMaxSagitta: arcsArg ? Math.max(0, ...arcsArg.plans.map((p) => p.sag || 0)) : 0,
+        arcVolumeDelta: arcsArg ? Math.round(arcsArg.plans.reduce((n, p) => n + (p.dV || 0), 0) * 1e6) / 1e6 : 0,
       },
     };
   };
@@ -4711,6 +4787,8 @@ export function buildVolumeStepBrepV2(analysis) {
   // Ebenenpunkt aus, Kreise im emittierten Umlaufsinn; Zylinder/Kegel: Streifen zwischen den Rand-
   // Kreisen; Kanal: Original-Facetten, einmal je Kanal) + Flächeninhalt. null = Fläche unbekannt.
   const faceTris = (src) => {
+    // Profil-Bögen (profile-arcs.js): Bogen-Fläche → ihre (exakten) Dreiecke
+    if (src && src.arcBand) return { tris: src.arcBand.tris, area: src.arcBand.area };
     if (!src) return null;
     const tris = [];
     if (src.fd) {
@@ -4725,6 +4803,9 @@ export function buildVolumeStepBrepV2(analysis) {
           let s = 0;
           for (let i = 0; i < P.length; i++) s += _dot3(_cross3(P[i], P[(i + 1) % P.length]), n);
           if ((li === 0) !== (s > 0)) P = P.slice().reverse();
+        } else if (fd.arcEdges && arcGeoms) {
+          // Profil-Bögen (profile-arcs.js): Bogen-Kanten auf ihre exakten Bogen-Punkte aufweiten
+          P = expandArcLoop(L, fd.arcEdges, arcGeoms, vtxKey);
         }
         for (let i = 0; i < P.length; i++) {
           const a = P[i], b = P[(i + 1) % P.length];
@@ -4780,6 +4861,9 @@ export function buildVolumeStepBrepV2(analysis) {
       for (const g of src.band) { const v = rimVertex(g); if (v) out.add(ptKey(v)); }
     } else if (src.tube) {
       for (const g of src.tube.spec.curves) { const v = rimVertex(g); if (v) out.add(ptKey(v)); }
+    } else if (src.arcBand) {
+      // Profil-Bögen (profile-arcs.js): Ecken der Bogen-Fläche = Enden der Rand-Stücke
+      for (const seg of src.arcBand.segs) for (const p of [seg.pts[0], seg.pts[seg.pts.length - 1]]) out.add(ptKey(p));
     }
   };
   // Raumwinkel des Dreiecks (a,b,c) von q aus (Van Oosterom/Strackee) — positiv, wenn die Normale von
@@ -4814,6 +4898,7 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   const defectFromInput = (k) => {
     if (k.startsWith('c:')) return false;                                  // Kreis-Kanten gibt es im Netz nicht
+    if (k.startsWith('a:')) return false;                                  // Profil-Bögen (profile-arcs.js)
     const [k1, k2] = k.split('#')[0].split('||'), D = inputDefectVerts();
     return D.has(k1) && D.has(k2);
   };
@@ -4825,6 +4910,7 @@ export function buildVolumeStepBrepV2(analysis) {
       const src = faceSrc[fi];
       if (!src || !src.fd) return null;
       const fd = src.fd;
+      if (fd.arcEdges) return null;    // Profil-Bögen (profile-arcs.js): keine Aufteilung
       let found = 0;
       for (const L of [fd.outer, ...fd.inner]) {
         if (L.circleRim) continue;
@@ -4884,6 +4970,7 @@ export function buildVolumeStepBrepV2(analysis) {
     };
     for (const [k, u] of edgeUse) if (!splitKeys || !splitKeys.has(k)) tally(k, u.fwd, u.rev);
     for (const [rk, u] of circleUse) tally(`c:${rk}`, u.fwd, u.rev);
+    for (const [ak, u] of arcUse) tally(`a:${ak}`, u.fwd, u.rev);   // Profil-Bögen (profile-arcs.js)
     for (const c of comps) c.closed = c.bE === 0 && c.nmE === 0 && c.oD === 0;
     return { comps, compOf };
   };
@@ -4913,8 +5000,8 @@ export function buildVolumeStepBrepV2(analysis) {
     // (2) Komponenten, Dichtheit, Umwandlung
     const { comps, compOf } = componentsOf(faceKeys, splitKeys);
     for (const c of comps) {
-      c.converted = c.faces.some((i) => { const s = src[i]; return !s || !s.fd || s.fd.untouched !== true || !!s.fd.outer.circleRim || s.fd.inner.some((L) => L.circleRim); });
-      c.planar = c.faces.every((i) => { const s = src[i]; return s && s.fd && !s.fd.outer.circleRim && !s.fd.inner.some((L) => L.circleRim); });
+      c.converted = c.faces.some((i) => { const s = src[i]; return !s || !s.fd || s.fd.untouched !== true || !!s.fd.outer.circleRim || s.fd.inner.some((L) => L.circleRim) || !!s.fd.arcEdges; });
+      c.planar = c.faces.every((i) => { const s = src[i]; return s && s.fd && !s.fd.outer.circleRim && !s.fd.inner.some((L) => L.circleRim) && !s.fd.arcEdges; });
       c.kind = c.closed ? 'koerper' : 'offen';
       c.V = NaN;
     }
@@ -5059,13 +5146,14 @@ export function buildVolumeStepBrepV2(analysis) {
   const flippedFaceDef = (fd) => ({
     outer: fd.outer.slice().reverse(), inner: fd.inner.map((L) => L.slice().reverse()),
     normal: [-fd.normal[0], -fd.normal[1], -fd.normal[2]], centroid: fd.centroid, fold: fd.fold,
+    arcEdges: fd.arcEdges,   // Profil-Bögen (profile-arcs.js): Bogen-Kanten mitnehmen
   });
   // Zusammenbau + Schalen-Analyse (+ 2. Durchgang, wenn Kanten aufgeteilt, Schalen verworfen/umgedreht
   // oder Ecken je Komponente angelegt werden müssen). failed() liest convFailed/shellFail.
-  const assembleSolids = (fds, plans, tubes = [], mantles = [], mantleCones = []) => {
-    let a = assemble(fds, plans, tubes, mantles, mantleCones);
+  const assembleSolids = (fds, plans, tubes = [], mantles = [], mantleCones = [], arcs = null) => {
+    let a = assemble(fds, plans, tubes, mantles, mantleCones, null, arcs);
     const an = analyzeShells(a);
-    if (an.pass2) a = assemble(fds, plans, tubes, mantles, mantleCones, an.opts);
+    if (an.pass2) a = assemble(fds, plans, tubes, mantles, mantleCones, an.opts, arcs);
     const sh = shellsOf(a, an);
     a.bodies = sh.bodies; a.opens = sh.opens;
     a.convFailed = an.convFailed || sh.mismatch;
@@ -5473,7 +5561,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const pl = enforcePlanarity(faceDefs);
     faceDefs = pl.fds;
     removeCollinearPoints(faceDefs);
-    const a = assembleSolids(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
+    const a = assembleWithArcs(faceDefs, finalPlans, tubePlans, mantlePlans, mantleConePlans);
     a.report.filletsDefeatured = filletsDefeatured;
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
@@ -5490,6 +5578,62 @@ export function buildVolumeStepBrepV2(analysis) {
   let guardTotal = 0, guardMsTotal = 0, fallbackStage = 0;
   const failed = (a) => !!a.convFailed || (GUARD_FALLBACK && (a.report.orientationGuardFailures > 0 || !!a.shellFail));
   const tracked = (a) => { guardTotal += a.report.orientationGuardFailures; guardMsTotal += a.report.orientationGuardMs; return a; };
+  // Profil-Bögen (profile-arcs.js): Bänder suchen, prüfen, anwenden; Geometrie aus den geschriebenen
+  // (auf die Ebenen gesetzten, gerundeten) Koordinaten — dieselbe snapToPlanes-Rechnung wie in assemble.
+  const convertArcs = (fds) => {
+    if (!ARCS) return { fds, arcs: null };
+    arcStats.tried++;
+    try {
+      let det = validateArcBands(fds, findArcBands(fds, { vtxKey, blocked: arcBlocked }), { vtxKey });
+      for (let it = 0; it < 4 && det.bands.length; it++) {
+        const ap = applyArcBands(fds, det, { vtxKey });
+        const snap = snapToPlanes(ap.fds).snap;
+        const written = (p) => { const q = snap.get(vtxKey(p)) || p; return q.map((x) => +toStep(x)); };
+        const res = buildArcPlans(fds, det, written, { vtxKey });   // ORIGINAL-Liste: band.facets indizieren sie
+        if (!res.failed.size) return { fds: ap.fds, arcs: { plans: res.plans, geoms: res.geoms } };
+        for (const b of det.bands) if (res.failed.has(b.id)) arcBlocked.add(b.sig);
+        det = validateArcBands(fds, findArcBands(fds, { vtxKey, blocked: arcBlocked }), { vtxKey });
+      }
+    } catch (e) { /* Bögen sind optional: bei jedem Fehler facettiert */ }
+    return { fds, arcs: null };
+  };
+  // Zusammenbau mit Bögen; scheitert er (failed) und liegt es an den Bögen, werden die Bänder an
+  // defekten Kanten gesperrt und neu gebaut, zuletzt ohne Bögen. Liegt es nicht an den Bögen (ohne
+  // Bögen genauso gescheitert), bleibt der Zusammenbau mit Bögen (anschließende Rückfälle wie bisher).
+  const assembleWithArcs = (fds, plans, tubes = [], mantles = [], cones = []) => {
+    const blocked0 = new Set(arcBlocked);
+    let cv = convertArcs(fds);
+    let a = assembleSolids(cv.fds, plans, tubes, mantles, cones, cv.arcs);
+    if (!cv.arcs || !failed(a)) return a;
+    for (let r = 0; r < 2; r++) {
+      arcStats.retries++;
+      const bad = new Set();
+      for (const [k, u] of edgeUse) { const t = u.fwd + u.rev; if (t === 1 || t > 2 || (t === 2 && u.fwd !== 1)) for (const x of String(k).split('#')[0].split('||')) bad.add(x); }
+      for (const [k, u] of arcUse) { if (u.fwd !== 1 || u.rev !== 1) bad.add(`a:${k}`); }
+      let hit = 0;
+      for (const pl of cv.arcs.plans) {
+        const keys = pl.segs.flatMap((s) => [vtxKey(s.pts[0]), vtxKey(s.pts[s.pts.length - 1])]);
+        if (keys.some((k) => bad.has(k)) || pl.segs.some((s) => s.arcKey && bad.has(`a:${s.arcKey}`))) { arcBlocked.add(pl.sig); hit++; }
+      }
+      if (!hit || r === 1) { for (const pl of cv.arcs.plans) arcBlocked.add(pl.sig); }
+      arcStats.dropped = arcBlocked.size;
+      cv = convertArcs(fds);
+      a = assembleSolids(cv.fds, plans, tubes, mantles, cones, cv.arcs);
+      if (!failed(a)) return a;
+      if (!cv.arcs) break;
+    }
+    // Auch ohne (diese) Bögen gescheitert → nicht die Bögen schuld: Sperren zurück, mit Bögen bauen
+    // (die übrigen Rückfall-Stufen entscheiden wie bisher). Übernommen wird der Bogen-Zusammenbau nur,
+    // wenn er gelingt: die Rückfall-Stufen je Merkmal suchen die defekte Kante im Netz und müssen den
+    // facettierten Zusammenbau sehen — der Bogen-Zusammenbau verdeckt die Kanten der Originalflächen
+    // (die Bogen-Kanten zählen nicht in der Kanten-Bilanz) und würde die falschen Entrundungen sperren.
+    arcBlocked.clear(); for (const s of blocked0) arcBlocked.add(s);
+    arcStats.dropped = arcBlocked.size;
+    cv = convertArcs(fds);
+    const withArcs = assembleSolids(cv.fds, plans, tubes, mantles, cones, cv.arcs);
+    if (!failed(withArcs)) return withArcs;
+    return assembleSolids(fds, plans, tubes, mantles, cones, null);
+  };
   // Rückfall je Merkmal (vor den globalen Stufen): Scheitert ein Zusammenbau an defekten LINIEN-Kanten
   // (Randkante, non-manifold, Orientierungsfehler) oder bleibt eine umgebaute ebene Fläche uneben (s.
   // nonPlanarOps), werden die Entrundungen bestimmt, die das verursacht haben — (1) genau: ein Endpunkt ist Punkt einer entfernten Rundungs-Facette oder ein neu gesetzter
@@ -5589,7 +5733,7 @@ export function buildVolumeStepBrepV2(analysis) {
     const pl = enforcePlanarity(freshDefs);
     const fallbackDefs = pl.fds;
     removeCollinearPoints(fallbackDefs);
-    const base = tracked(assembleSolids(fallbackDefs, []));
+    const base = tracked(assembleWithArcs(fallbackDefs, []));
     base.report.filletsDefeatured = 0;
     base.report.bandsDefeatured = 0;
     base.report.cornersDefeatured = 0;
@@ -5618,6 +5762,8 @@ export function buildVolumeStepBrepV2(analysis) {
   // Rückfall je Merkmal: Neubauten und gesperrte (facettiert belassene) Entrundungen über alle Stufen
   asm.report.featureRetries = featureRetries;
   asm.report.featuresDropped = fallbackStage === 2 ? 0 : featuresDropped;   // facettierte Basislinie: nichts übrig
+  // Profil-Bögen (profile-arcs.js): Neubauten und gesperrte (facettiert belassene) Bänder
+  asm.report.arcRetries = arcStats.retries; asm.report.arcBandsBlocked = arcBlocked.size;
   const allFaceIds = asm.faceIds;
   const report = asm.report;
   if (allFaceIds.length < 2) return null;
