@@ -384,7 +384,10 @@ function boreSharpVariant(body, bores, step, sharpCount) {
   }
   return {
     label: `alle Rundungen scharf + Bohrung→Zylinder ${parts.join(', ')}${mi.parts.length ? ' + ' + mi.parts.join(', ') : ''}${plaus ? '' : ' [UNPLAUSIBEL]'}`,
-    sharpCount, bores: bores.length, cones: 0, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat, target: body.expect.mode === 'sharp',
+    sharpCount, bores: bores.length, cones: 0, planar: false, volume: plaus ? v : NaN, tol: () => 0.02 + 2 * OCCT_PARAMS.linearDeflection * aLat,
+    // Ziel: bei 'sharp' alle Rundungen scharf + Bohrung als Zylinder; bei 'skip' NICHTS scharf
+    // (die Bohrung wird ohnehin in jedem Lauf umgewandelt) → dann ist diese Variante das Ziel.
+    target: body.expect.mode === 'sharp' || (body.expect.mode === 'skip' && sharpCount === 0),
   };
 }
 
@@ -706,6 +709,13 @@ async function checkBody(body, occt) {
   // Soll-Bohrungszahl: die Bohrung muss umgewandelt werden (Zylinder + Kegel) — sonst Orientierungs-
   // fehler (Mündungs-Kegel über Kreuz dem falschen Rand zugeordnet → alles facettiert).
   if (body.expect.bores !== undefined && on.exported && on.bores !== body.expect.bores) out.problems.push(`AN: ${on.bores} Bohrung(en) umgewandelt, Soll ${body.expect.bores} (fallbackStage ${on.fallbackStage})`);
+  // Soll-Zahl der Bogen-Flächen im AN-Export (Teil-Zylinder + Teil-Kegel aus den Profil-Bögen):
+  // Abweichung = Problem. Der AN-Lauf darf die Bögen nicht verlieren — der Kreis-Rand-Loop einer
+  // Bohrung in derselben Deckfläche (Kabelhalter-Befund) verwarf sonst ALLE Gravur-Bögen.
+  if (body.expect.arcsOn !== undefined && on.exported) {
+    const n = on.arcCyl + on.arcCones;
+    if (n !== body.expect.arcsOn) out.problems.push(`AN: ${n} Bogen-Flächen, Soll ${body.expect.arcsOn} (fallbackStage ${on.fallbackStage})`);
+  }
   // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert
   if (iso.watertight && iso.bands > 0 && on.bands === 0 && on.bores === 0 && on.fillets === 0) {
     out.problems.push(`Fallback verwirft v2: v2 allein entfernt ${iso.bands} Band/Bänder wasserdicht, volle Pipeline liefert alles facettiert (Ursache außerhalb defeatureBands: ein anderer Schritt öffnet die Hülle → globaler Fallback)`);
