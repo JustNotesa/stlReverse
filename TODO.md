@@ -175,9 +175,10 @@ Kreis-Kanten teilen.
 - [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten. Bekannt (OCP):
   `dino-freiform-facettiert.step` — 5 Zusatz-Schalen fehlerhaft (Review-Fund oben); beide eBike-Dateien — Mikro-
   Bögen an den Kanal-Übergängen (s. oben). Würfel, Bohrung, Zylinder, Scheibe, Platte, Kugel: OCP-sauber.
-- [ ] **Add-on signieren (AMO, unlisted)** — wartet auf Bestätigung der Add-on-ID (Vorschlag
-  `stl-reverse@ava-innovation.com`, heute Platzhalter `stlreverse@example.com`) und JWT-Schlüssel in
-  `~/.config/amo.env`. Release v0.2.0 enthält noch den alten STEP-Kantenfehler → v0.2.1 (nur mit Zustimmung).
+- [ ] **Release 0.2.2** (nach CST-Rückmeldung zum Kabelhalter + Merge der laufenden Agenten): Version in
+  `manifest.json`/`package.json` hochzählen, `updates.json` um den neuen Eintrag ergänzen, `npm run build:xpi`,
+  bei AMO „Neue Version hochladen“ (Datei wählt der User — AMOs CSP blockt Skript-Uploads), Prüfer-Hinweise wie
+  bei 0.2.1, signierte Datei laden, als `stl-reverse-<version>.xpi` ans GitHub-Release hängen.
 - [ ] **Review der Etappen 05fb3c3…6d67e62 abschließen** — Workflow-Lauf `wf_a998fde1-33d` wurde durch einen
   Absturz unterbrochen (Bereiche: Erkennung, Fasen-Export, Defeaturing, STEP-Gültigkeit, Integration).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
@@ -195,6 +196,16 @@ Kreis-Kanten teilen.
 ---
 
 ## Erledigt
+
+- [x] **v0.2.1 von Mozilla signiert + GitHub-Release (2026-10-27)** — Add-on-ID `{0f69a2ea-bf50-42ba-8055-dba7d55e509f}`
+  (neutrale GUID, User wollte keine Firmen-Domain), Selbstvertrieb (unlisted) über AMO, freigeschaltet nach ~20 min.
+  `update_url` → `updates.json` im Repo (automatische Updates). Paket per `npm run build:xpi` (nur Laufzeit-Dateien,
+  Lizenztexte LGPL von occt-import-js). Release: https://github.com/JustNotesa/stlReverse/releases/tag/v0.2.1
+- [x] **STEP-Genauigkeit für ACIS (2026-10-27, bfa2d6d)** — Kabelhalter des Users fehlten in CST Flächen (Winkel ok):
+  LINE-Richtung aus ungerundeten Koordinaten, Punkte auf 6 Stellen gerundet → Kanten-Enden bis 1,2e-6 mm neben
+  der Linie, OCCT mit 1e-6: 479 Flächen mit Selbstschnitt, 138 mit Lücken. Jetzt Richtung aus den geschriebenen
+  Punkten, 9 Nachkommastellen, Eckpunkte auf ihre Ebenen (snapToPlanes). Rest: Eckpunkte, an denen ≥ 4 nicht exakt
+  durch einen Punkt laufende Ebenen zusammenkommen, bleiben bis 4,6e-5 mm neben der Ebene.
 
 - [x] **STEP für strikte Importer — CST CAD Navigator/ACIS (2026-10-26)** — User-Befund: Fusion 360 ok, CST verliert
   Flächen. occt und Fusion heilen beim Lesen still, CST nimmt die Datei wörtlich. Neuer Prüfer ohne Heilung
