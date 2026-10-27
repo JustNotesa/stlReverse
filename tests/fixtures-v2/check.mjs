@@ -23,7 +23,7 @@
 // dürfen nie verschwinden: zulässig ist nur Senkung mit Rundung (Netz), Senkung scharf (Ziel: nur die
 // Kanten-Rundung weg, Kegel bleibt) oder ein Kegel durch die Rundung (Chamfer-Pfad), s. cskVariant.
 //   exakt     → OK
-//   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der STEP-Unsicherheit 0.01 mm)
+//   ≤ 0.01 mm → OK mit Hinweis (Abweichung innerhalb der Toleranz-Stufe 0.01 mm = Planar-Toleranz des Region-Growing)
 //   sonst     → Soll-Verletzung (Exit 1); ebenso: offen, occt-Fehler, Fallback verwirft v2, zu langsam,
 //               Verstoß gegen strikte Importer (tests/step-strict.mjs inkl. loop-fold, je Export AUS/AN/v2)
 // Passt eine Variante, die nicht das Ziel ist (Rundung bleibt, obwohl v2 schärfen sollte) →
@@ -38,6 +38,7 @@ import { pathToFileURL } from 'url';
 import { BODIES, STRESS, buildMesh, checkManifold, toBinaryStl, meshVolume, sharpen, polyArea, triVolume, makeTransform } from './gen.mjs';
 import { parseStl, simplifyMesh } from '../../analysis-core.js';
 import { buildNormalGroups } from '../../region-growing.js';
+import { cleanMesh } from '../../mesh-clean.js';
 import { unifyCoplanarGroups } from '../../face-unification.js';
 import { recognizePrimitives } from '../../primitive-recognition.js';
 import { detectTubes } from '../../tube-sweep.js';
@@ -60,7 +61,8 @@ const tolPlanar = (v) => 0.02 + 2e-5 * Math.abs(v);
 const tolAnalytic = (v) => 5e-3 * Math.abs(v);
 const tolSection = (a) => 0.01 + 1e-5 * Math.abs(a);
 const DIST_TOL = 2e-3;              // mm: „exakt“ (6 Nachkommastellen + float32)
-const STEP_UNC = 0.01;              // mm: UNCERTAINTY_MEASURE des Exporters → Toleranz-Stufe
+const STEP_UNC = 0.01;              // mm: Toleranz-Stufe (früher = UNCERTAINTY des Exporters; die ist seit
+                                    // 2026-10-27 1e-4 mm, s. STEP_UNCERTAINTY_MM — die Stufe bleibt 0.01 mm)
 
 const args = process.argv.slice(2);
 const only = args.includes('--only') ? args[args.indexOf('--only') + 1].split(',') : null;
@@ -71,6 +73,7 @@ const origLog = console.log;
 const quiet = (fn) => { console.log = () => {}; try { return fn(); } finally { console.log = origLog; } };
 
 function pipeline(mesh) {
+  mesh = cleanMesh(mesh).mesh;   // Netz-Bereinigung wie im Worker
   if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
   const t0 = performance.now();
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified
