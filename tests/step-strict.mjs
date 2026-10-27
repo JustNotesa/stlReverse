@@ -7,6 +7,11 @@
 // genau diese Regeln direkt an der STEP-Datei (ohne Heilung):
 //
 //   loop-chain       Ränder geschlossen: Ende einer Kante = Anfang der nächsten
+//   loop-fold        (nur mit opts.folds, z.B. Härtetest; sonst gezählt in stats.folds) keine Spitze der
+//                    Breite 0: zwei aufeinanderfolgende gerade Kanten laufen nicht auf derselben Geraden
+//                    zurück (überlappende Kanten = Selbstüberschneidung des Randes). Bei den Samples
+//                    bildet die Facetten-Ausgabe so Eingabe-Fehler ab (dino: 2 entartete Dreiecke →
+//                    6 Spitzen, AN = AUS) — darum dort nicht als Verstoß
 //   edge-use         jede Kante genau 2× genutzt, einmal in jede Richtung (Bound-Flag beachtet);
 //                    bei OPEN_SHELL (offenes/non-manifold Eingabe-Netz, z.B. dino) ist eine
 //                    Kante mit 1 Nutzung ein erlaubter Rand (stats.openEdges)
@@ -77,7 +82,7 @@ export function checkStepStrict(text, opts = {}) {
   const ents = parseStep(text);
   const E = (r) => { const e = ents.get(r && r.ref !== undefined ? r.ref : r); if (!e) throw new Error('fehlende Entität #' + (r?.ref ?? r)); return e; };
   const violations = [];
-  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0 };
+  const stats = { faces: 0, loops: 0, edges: 0, skippedOrient: 0, maxVertexSurface: 0, maxVertexCurve: 0, openShell: false, openEdges: 0, folds: 0 };
   // Offene Hülle (der Exporter schreibt OPEN_SHELL, wenn schon das Eingabe-Netz offen bzw.
   // non-manifold ist): einfach genutzte Kanten sind dort der ehrliche Rand, kein Fehler.
   for (const e of ents.values()) { if (e.type === 'CLOSED_SHELL') { stats.openShell = false; break; } if (e.type === 'OPEN_SHELL') stats.openShell = true; }
@@ -272,7 +277,7 @@ export function checkStepStrict(text, opts = {}) {
         let fwd = oe.args[4]?.en !== 'F'; if (bflag < 0) fwd = !fwd;
         const vs = ec.args[1].ref, ve = ec.args[2].ref;
         const start = fwd ? vs : ve, end = fwd ? ve : vs;
-        chain.push({ start, end });
+        chain.push({ start, end, line: E(ec.args[3]).type === 'LINE' });
         const use = { face: fid, fwd, p: null, T: null };
         const id = ecRef.ref; if (!edgeUse.has(id)) edgeUse.set(id, []); edgeUse.get(id).push(use);
         const c = curveOf(ec.args[3]);
@@ -290,6 +295,14 @@ export function checkStepStrict(text, opts = {}) {
       for (let i = 0; i < chain.length; i++) {
         const a = chain[i], b = chain[(i + 1) % chain.length];
         if (a.end !== b.start && len(sub(vtx(a.end), vtx(b.start))) > 1e-9) flag('loop-chain', `#${fid}: Rand #${be.args[1].ref} unterbrochen (Kante ${i} → ${i + 1})`, { face: fid });
+        // Spitze: beide Nachbarn der Ecke liegen auf demselben Strahl (näherer ≤ TOL neben der Geraden)
+        if (a.line && b.line && chain.length > 2) {
+          const p = vtx(a.end), u = sub(vtx(a.start), p), w = sub(vtx(b.end), p), lu = len(u), lw = len(w);
+          if (lu > 0 && lw > 0 && dot(u, w) > 0 && len(cross(u, w)) / Math.max(lu, lw) <= TOL) {
+            stats.folds++;
+            if (opts.folds) flag('loop-fold', `#${fid}: Rand #${be.args[1].ref} läuft bei (${p.map((x) => x.toFixed(3)).join(', ')}) auf derselben Geraden zurück (Spitze der Breite 0)`, { face: fid });
+          }
+        }
       }
       loops.push({ bref: bref.ref, outer, pts });
       // Rand-Punkte auf der Fläche?
