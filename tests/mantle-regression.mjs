@@ -2,7 +2,7 @@
 // Mantel-Regressionstest: konvexe Außen-Zylindermäntel (Welle, Scheibe, Rohr-Außenwand, Zapfen auf
 // einer Platte, Stufenwelle) als CYLINDRICAL_SURFACE, konvexe Kegel (Kegelstumpf, Kegel mit Spitze)
 // als CONICAL_SURFACE + die Bohrungs-Funde aus dem Review (gemischte Mündungen, D-Loch, geneigte
-// Deckfläche, Fallback bei offenen Netzen). Körper im Speicher erzeugt (tests/fixtures-v2/gen.mjs
+// Deckfläche, Fallback bei offenen Netzen, verdrillte Lochwand, Senkungs-Bohrungen in gedrehten Lagen). Körper im Speicher erzeugt (tests/fixtures-v2/gen.mjs
 // bzw. coneBody unten, keine neuen Samples → Golden-Satz unberührt) plus samples/cylinder.stl,
 // washer_thin.stl und cone_frustum/cone_flat/cone_pointed.stl.
 //
@@ -469,6 +469,63 @@ console.log('\n── (d) Fallback: Stufe 1 nur, wenn die facettierte Basislinie
   runCase('S2 gelocht (offenes Netz)', groupsOfMesh(punctured(mesh)), true, { bores: 0, wt: false, strict: false, fallbackStage: 2, stage1Tried: false });
   // geschlossen, aber die Bohrungs-Umwandlung öffnet die Hülle → Stufe 1 rettet
   runCase('Stufe-1-Rettung (Fasen-Zonen schlucken die Außenwand)', groupsOfMesh(meshOfTris(rescueBody())), true, { bores: 0, fallbackStage: 1, stage1Tried: true });
+}
+
+// ════ 5. Bohrungs-Pfad härten (Runde I) ════
+// (e) Verdrillte Lochwand: oberer Rand um φ gegen den unteren gedreht, Wand verbindet i ↔ i. Alle Punkte
+// liegen auf den Randkreisen, die Facetten auf einem Hyperboloid (Taille innen) — als Zylinder war die
+// Datei wasserdicht und strikt sauber, aber falsch (30°: 17 mm³ zu viel Loch). boreWallOk (scharfer Pfad,
+// attemptBore, attemptBoreCurrent): keine Wand-Kante überspannt um die Achse mehr als einen Randsegment-
+// Winkel. Ein Versatz BIS zu einem Segment (z. B. halbes Segment: „Antiprisma“-Tessellierung mancher
+// CAD-Exporte) ist eine gültige Kreis-Tessellierung — jedes Dreieck überdeckt ein Segment, Abweichung ≤
+// Pfeilhöhe — und bleibt ein Zylinder.
+function twistedBore({ R = 4, H = 10, n = 32, twistDeg = 0 }) {
+  const tw = twistDeg * PI / 180;
+  const ring = (z, ph) => Array.from({ length: n }, (_, i) => { const a = 2 * PI * i / n + ph; return [20 + R * Math.cos(a), 15 + R * Math.sin(a), z]; }).reverse(); // CW = Loch
+  const lo = ring(0, 0), hi = ring(H, tw), out = [];
+  for (let i = 0; i < n; i++) { const j = (i + 1) % n; out.push([lo[i], lo[j], hi[j]], [lo[i], hi[j], hi[i]]); }
+  const box = [[0, 0], [40, 0], [40, 30], [0, 30]], b0 = box.map(([x, y]) => [x, y, 0]), b1 = box.map(([x, y]) => [x, y, H]);
+  for (let i = 0; i < 4; i++) { const j = (i + 1) % 4; out.push([b0[i], b0[j], b1[j]], [b0[i], b1[j], b1[i]]); }
+  const cap = (outer, hole, up) => { const map = new Map([...outer, ...hole].map((p) => [`${p[0]},${p[1]}`, p])); for (const t of G.triangulateWithHoles(outer.map((p) => [p[0], p[1]]), [hole.map((p) => [p[0], p[1]])])) { const T = t.map((q) => map.get(`${q[0]},${q[1]}`)); out.push(up ? T : [T[0], T[2], T[1]]); } };
+  cap(b1, hi, true); cap(b0, lo, false);
+  return out;
+}
+console.log('\n── (e) verdrillte Bohrung: Zylinder nur ohne Verdrillung über ein Segment hinaus');
+for (const [name, o] of [['0° (Kontrolle)', { twistDeg: 0 }], ['halbes Segment versetzt (5.625°, Antiprisma)', { twistDeg: 5.625 }]]) {
+  both(`Bohrung R4, 32 Seg., ${name}`, groupsOfMesh(meshOfTris(twistedBore(o))), { bores: 1, cyl: 1, cone: 0, faces: 7, vol: 12000 - PI * 16 * 10, volTol: 1e-5, volX: true });
+}
+for (const [name, o] of [
+  ['32 Seg., 30° verdrillt', { twistDeg: 30 }],
+  ['32 Seg., 15° verdrillt', { twistDeg: 15 }],
+  ['32 Seg., 5° gegen die Diagonalen verdrillt', { twistDeg: -5 }],
+  ['128 Seg., 5° verdrillt', { twistDeg: 5, n: 128 }],
+]) {
+  const t = twistedBore(o);
+  both(`Bohrung R4, ${name}`, groupsOfMesh(meshOfTris(t)), { bores: 0, cyl: 0, cone: 0, vol: meshVol(t), volTol: 1e-5 });
+}
+
+// (f) Drehlagen: Achse und Zentren der Bohrung kommen im Bestandspfad (attemptBoreCurrent → matchBorePlans)
+// aus den Deckebenen bzw. dem Kreis-Fit der Ränder darin (refineBoreRims), nicht aus dem Primitiv-Fit —
+// sonst kippte die Achse um µrad, circleOnDeck (1e-5 mm) lehnte ab und die von v2 geschärfte Senkung blieb
+// facettiert. Soll: in jeder Lage umgewandelt (Zylinder + Senkungs-Kegel), strikt sauber, Volumen wie in
+// der Grundlage (Körper starr bewegt).
+console.log('\n── (f) Senkungs-Bohrungen in gedrehten Lagen: Achse aus den Deckebenen');
+{
+  const cskBody = (o) => ({ columns: [plate(), { profile: circ32, z0: 0, z1: 10, bottom: sharp, top: { kind: 'countersink', depth: 2, N: 8, ...o } }] });
+  const LAGEN = [{ rot: [17, 31, 47] }, { rot: [-23, 11, 67], t: [12.5, -7.25, 3] }, { rot: [90, 0, 0], t: [1000, 2000, 500] }];
+  for (const [name, body] of [
+    ['x3 (Senkung, Wandrundung 0.5)', G.BODIES.find((b) => b.id === 'x3')],
+    ['x8 (60°-Senkung, beidseitig verrundet)', G.BODIES.find((b) => b.id === 'x8')],
+    ['x9 (beidseitig verrundet, N=16)', G.BODIES.find((b) => b.id === 'x9')],
+    ['Senkung r=1 / rw=0.3', cskBody({ r: 1, rw: 0.3 })],
+  ]) {
+    const base = quiet(() => buildVolumeStepBrepV2({ normalGroups: groupsOfMesh(meshOfTris(tris(body))), defeature: true }));
+    const v0 = occtVolumeX(base.step);
+    runCase(`${name}, Grundlage`, groupsOfMesh(meshOfTris(tris(body))), true, { bores: 1, cyl: 1, cone: 1, faces: 8 });
+    for (const lage of LAGEN) {
+      runCase(`${name}, Lage ${JSON.stringify(lage)}`, groupsOfMesh(meshOfTris(tris({ ...body, transform: lage }))), true, { bores: 1, cyl: 1, cone: 1, faces: 8, vol: v0, volTol: 1e-5, volX: true });
+    }
+  }
 }
 
 console.log(`\n${failures === 0 ? '✅ alle Mantel-/Bohrungs-Regressionen grün' : `❌ ${failures} Assertion(en) fehlgeschlagen`}`);
