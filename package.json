@@ -19,7 +19,8 @@
     "test:tube": "node tests/tube-regression.mjs",
     "test:mantel": "node tests/mantle-regression.mjs",
     "test:orient": "node tests/orientation-guard.mjs",
-    "test:strict": "node tests/step-strict.mjs"
+    "test:strict": "node tests/step-strict.mjs",
+    "test:schalen": "node tests/shell-regression.mjs"
   },
   "jest": {
     "testMatch": [

@@ -4,8 +4,8 @@
 
 ```bash
 # ALLE schnellen Regressionen nacheinander (tests/run-all.mjs):
-# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → mantel → collinear → strict → orient.
-# Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
+# unit (Jest) → golden → v2 (quick) → ebike → tube → bore → mantel → collinear → strict → orient
+# → schalen. Zusammenfassung mit Laufzeiten; Exit ≠ 0, sobald eine Suite rot ist.
 npm test
 
 # Nur Unit-Tests (Jest: tests/*.test.js — analysis-core + utils)
@@ -21,11 +21,15 @@ npm run test:mantel      # Außenmäntel (Welle/Scheibe/Rohr) + Bohrungs-Gates (
                          # gemischte Mündungen) + Fallback-Stufen; je Fall step-strict + occt-Volumen
 npm run test:collinear   # kollineare Kantenpunkte
 npm run test:strict      # STEP streng wie strikte Importer (CST CAD Navigator/ACIS): Rand-Ketten,
-                         # Kanten-Nutzung, Punkte auf Kurve/Fläche (1e-4 mm), Umlaufsinn — ohne
+                         # Kanten-Nutzung, Punkte auf Kurve/Fläche (1e-4 mm), Umlaufsinn, Schalen-
+                         # Volumen, geteilte Topologie, offene Schalen, überlappende Ränder — ohne
                          # Heilung, alle Samples AN/AUS; einzelne Dateien: node tests/step-strict.mjs a.step
 npm run test:orient      # Orientierungs-Wächter: kein Fehlalarm, verdrehte Flächen (Test-Hook
                          # STLREV_TEST_FLIP) werden gefangen, Export fällt sauber zurück
                          # (--stress: Wächter-Laufzeit zusätzlich am 50k-Torus)
+npm run test:schalen     # Schalen-Analyse + Freigang: Hohlräume (BREP_WITH_VOIDS), invertierte Netze,
+                         # Finnen, berührende Körper, offene Fremdteile, dünne Stege an Kreisen;
+                         # je Fall occt-Volumen = Soll, step-strict 0 + Prüfer-Selbsttest
 
 # Nur E2E-Tests (Puppeteer; läuft bei npm test bewusst NICHT mit)
 npm run test:e2e
