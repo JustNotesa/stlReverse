@@ -911,6 +911,18 @@ export const BODIES = [
       sections: [2.5, 4.75],
     };
   })(),
+  // Kanten-Verrundung, an deren Enden die Fase der Stirnfläche um die Rundung läuft (Kabelhalter:
+  // r=1-Kanten der Platte, Stirnseiten 0.5×45° gefast) — v1 schärft die Rundung, die Fase wird zur Gehrung
+  (() => {
+    const prof = roundedRectProfile(40, 30, 1, 32);
+    return {
+      id: 'k2', extra: true, file: 'v2_x_kabel_ecken_gefast',
+      desc: 'Platte 40×30×16, senkrechte Eckrundungen r=1 (32 Seg.), Stirnseiten oben/unten 0.5×45° gefast (Fase läuft als Kegel um die Rundungen) — Ziel: Ecken scharf, Fasen auf Gehrung, Fasen bleiben',
+      columns: [{ name: 'aussen', profile: prof, z0: 0, z1: 16, bottom: { kind: 'chamfer', r: 0.5 }, top: { kind: 'chamfer', r: 0.5 } }],
+      cornerVariants: { col: 0, corners: [0, 1, 2, 3].map((k) => [k * 33, k * 33 + 32]) },
+      expect: { mode: 'sharp', fillets: 4 },
+    };
+  })(),
 ];
 
 // Stresskörper (Laufzeit, ~49k Dreiecke < 50k-Vereinfachungsgrenze); nicht als STL-Datei
