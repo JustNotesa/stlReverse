@@ -437,12 +437,20 @@ export function buildMesh(body) {
     for (const [a, b, c] of triangulateWithHoles(outer, holes)) tris.push(cap.up ? [a, b, c] : [a, c, b]);
   }
   let out = tris;
-  if (body.jitter) {
+  // Rauschen: `jitter` (alle drei Achsen) oder `jitterXY` (nur x/y). `jitterXY` lässt die
+  // Höhen exakt — die ebenen Deckflächen bleiben dann EINE ebene Fläche. Mit Höhen-Rauschen
+  // zerlegt der Exporter die Deckfläche in Dreiecke (die Fläche ist nicht mehr planar genug),
+  // und die Bogen-Kanten der Deckfläche gehören dann zu verschiedenen Flächen: das Band kann
+  // dann nicht mehr bestätigt werden (validateArcBands) und bleibt facettiert — der Fehler
+  // liegt dann VOR der Bogen-Geometrie und ist nicht dort zu suchen.
+  const jam = body.jitterXY || body.jitter;
+  if (jam) {
+    const nAxes = body.jitterXY ? 2 : 3;
     const jm = new Map();
     const jit = (p) => {
       const k = p.map((x) => Math.round(x * 1e6)).join(',');
       let q = jm.get(k);
-      if (!q) { q = hashJitter(p, body.jitter); jm.set(k, q); }
+      if (!q) { q = hashJitter(p, jam, nAxes); jm.set(k, q); }
       return q;
     };
     out = tris.map((t) => t.map(jit));
@@ -457,12 +465,13 @@ export function buildMesh(body) {
 
 // Deterministisches Rauschen (FNV-1a über die gerundeten Koordinaten, je Achse ein
 // eigener Versatz in [−amp, amp]) — gleicher Punkt → gleiches Rauschen.
-function hashJitter(p, amp) {
+// `nAxes` = 2 → nur x/y (die Höhen bleiben exakt, s. buildMesh).
+function hashJitter(p, amp, nAxes = 3) {
   let h = 2166136261 >>> 0;
   const key = p.map((x) => Math.round(x * 1e6)).join(',');
   for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
   const out = p.slice();
-  for (let k = 0; k < 3; k++) {
+  for (let k = 0; k < nAxes; k++) {
     h ^= h >>> 15; h = Math.imul(h, 2246822507) >>> 0;
     h ^= h >>> 13; h = Math.imul(h, 3266489909) >>> 0;
     out[k] = p[k] + ((h >>> 0) / 4294967296 * 2 - 1) * amp;
@@ -1203,6 +1212,32 @@ export const BODIES = [
     expect: { mode: 'skip', arcsOff: 2, arcsOn: 2, bores: 1 },
     // Bohrung ohne Fase/Senkung: der scharfe Zylinder ist die Ziel-Variante (boreSharpVariant)
     boreChamfer: [{ col: 1, R: 2, seg: 48, r: 0, H: 3 }],
+  },
+  // Gravur mit KLEINEN Eckrundungen (Kabelhalter-Befund): Tasche 0.5 tief in einer 3 mm dicken Platte,
+  // Kontur 12×6 mit senkrechten Eckrundungen r=0.3 (24 Seg. je Ecke) + Rauschen ±3e-5 mm auf jedem
+  // Netzpunkt (nur x/y: `jitterXY` — die Höhen bleiben exakt, damit die Deckfläche EINE ebene
+  // Fläche bleibt. Mit Höhen-Rauschen zerlegt der Exporter die Deckfläche in Dreiecke, die
+  // Bogen-Kanten der Deckfläche gehören dann zu verschiedenen Flächen und die Bänder fallen
+  // schon in validateArcBands weg — der Fehler läge dann VOR der Bogen-Geometrie).
+  // Die vier Eckbögen sind echte Taschenecken (KEINE Biegung) → v2 darf sie im AN-Lauf schärfen;
+  // im AUS-Export müssen sie als VIER Teil-Zylinder dastehen (arcsOff 4).
+  {
+    id: 'p10', extra: true, file: 'v2_x_platte_gravur_kleine_ecken',
+    desc: 'Platte 40×30×3 (Kanten scharf), oben eine Tasche 12×6 Tiefe 0.5 mit senkrechten Eckrundungen r=0.3 (24 Seg. je Ecke), Rauschen ±3e-5 mm in x/y auf den Netzpunkten — die vier Eckbögen müssen als Teil-Zylinder exportiert werden (4 Bogen-Flächen)',
+    columns: [
+      { name: 'platte', profile: rectProfile(0, 0, 40, 30), z0: 0, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'tasche', profile: roundedRectProfile(12, 6, 0.3, 24).map(([x, y]) => [x + 14, y + 12]).reverse(), z0: 2.5, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [] },
+      { up: true, outer: { c: 1, end: 'bottom', rev: true }, holes: [] },   // Taschenboden (z=2.5)
+    ],
+    jitterXY: 3e-5,
+    // v1-Varianten: jede Teilmenge der vier Eckrundungen scharf (sharpenCorners); Ziel = alle vier.
+    // Die Kontur hat 4 Bögen × 25 Punkte (roundedRectProfile(…, 24) → je Bogen 24 Segmente + Startpunkt).
+    cornerVariants: { col: 1, corners: [0, 1, 2, 3].map((k) => [k * 25, k * 25 + 24]), kind: 'v2' },
+    expect: { mode: 'sharp', arcsOff: 4 },
   },
   // Senkung + Fase an BEIDEN Enden der Bohrung (Kabelhalter-Befund: die Mündungs-Kegel wurden über
   // Kreuz dem falschen Rand zugeordnet → Orientierungsfehler, alles facettiert)
