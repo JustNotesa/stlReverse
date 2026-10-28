@@ -1,5 +1,5 @@
 import { formatBytes, describeDetailLevel } from './utils.js';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=40';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=41';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=28';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=19';
