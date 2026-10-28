@@ -35,10 +35,13 @@
 //   3. Ketten gierig in Bänder teilen: alle Unten- und Oben-Punkte je auf einem Kreis (Toleranz
 //      tolFit = max(tolFitAbs, tolFitRel·r), relativ zur Sehnen-Pfeilhöhe klein), Mitten koaxial,
 //      jede Seitenkante eine Mantellinie (unten und oben im selben Winkel), Segmentwinkel ≤
-//      maxSegDeg, gleicher Drehsinn, ≥ minSegs Segmente. Ein gültiger VOLLKREIS (geschlossene
-//      Kette, ganzer Ring besteht als Band) wird in DREI Bänder geteilt (Schnitt an den
-//      Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3) — zwei Halbkreise hätten dieselben zwei
-//      Endpunkte und würden sich in fd.arcEdges überschreiben. Ringe, die sich eine Ebene teilen
+//      maxSegDeg, gleicher Drehsinn, ≥ minSegs Segmente. VORAUSSCHAU: reicht das Band ab der
+//      nächsten Facette weiter, gehört die aktuelle Facette nicht zum Band (breite ebene
+//      Profilseite vor einem fein facettierten Bogen → FAKE-Band) und wird übersprungen.
+//      Ein gültiger VOLLKREIS (geschlossene Kette, ganzer Ring besteht als Band) wird in DREI
+//      Bänder geteilt (Schnitt an den Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3) — zwei
+//      Halbkreise hätten dieselben zwei Endpunkte und würden sich in fd.arcEdges überschreiben.
+//      Ringe, die sich eine Ebene teilen
 //      (Zylinder + Fasen-Kegel), bilden einen STAPEL: der Schnitt wird für den ganzen Stapel
 //      GEMEINSAM gewählt (eine Winkelstelle, an der JEDER Ring eine Mantellinie hat) — sonst
 //      lägen die Schnitte der Ringe auseinander und die Bögen passten nicht mehr aufeinander.
@@ -1849,6 +1852,15 @@ export function findArcBands(fds, opts) {
         if (overBudget()) { stats.budgetHit = true; break axesLoop; }
         const found = scanBandFrom(ctx, work, i, m);
         if (found) {
+          // VORAUSSCHAU: reicht das Band ab der NÄCHSTEN Facette weiter, dann gehört die
+          // Facette i nicht zu diesem Band — sie blockiert es (breite ebene Profilseite
+          // vor einem fein facettierten Bogen → FAKE-Band mit riesigem Kreisradius). Die
+          // Facette i wird dann ohne Band übersprungen, damit die ersten Facetten des
+          // echten Bogens nicht flach bleiben.
+          if (i + 1 < m && work.sides[i + 1]) {
+            const nx = scanBandFrom(ctx, work, i + 1, m);
+            if (nx && nx.j > found.j) { i = i + 1; continue; }
+          }
           const { chk, j: bestJ } = found;
           const made = makeBand(ctx, work, i, bestJ, chk, bands.length);
           if (made) {
