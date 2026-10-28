@@ -38,13 +38,20 @@
 //      maxSegDeg, gleicher Drehsinn, ≥ minSegs Segmente. Ein gültiger VOLLKREIS (geschlossene
 //      Kette, ganzer Ring besteht als Band) wird in DREI Bänder geteilt (Schnitt an den
 //      Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3) — zwei Halbkreise hätten dieselben zwei
-//      Endpunkte und würden sich in fd.arcEdges überschreiben.
+//      Endpunkte und würden sich in fd.arcEdges überschreiben. Übereinanderliegende Ringe
+//      (Zylinder + Fasen-Kegel) schneiden über ein REGISTER (je Achse: die Schnittpunkte der
+//      schon geteilten Ringe) an derselben Kante — sonst lägen die Schnitte eine Facette
+//      auseinander und die Bögen passten nicht mehr aufeinander.
 //   4. Rand des Bands = Vereinigung der gerichteten Facetten-Kanten (innere heben sich auf) → genau
 //      ein Loop aus Bogen unten, Seite, Bogen oben, Seite. same_sense aus den Facetten-Normalen
 //      (alle müssen zur STEP-Flächennormale gleich stehen).
 //   5. Nachbar-Prüfung bis zum Fixpunkt: jeder Bogen grenzt Kante für Kante an GENAU eine ebene
 //      Fläche ⟂ d (eine Loop) oder an genau ein anderes gültiges Band (gleicher Polygonzug). Sonst
 //      fällt das Band weg (und mit ihm abhängige Bänder) → bleibt facettiert.
+//   6. alignBands: Teilungsstellen der Bänder übereinanderliegender Ebenen angleichen (ein Band
+//      wird an den Bogen-ENDpunkten der Nachbarbänder zerschnitten). Ein Reststück, das auf den
+//      Kreisen des Eltern-Bands liegt und an beiden Enden Mantellinien hat, bleibt dabei ein Band
+//      (sonst bliebe seine Facette facettiert und der Nachbarbogen fände keinen Nachbarn).
 //
 // Exakte Geometrie (buildArcPlans, NACH snapToPlanes, aus den GESCHRIEBENEN Koordinaten): jeder Bogen
 // läuft exakt durch seine zwei geschriebenen Endpunkte (Kreisebene enthält beide, Mitte auf der
@@ -1106,6 +1113,13 @@ function cutCycle(chain, k) {
   return { cyclic: false, facets, sides };
 }
 
+/** Kürzester Winkelabstand zweier Winkel (rad) */
+function angDist(a, b) {
+  let d = Math.abs(a - b);
+  if (d > Math.PI) d = 2 * Math.PI - d;
+  return d;
+}
+
 /**
  * Einen gültigen VOLLRING (zyklische Kette, der ganze Ring besteht als Band) in
  * DREI Bänder teilen.
@@ -1119,6 +1133,18 @@ function cutCycle(chain, k) {
  * Ringe desselben Stapels (Zylinder + Fasen-Kegel, gemeinsame Achse und Rahmen) an
  * denselben Stellen; Restunterschiede gleicht alignBands aus.
  *
+ * REGISTER (je Achse, `reg`): die Schnittpunkte der bereits geteilten Ringe (vkey der
+ * lo- und hi-Punkte ihrer Schnitt-Seitenkanten). Ein Ring, der an einer Stelle NICHT
+ * mehr eine Mantellinie hat (Fasen-Fächer: die Seitenkanten der Fächer-Dreiecke sind
+ * schräg), fände sonst die NÄCHSTE Mantellinie zum Zielwinkel — eine Facette neben dem
+ * Schnitt des Nachbarrings. Der Bogen des Nachbarrings passt dann nicht mehr auf den
+ * Bogen dieses Rings (andere Polygonzüge → anderer arcKey) → validateArcBands verwirft
+ * beide. Deshalb wird zuerst unter den Mantellinien gesucht, deren lo-/hi-Punkt im
+ * Register steht (d. h. die Schnittkante ist dieselbe Kante wie bei einem früheren Ring
+ * desselben Stapels — die Ringe teilen sich den Kreis an der Bandgrenze); nur wenn
+ * keine solche Mantellinie im Zielwinkel-Fenster (≤ 30°) liegt, gilt die nächste
+ * Mantellinie zum Zielwinkel.
+ *
  * Scheitert einer der drei Teile (oder sind die drei Schnitte nicht verschieden), wird
  * der ganze Ring wie bisher übersprungen — es entstehen KEINE Teil-Bänder eines Rings.
  *
@@ -1127,13 +1153,16 @@ function cutCycle(chain, k) {
  *
  * → true (der Ring ist in drei Bändern aufgeteilt) | false (Ring unverändert lassen)
  */
-function splitRing(ctx, chain, whole, bands, taken, stats) {
-  const { frame, o } = ctx;
-  const m = chain.facets.length;
+/**
+ * Schnitt-Kandidaten eines Vollrings: die Seitenkanten der Kette, die Mantellinien
+ * sind, mit ihrem Polarwinkel (0 … 2π) und den vkeys ihrer lo-/hi-Punkte.
+ * → [{ k, phi, loKey, hiKey }]
+ */
+function ringCandidates(ctx, chain, whole) {
+  const { frame, vkey } = ctx;
   const c = whole.Klo.c;
-  // Seitenkanten, die Mantellinien sind, mit ihrem Polarwinkel (0 … 2π)
-  const cands = [];
-  for (let k = 0; k < m; k++) {
+  const out = [];
+  for (let k = 0; k < chain.facets.length; k++) {
     const side = chain.sides[k];
     if (!side) continue;
     if (!sideIsRuling(frame, side, whole.Klo.c, whole.Khi.c, whole.rMax, whole.tol)) continue;
@@ -1141,17 +1170,39 @@ function splitRing(ctx, chain, whole, bands, taken, stats) {
     let phi = Math.atan2(l[1] - c[1], l[0] - c[0]);
     if (phi < 0) phi += 2 * Math.PI;
     if (phi >= 2 * Math.PI) phi -= 2 * Math.PI;
-    cands.push({ k, phi });
+    out.push({ k, phi, loKey: vkey(side[0]), hiKey: vkey(side[1]) });
   }
+  return out;
+}
+
+function splitRing(ctx, chain, whole, bands, taken, stats, reg) {
+  const { o, vkey } = ctx;
+  const m = chain.facets.length;
+  // Seitenkanten, die Mantellinien sind, mit ihrem Polarwinkel (0 … 2π)
+  const cands = ringCandidates(ctx, chain, whole);
   if (cands.length < 3) return false;
   // Schnitte: Winkel 0, 2π/3, 4π/3 (Abstand modulo 2π)
   const cuts = [];
+  const regWin = 30 * Math.PI / 180;
   for (const target of [0, 2 * Math.PI / 3, 4 * Math.PI / 3]) {
+    // (1) Register: Mantellinie, deren lo-/hi-Punkt ein Schnittpunkt eines früheren
+    //     Rings derselben Achse ist (nur im Zielwinkel-Fenster)
     let best = -1, bd = Infinity;
-    for (const cd of cands) {
-      let d = Math.abs(cd.phi - target);
-      if (d > Math.PI) d = 2 * Math.PI - d;
-      if (d < bd) { bd = d; best = cd.k; }
+    if (reg && reg.size) {
+      for (const cd of cands) {
+        const d = angDist(cd.phi, target);
+        if (d > regWin) continue;
+        if (!reg.has(cd.loKey) && !reg.has(cd.hiKey)) continue;
+        if (d < bd) { bd = d; best = cd.k; }
+      }
+    }
+    // (2) Rückfall: nächste Mantellinie zum Zielwinkel
+    if (best < 0) {
+      bd = Infinity;
+      for (const cd of cands) {
+        const d = angDist(cd.phi, target);
+        if (d < bd) { bd = d; best = cd.k; }
+      }
     }
     if (best < 0) return false;
     cuts.push(best);
@@ -1203,6 +1254,15 @@ function splitRing(ctx, chain, whole, bands, taken, stats) {
     stats.bands++;
     if (band.kind === 'cyl') stats.cyl++; else stats.cone++;
   }
+  // Schnittpunkte dieses Rings ins Register (die lo-/hi-Punkte der Schnitt-Seitenkanten)
+  if (reg) {
+    for (const k of cuts) {
+      const s = chain.sides[k];
+      if (!s) continue;
+      reg.add(vkey(s[0]));
+      reg.add(vkey(s[1]));
+    }
+  }
   return true;
 }
 
@@ -1218,17 +1278,105 @@ function setBandSrc(band, ctx, chain, i, j) {
 }
 
 /**
+ * Reststück eines geteilten Bandes: die Facetten [a..b] liegen auf denselben Kreisen
+ * wie das Eltern-Band X (dessen Kreise stammen aus dem Fit des GANZEN Bandes) und die
+ * beiden End-Seitenkanten sind Mantellinien bezüglich der Eltern-Mitten. Ein solches
+ * Reststück (z. B. eine einzelne Facette, die alignBands am Ende eines Nachbarbogens
+ * abgetrennt hat) ist selbst ein kleines Band — ohne diese Ausnahme blieben seine
+ * Facetten facettiert und der Nachbarbogen fände keinen passenden Nachbarn.
+ *
+ * Der Kreisfit des Reststücks ist nicht scharf (1–2 Punkte je Ebene) → die Kreise des
+ * Eltern-Bands werden übernommen (Klo/Khi, tol, rMax) und die Ebenen tlo/thi.
+ * → { band, arcs } | null
+ */
+function remnantBand(ctx, chain, a, b, parent) {
+  const { fds, frame, o, vkey, facInfo } = ctx;
+  const pLo = parent && parent.levels ? parent.levels.lo : null;
+  const pHi = parent && parent.levels ? parent.levels.hi : null;
+  if (!pLo || !pHi || !pLo.c2 || !pHi.c2) return null;
+  const rMax = Math.max(pLo.r, pHi.r);
+  const tol = Math.max(o.tolFitAbs, o.tolFitRel * rMax);
+  // Punkte des Reststücks sammeln (lo- und hi-Lauf je Facette)
+  const loPts = [], hiPts = [];
+  for (let k = a; k <= b; k++) {
+    const fi = chain.facets[k];
+    const info = facInfo.get(fi);
+    if (!info) return null;
+    const runs = facetRuns(fds[fi], info, vkey);
+    if (!runs) return null;
+    const sA = chain.sides[k], sB = chain.sides[k + 1];
+    if (!sA || !sB) return null;
+    const loRun = orientRun(runs.loRun, vkey(sA[0]), vkey(sB[0]), vkey);
+    const hiRun = orientRun(runs.hiRun, vkey(sA[1]), vkey(sB[1]), vkey);
+    if (!loRun || !hiRun) return null;
+    for (const p of loRun) loPts.push(p);
+    for (const p of hiRun) hiPts.push(p);
+  }
+  if (!loPts.length || !hiPts.length) return null;
+  // alle Punkte auf den Kreisen des Eltern-Bands?
+  for (const p of loPts) {
+    const l = toLocal(frame, p);
+    if (Math.abs(Math.hypot(l[0] - pLo.c2[0], l[1] - pLo.c2[1]) - pLo.r) > tol) return null;
+  }
+  for (const p of hiPts) {
+    const l = toLocal(frame, p);
+    if (Math.abs(Math.hypot(l[0] - pHi.c2[0], l[1] - pHi.c2[1]) - pHi.r) > tol) return null;
+  }
+  // beide End-Seitenkanten müssen Mantellinien bezüglich der Eltern-Mitten sein
+  const s0 = chain.sides[a], s1 = chain.sides[b + 1];
+  if (!s0 || !s1) return null;
+  if (!sideIsRuling(frame, s0, pLo.c2, pHi.c2, rMax, tol)) return null;
+  if (!sideIsRuling(frame, s1, pLo.c2, pHi.c2, rMax, tol)) return null;
+  // mindestens ein Segment
+  const nSegs = Math.max(loPts.length - 1, hiPts.length - 1);
+  if (nSegs < 1) return null;
+  const chk = {
+    Klo: { c: pLo.c2, r: pLo.r },
+    Khi: { c: pHi.c2, r: pHi.r },
+    tol, rMax,
+    tlo: pLo.t, thi: pHi.t,
+    nSegs, endsOk: true, startOk: true, endOk: true,
+  };
+  const made = makeBand(ctx, chain, a, b, chk, -1);
+  if (!made) return null;
+  // Das Reststück ist ein Stück der FLÄCHE des Eltern-Bands: seine Bögen müssen auf
+  // denselben Kreisen liegen (und dieselbe Bogen-Achse haben) wie die des Eltern-Bands
+  // → der Bogen-Hinweis (die gemeinsame Achse des Bogen-Stapels) wird beim Bauen der
+  // Pläne vom Eltern-Band übernommen.
+  const pLoArc = (parent.segs || []).find((s) => s.type === 'arc' && s.level === 'lo');
+  const pHiArc = (parent.segs || []).find((s) => s.type === 'arc' && s.level === 'hi');
+  Object.defineProperty(made.band, 'stackParent', {
+    value: {
+      lo: pLoArc ? pLoArc.arcKey : null,
+      hi: pHiArc ? pHiArc.arcKey : null,
+    },
+    enumerable: false, writable: true, configurable: true,
+  });
+  return made;
+}
+
+/**
  * Teilbänder eines Band-Bereichs [a..b] bauen (tryBand + makeBand, inkl. blocked).
  * Scheitert die Prüfung oder hat der Bereich zu wenige Segmente → kein Band
- * (die Facetten bleiben facettiert).
+ * (die Facetten bleiben facettiert) — es sei denn, `parent` (das Eltern-Band, aus dem
+ * der Bereich stammt) trägt die Prüfung: dann wird das Reststück zum Band (remnantBand).
  */
-function pushBand(ctx, chain, a, b, out) {
+function pushBand(ctx, chain, a, b, out, parent) {
   const chk = tryBand(ctx, chain, a, b);
-  if (!chk || !chk.endsOk || chk.nSegs < ctx.o.minSegs) return;
-  const made = makeBand(ctx, chain, a, b, chk, out.length);
-  if (!made) return;
-  setBandSrc(made.band, ctx, chain, a, b);
-  out.push(made.band);
+  if (chk && !chk.insufficient && chk.endsOk && chk.nSegs >= ctx.o.minSegs) {
+    const made = makeBand(ctx, chain, a, b, chk, out.length);
+    if (made) {
+      setBandSrc(made.band, ctx, chain, a, b);
+      out.push(made.band);
+      return;
+    }
+  }
+  if (!parent) return;
+  const rem = remnantBand(ctx, chain, a, b, parent);
+  if (!rem) return;
+  rem.band.id = out.length;
+  setBandSrc(rem.band, ctx, chain, a, b);
+  out.push(rem.band);
 }
 
 /**
@@ -1274,8 +1422,10 @@ function cutsOfBand(X, chain, i, j, breaks, vkey, o) {
  * einen Bogen, dessen INNERER Punkt ein Endpunkt eines anderen Bandes ist, so liegt
  * dort eine Teilungsstelle: X wird an dieser Facettengrenze in Teilbänder zerlegt
  * (Bereiche [i..s1−1], [s1..s2−1], …, [sk..j]; jeder Bereich neu prüfen — Bereiche,
- * die scheitern, entfallen → ihre Facetten bleiben facettiert). Wiederholen bis nichts
- * mehr kippt (höchstens 20 Durchgänge).
+ * die scheitern, entfallen → ihre Facetten bleiben facettiert; ein Reststück, das auf
+ * den Kreisen des Eltern-Bands X liegt und an beiden Enden Mantellinien hat, wird
+ * trotzdem zum Band — sonst bliebe seine Facette facettiert und der Nachbarbogen fände
+ * keinen Nachbarn). Wiederholen bis nichts mehr kippt (höchstens 20 Durchgänge).
  *
  * `taken` bleibt unberührt (wirkt nur zwischen Achsen).
  * → { bands, arcs, stats }  (Ids fortlaufend neu vergeben, arcs neu gebaut)
@@ -1309,10 +1459,10 @@ function alignBands(bands, opts) {
       aligned += cuts.length;
       let a = i;
       for (const s of cuts) {
-        if (s - 1 >= a) pushBand(ctx, chain, a, s - 1, next);
+        if (s - 1 >= a) pushBand(ctx, chain, a, s - 1, next, X);
         a = s;
       }
-      if (j >= a) pushBand(ctx, chain, a, j, next);
+      if (j >= a) pushBand(ctx, chain, a, j, next, X);
     }
     cur = next;
     if (!changed) break;
@@ -1372,17 +1522,45 @@ export function findArcBands(fds, opts) {
     stats.candidates += facets.size;
     stats.chains += chains.length;
     const ctx = { fds: list, frame, o, vkey, facInfo: facets };
+    // Register der Ring-Schnittpunkte (je Achse): die vkeys der lo-/hi-Punkte der
+    // Schnitt-Seitenkanten der bereits geteilten Ringe. Ein später Ring schneidet
+    // bevorzugt an derselben Kante (Mantellinie), damit die Bögen der Ringe
+    // übereinanderliegender Ebenen denselben Polygonzug haben.
+    const cutReg = new Set();
 
+    // VORAB: die Vollringe dieser Achse bestimmen (Band-Fit + Mantellinien-Zahl).
+    // Der Ring mit den WENIGSTEN Mantellinien (Fasen-Ring mit Fächern: dort fehlen
+    // einzelne Mantellinien) wird ZUERST geteilt — er legt die Schnittkanten fest,
+    // die übrigen Ringe desselben Stapels folgen dem Register. Sonst hinge die
+    // Ausrichtung der Ringe an der Reihenfolge der Flächen im Netz.
+    const wholeRings = new Map();                          // chain → { whole, nCand }
     for (const chain of chains) {
+      if (!chain.cyclic) continue;
+      if (overBudget()) break;
+      const whole = tryBand(ctx, chain, 0, chain.facets.length - 1);
+      if (!whole || whole.insufficient) { wholeRings.set(chain, { whole: null, nCand: 0 }); continue; }
+      wholeRings.set(chain, { whole, nCand: ringCandidates(ctx, chain, whole).length });
+    }
+    let refChain = null, refNCand = Infinity;
+    for (const [chain, info] of wholeRings) {
+      if (!info.whole) continue;
+      if (info.nCand < refNCand) { refNCand = info.nCand; refChain = chain; }
+    }
+    const ordered = refChain
+      ? [refChain].concat(chains.filter((c) => c !== refChain))
+      : chains;
+
+    for (const chain of ordered) {
       if (overBudget()) { stats.budgetHit = true; break axesLoop; }
       let work = chain;
       if (chain.cyclic) {
         // Vollkreis? → in DREI Bänder teilen (Schnitt an den Mantellinien mit den
         // Polarwinkeln 0, 2π/3, 4π/3). Scheitert die Teilung, bleibt der Ring
         // facettiert (es entstehen keine Teil-Bänder eines Rings).
-        const whole = tryBand(ctx, chain, 0, chain.facets.length - 1);
+        const cached = wholeRings.get(chain);
+        const whole = cached ? cached.whole : tryBand(ctx, chain, 0, chain.facets.length - 1);
         if (whole && !whole.insufficient) {
-          splitRing(ctx, chain, whole, bands, taken, stats);
+          splitRing(ctx, chain, whole, bands, taken, stats, cutReg);
           continue;
         }
         // sonst an der Seitenkante nach der breitesten lo-Kante aufschneiden
@@ -1977,7 +2155,11 @@ function stackAxis(bands, frame, o, vkey) {
       const l = toLocal(frame, p);
       pts.push([l[0], l[1]]);
     }
-    if (pts.length >= 2) levels2d.push(pts);
+    // Ebenen mit weniger als DREI Punkten bestimmen die Mitte nicht (z. B. ein
+    // Reststück-Band mit EINEM Segment: je Ebene nur zwei Punkte) — sie fliegen aus
+    // dem Fit; ohne brauchbare Ebene(n) gibt es keinen Hinweis (die Bögen benutzen dann
+    // die eigene Kreismitte level.c2, z. B. die des Eltern-Bands).
+    if (pts.length >= 3) levels2d.push(pts);
   }
   if (!levels2d.length) return null;
   const K = fitCoaxial2d(levels2d);
@@ -2038,6 +2220,21 @@ export function buildArcPlans(fds2, det, written, opts) {
     const root = ow.length ? rootOf.get(ow[0].band) : undefined;
     const h = arcHint(rec, root === undefined ? null : stackInfo.get(root));
     if (h) hints.set(key, h);
+  }
+  // Reststück-Bänder (alignBands): ihr Bogen ist ein Stück des Eltern-Bogens → sie
+  // übernehmen dessen Hinweis (die gemeinsame Achse des Bogen-Stapels). Sonst wäre
+  // ihr eigener Stapel (je Ebene nur zwei Punkte) unbestimmt und der Bogen läge auf
+  // einem anderen Kreis als der des Eltern-Bands.
+  for (const band of (det && det.bands) || []) {
+    const sp = band.stackParent;
+    if (!sp) continue;
+    for (const seg of band.segs || []) {
+      if (seg.type !== 'arc') continue;
+      const pk = sp[seg.level];
+      if (!pk) continue;
+      const h = hints.get(pk);
+      if (h) hints.set(seg.arcKey, h);
+    }
   }
 
   // 1. Exakte Geometrie je Bogen (aus den geschriebenen Endpunkten)

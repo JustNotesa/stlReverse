@@ -600,25 +600,31 @@ describe('profile-arcs.js — Band-Erkennung', () => {
       { z: 9.5, pts2d: full }, { z: 10, pts2d: ins },
     ]);
     const det = run(fds);
-    // 4 Zylinder + 8 Kegel, und mindestens eine Teilung wurde angeglichen
-    expect(det.bands.length).toBe(12);
-    expect(det.stats.cyl).toBe(4);
-    expect(det.stats.cone).toBe(8);
+    // 4 Zylinder + 8 Kegel; alignBands schneidet die Bänder an den Bogen-ENDpunkten der
+    // Nachbarbänder nach. Die dabei entstehenden Reststücke (je EINE Facette) liegen auf
+    // den Kreisen des Eltern-Bands und haben an beiden Enden Mantellinien → sie bleiben
+    // Bänder (sonst bliebe ihre Facette facettiert).
+    expect(det.bands.length).toBe(18);
+    expect(det.stats.cyl).toBe(7);
+    expect(det.stats.cone).toBe(11);
     expect(det.stats.aligned).toBeGreaterThanOrEqual(1);
+    // die Reststücke: je ein Band mit genau einer Facette
+    expect(det.bands.filter((b) => b.facets.length === 1).length).toBe(6);
 
     // alle Bänder bleiben gültig: Zylinder- und Kegel-Bögen decken sich
-    const before = det.bands.length;
     validateArcBands(fds, det, { vtxKey });
-    expect(det.bands.length).toBe(before);
-    expect(det.stats.valid).toBe(before);
-    // 16 Bögen: 8 zwischen Zylinder und Kegel (2 Eigentümer) + 8 an den Deckflächen (1)
-    expect(det.arcs.size).toBe(16);
+    expect(det.stats.valid).toBe(15);                   // 3 Reststücke ohne Nachbarn fallen weg
+    expect(det.bands.length).toBe(15);
+    // 20 Bögen: 16 wie bisher (8 zwischen Zylinder und Kegel (2 Eigentümer) + 8 an den
+    // Deckflächen (1)) + die Bögen der Reststücke (1 oder 2 Eigentümer)
+    expect(det.arcs.size).toBe(20);
     const counts = [...ownerCount(det.arcs).values()].sort();
-    expect(counts).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2]);
+    expect(counts).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
     // jeder Bogen mit 2 Eigentümern: Zylinder-Band + Kegel-Band
+    const byId = new Map(det.bands.map((b) => [b.id, b]));
     for (const rec of det.arcs.values()) {
       if (rec.owners.length !== 2) continue;
-      const kinds = rec.owners.map((ow) => det.bands[ow.band].kind).sort();
+      const kinds = rec.owners.map((ow) => byId.get(ow.band).kind).sort();
       if (kinds[0] === 'cyl' && kinds[1] === 'cone') expect(rec.owners.length).toBe(2);
     }
   });
@@ -1079,5 +1085,129 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     // das Original bleibt unverändert
     expect(fds[fds.length - 1].outer.length).toBe(prof.length);
     expect(fds[fds.length - 1].inner[0].circleRim.rimKey).toBe('test-rim');
+  });
+
+  // ── Bohrung + Fase: übereinanderliegende Ringe DERSELBEN Achse ─────────────
+  // Der Rahmen der z-Achse ist e1 = (0,1,0), e2 = (−1,0,0) → der Rahmen-Winkel eines
+  // Punktes (x,y,z) ist atan2(−x, y), der Welt-Winkel ψ = Rahmen-Winkel + 90°. Die
+  // Welt-Punkte liegen CCW (ψ steigt) → die Facetten-Ecken [unten_i, unten_j, oben_j,
+  // oben_i] zeigen nach außen (bei umgekehrter Wicklung nach innen).
+  const borePt = (psi, R, t) => [R * Math.cos(psi), R * Math.sin(psi), t];
+
+  /**
+   * Rohr (R8) mit Bohrung R4.25 (t=0…2) und 0.5-Fase (Kegel R4.25→4.75, t=2…2.5),
+   * N Segmente je Ring. `fanIdx`: Indizes, an denen die MANTELLINIE des Kegel-Rings
+   * fehlt — der hi-Punkt ist dort um halbe Segmentweite verschoben, die Seitenkante
+   * wird schräg (Fächer-Facet: keine Mantellinie). `order`: Reihenfolge der Flächen
+   * (bestimmt, welcher Ring zuerst geteilt wird).
+   */
+  function chamferedBore(N, fanIdx, order) {
+    const R = 4.25, RO = 8, T = 2, TC = 2.5;
+    const d = 2 * Math.PI / N;
+    const innerLo = [], innerHi = [], coneHi = [], outerLo = [], outerHi = [];
+    for (let k = 0; k < N; k++) {
+      const psi = k * d;
+      innerLo.push(borePt(psi, R, 0));
+      innerHi.push(borePt(psi, R, T));
+      coneHi.push(borePt(psi + (fanIdx.includes(k) ? d / 2 : 0), R + 0.5, TC));
+      outerLo.push(borePt(psi, RO, 0));
+      outerHi.push(borePt(psi, RO, TC));
+    }
+    const wall = (lo, hi, inward) => {
+      const out = [];
+      for (let k = 0; k < N; k++) {
+        const j = (k + 1) % N;
+        const q = [lo[k], lo[j], hi[j], hi[k]];
+        out.push(face(inward ? [q[3], q[2], q[1], q[0]] : q));
+      }
+      return out;
+    };
+    const cyl = wall(innerLo, innerHi, true);          // Bohrungswand: Normale nach innen
+    const cone = wall(innerHi, coneHi, true);          // Fase: Normale nach innen/oben
+    const outer = wall(outerLo, outerHi, false);        // Außenwand: Normale nach außen
+    const capLo = face(outerLo.slice(), [0, 0, -1]);   // unten: Ring mit Loch
+    capLo.inner = [innerLo.slice().reverse()];
+    const capHi = face(outerHi.slice(), [0, 0, 1]);    // oben: Ring mit Loch
+    capHi.inner = [coneHi.slice().reverse()];
+    return order === 'cylFirst'
+      ? [...cyl, ...cone, ...outer, capLo, capHi]
+      : [...cone, ...cyl, ...outer, capLo, capHi];
+  }
+
+  // Die Fächer sitzen an den Rahmen-Winkeln 0°, 120°, 240° (Welt-Winkel 90°, 210°, 330°)
+  const FAN_IDX = [18, 42, 66];
+
+  // Zylinder-Ring und Fase-Ring: die Schnitte MÜSSEN an denselben Mantellinien liegen,
+  // sonst passen die Bögen (unterschiedliche Polygonzüge → unterschiedlicher arcKey)
+  // nicht mehr aufeinander und validateArcBands verwirft die Bänder.
+  test('29: Bohrung R4.25 + 0.5-Fase (72 Seg.) mit Fächer-Facetten an den Schnittstellen → alle Bänder gültig, alle Facetten abgedeckt', () => {
+    const N = 72;
+    const fds = chamferedBore(N, FAN_IDX, 'coneFirst');
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    // drei Ringe (Bohrungswand, Fase, Außenwand) je drei Bänder
+    expect(det.bands.length).toBe(9);
+    expect(det.stats.valid).toBe(9);
+    // alle Facetten der drei Ringe liegen in gültigen Bändern
+    const covered = new Set();
+    for (const b of det.bands) for (const fi of b.facets) covered.add(fi);
+    expect(covered.size).toBe(3 * N);
+    // die Bänder der Bohrungswand und der Fase teilen sich die Bögen auf der Ebene
+    // t = 2 (unten = oben): gleicher Polygonzug → gleicher arcKey → Nachbar-Bänder
+    const bore = det.bands.filter((b) => b.kind === 'cyl' && b.levels.lo.r < 5);
+    const cone = det.bands.filter((b) => b.kind === 'cone');
+    expect(bore.length).toBe(3);
+    expect(cone.length).toBe(3);
+    expect(bore.map((b) => b.segs[2].arcKey).sort()).toEqual(cone.map((b) => b.segs[0].arcKey).sort());
+    // die Bögen an den Deckflächen (unten t=0, oben t=2.5) gehören je einem Band
+    expect(det.capEdits.length).toBe(12);
+  });
+
+  // alignBands schneidet ein Band an den Bogen-ENDpunkten der Nachbarbänder nach: das
+  // Reststück (hier EINE Facette) liegt auf den Kreisen des Eltern-Bands und hat an
+  // beiden Enden Mantellinien → es bleibt ein Band (sonst bliebe die Facette
+  // facettiert und der Nachbarbogen fände keinen passenden Nachbarn).
+  // (Rundrechteck mit Fase: die Kette des Zylinder-Bands beginnt in der Ecke, die des
+  // Kegel-Bands an der Geraden → die Teilungsstellen liegen eine Facette auseinander.)
+  test('30: Reststück mit 1 Segment aus alignBands bleibt ein Band', () => {
+    const full = roundedRect(11.85, 11.85, [5, 5, 5, 5], 4);
+    const ins = roundedRect(10.85, 10.85, [4.5, 4.5, 4.5, 4.5], 4);
+    const fds = extrude([
+      { z: 0, pts2d: ins }, { z: 0.5, pts2d: full },
+      { z: 9.5, pts2d: full }, { z: 10, pts2d: ins },
+    ]);
+    const det = run(fds);
+    const small = det.bands.filter((b) => b.facets.length === 1);
+    expect(small.length).toBe(6);
+    expect(small.every((b) => b.nSegs === 1)).toBe(true);
+    for (const b of small) {
+      expect(b.segs.map((s) => s.type)).toEqual(['arc', 'line', 'arc', 'line']);
+      expect(b.segs[0].pts.length).toBe(2);              // lo-Bogen: 1 Segment (2 Punkte)
+      expect(b.segs[2].pts.length).toBe(2);              // hi-Bogen: 1 Segment
+      expect(b.segs[1].pts.length).toBe(2);              // Mantellinie
+      expect(b.segs[3].pts.length).toBe(2);
+    }
+    // Ein 1-Segment-Bogen hat nur seine zwei Endpunkte im Schlüssel (kein innerer Punkt):
+    // der Schlüssel bestimmt die Kante eindeutig — zwei verschiedene 1-Segment-Bögen
+    // bekommen also nie denselben Schlüssel (gleicher Schlüssel = gleiche Kante, evtl.
+    // von zwei Bändern geteilt).
+    for (const b of small) {
+      for (const seg of b.segs.filter((s) => s.type === 'arc')) {
+        const ends = [vtxKey(seg.pts[0]), vtxKey(seg.pts[seg.pts.length - 1])].sort().join('|');
+        expect(seg.arcKey).toBe(ends);
+      }
+    }
+    // Ein Bogen aus NUR ZWEI Punkten (1 Segment) bekommt eine exakte Geometrie: der
+    // Kreisfit des Reststücks ist unbestimmt → der Bogen erbt den Hinweis des
+    // Eltern-Bands (dessen Kreise und dessen Bogen-Achse).
+    validateArcBands(fds, det, { vtxKey });
+    const { plans } = buildArcPlans(fds, det, written9, { vtxKey });
+    const ids = new Set(small.map((b) => b.id));
+    const remnantPlans = plans.filter((p) => ids.has(p.id));
+    expect(remnantPlans.length).toBeGreaterThanOrEqual(1);
+    for (const p of remnantPlans) {
+      expect(['cyl', 'cone']).toContain(p.surf.kind);
+      expect(p.tris.length).toBeGreaterThan(0);
+    }
   });
 });
