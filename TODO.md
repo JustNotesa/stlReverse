@@ -175,6 +175,15 @@ Kreis-Kanten teilen.
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
 - [ ] **Full Online3DViewer in neuem Tab** (zukünftig, ~1–2 Tage Aufwand)
 
+- [ ] **Spritzguss-/CATIA-Teile (Skoda-Haken, Printables, lokal `samples/`, nicht ins Repo): 18 377 Flächen / 17,6 MB**
+  (Diagnose 2026-10-28): 58 % der Fläche Ebenen, 22 % kugelartig (gewölbte Formschrägen-Wände R≈300 + Eckkugeln R≈1),
+  18 % Zylinder, 2 % Torus-Verrundungen (aber 33 % der Dreiecke). Kleine Verrundungen r 0,3–1 an gekrümmten Kanten →
+  Region-Growing macht jede Facettenreihe zur Ebene (11 912 Gruppen). Bestehende Pfade greifen nicht (v2: Formschräge
+  13–14°, profile-arcs: gekrümmte Nachbarn); Gate-Lockerung < 1 %. Ideal ≈ 400–800 Flächen. Vorschlag eigene Runde:
+  (1) fit-basierte Analytik-Segmentierung (Prototyp scratchpad skoda/fitseg.mjs), SPHERICAL_/TOROIDAL_SURFACE,
+  Kanten zwischen gekrümmten Flächen als B-Spline mit Projektion auf beide Flächen; (2) Formschrägen-Wand als
+  B-Spline-Regelfläche; (3) danach AN-Variante, die kleine Verrundungen schärft.
+
 ## Niedrige Priorität
 
 - [ ] **Sketch-Rekonstruktion** — 2D-Grundskizze + Extrusionsrichtung aus unified Faces
