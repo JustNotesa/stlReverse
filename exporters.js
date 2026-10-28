@@ -405,6 +405,17 @@ export function buildVolumeStepBrepV2(analysis) {
   const ARCS = analysis?.profileArcs !== false;   // Profil-Bögen (profile-arcs.js)
   const arcBlocked = new Set();                     // Band-Signaturen, die facettiert bleiben (Rückfall)
   let arcStats = { tried: 0, retries: 0, dropped: 0 };
+  // Normalgruppen, deren Wände die Primitive-Pfade (Mantel/Bohrung) beanspruchen: diese Wände
+  // dürfen vom Bogen-Pfad NICHT in Bänder geteilt werden (deren Gates sind strenger).
+  let arcBlockedGroupsCache = null;
+  const arcBlockedGroups = () => {
+    if (arcBlockedGroupsCache) return arcBlockedGroupsCache;
+    const s = new Set();
+    for (const [, e] of boreById) for (const g of e.groups) s.add(g);
+    for (const [, e] of mantleById) for (const g of e.groups) s.add(g);
+    arcBlockedGroupsCache = s;
+    return s;
+  };
 
   // ---- Test-Hooks (nur Tests/Node, tests/orientation-guard.mjs): STLREV_TEST_FLIP='bore'|'mantle'|
   // 'mantlecone'|'cone'|'tube' dreht den emittierten same_sense der jeweiligen analytischen Flächen
@@ -6469,7 +6480,11 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!ARCS) return { fds, arcs: null };
     arcStats.tried++;
     try {
-      let det = validateArcBands(fds, findArcBands(fds, { vtxKey, blocked: arcBlocked }), { vtxKey });
+      // Wände, die die Primitive-Pfade (Mantel/Bohrung) beanspruchen, dürfen NICHT in Bänder
+      // geteilt werden: deren Gates (Delle, Verdrehung, dünner Steg, Rand an der Plattenkante,
+      // Konkavität) sind strenger als die des Bogen-Pfads — eine Teilung würde sie umgehen.
+      const fb0 = findArcBands(fds, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() });
+      let det = validateArcBands(fds, fb0, { vtxKey });
       for (let it = 0; it < 4 && det.bands.length; it++) {
         const ap = applyArcBands(fds, det, { vtxKey });
         const snap = snapToPlanes(ap.fds).snap;
@@ -6477,7 +6492,7 @@ export function buildVolumeStepBrepV2(analysis) {
         const res = buildArcPlans(fds, det, written, { vtxKey });   // ORIGINAL-Liste: band.facets indizieren sie
         if (!res.failed.size) return { fds: ap.fds, arcs: { plans: res.plans, geoms: res.geoms } };
         for (const b of det.bands) if (res.failed.has(b.id)) arcBlocked.add(b.sig);
-        det = validateArcBands(fds, findArcBands(fds, { vtxKey, blocked: arcBlocked }), { vtxKey });
+        det = validateArcBands(fds, findArcBands(fds, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() }), { vtxKey });
       }
     } catch (e) { /* Bögen sind optional: bei jedem Fehler facettiert */ }
     return { fds, arcs: null };

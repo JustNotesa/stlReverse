@@ -72,6 +72,8 @@ export const ARC_DEFAULTS = {
   budgetMs: 2500,      // ms: Zeitbudget für findArcBands (Kettenverarbeitung stoppen)
   maxAxes: 6,          // Achsen-Kandidaten je Export höchstens so viele - die mit den meisten Deckflächen-Punkten; ein feines Kugelnetz lieferte 49 Achsen und je Achse einen vollen Durchlauf aller Facetten
   noiseTol: 5e-4,      // mm: Rausch-Untergrenze der Pfeilhoehen-Pruefung, Netzpunkte sind auf ~1e-4 gerundet
+  blockedGroups: null,  // Set von Normalgruppen, deren Wände NICHT in Bänder geteilt werden dürfen
+                        // (Wände, die die Primitive-Pfade (Mantel/Bohrung) beanspruchen)
 };
 
 // Zeitmessung (Budget) — performance.now() mit Fallback auf Date.now()
@@ -956,6 +958,19 @@ function makeBand(ctx, chain, i, j, chk, id) {
   const { fds, frame, o, vkey } = ctx;
   const facets = chain.facets.slice(i, j + 1);
 
+  // Gehört die Wand zu einem ERKANNTEN Primitive (Zylinder-Bohrung / -Mantel), darf der
+  // Bogen-Pfad sie nicht übernehmen: der Primitive-Pfad hat über diese Wand entschieden —
+  // er hat sie umgewandelt oder bewusst verworfen (Delle, verdrillte Wand, zu dünner Steg,
+  // Rand an der Plattenkante, Konkavität). Seine Gates sind strenger als die des Bogen-Pfads:
+  // der Bogen-Pfad würde die Wand trotzdem analytisch machen (Delle geglättet) und dabei
+  // eine Kreis-Kante erzeugen, die den Nachbarn schneidet.
+  if (o.blockedGroups && o.blockedGroups.size) {
+    for (const fi of facets) {
+      const fd = fds[fi];
+      if (fd && fd.group && o.blockedGroups.has(fd.group)) return null;
+    }
+  }
+
   // gerichtete Kanten (a→b) aller outer-Loops sammeln
   const dir = new Map();
   for (const fi of facets) {
@@ -1107,6 +1122,41 @@ function cutCycle(chain, k) {
 }
 
 /**
+ * Grenzt die Ring-Wand an dieser Ebene (lo/hi) an eine ebene DECKFLÄCHE (Normale ⟂ d)?
+ * Dann steht die Wand dort frei auf einer Deckfläche (ein Zylinder/Kegel zwischen zwei
+ * Deckflächen); grenzt sie an eine andere Wand (Normale nicht ⟂ d), läuft der Ring in
+ * einem Ring-Stapel weiter (z. B. Bohrung mit Fase an beiden Enden).
+ * → true: an dieser Ebene liegt eine Deckfläche an
+ */
+function ringLevelHasDeck(ctx, chain, level) {
+  const { fds, frame, o, vkey, facInfo, index } = ctx;
+  if (!index) return false;
+  const inChain = new Set(chain.facets);
+  for (const fi of chain.facets) {
+    const fd = fds[fi];
+    const info = facInfo.get(fi);
+    if (!fd || !info) continue;
+    const runs = facetRuns(fd, info, vkey);
+    if (!runs) continue;
+    const run = level === 'lo' ? runs.loRun : runs.hiRun;
+    if (!run || run.length < 2) continue;
+    for (let k = 0; k + 1 < run.length; k++) {
+      const ka = vkey(run[k]), kb = vkey(run[k + 1]);
+      if (ka === kb) continue;
+      const owners = index.get(edgeKeyOf(ka, kb)) || [];
+      for (const ow of owners) {
+        if (inChain.has(ow.fi)) continue;               // die Wand selbst
+        const ofd = fds[ow.fi];
+        if (!ofd || !ofd.normal) continue;
+        const nn = norm(ofd.normal);
+        if (len(nn) > 0 && Math.abs(dot(nn, frame.d)) >= o.capCos) return true;   // Deckfläche
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Einen gültigen VOLLRING (zyklische Kette, der ganze Ring besteht als Band) in
  * DREI Bänder teilen.
  *
@@ -1131,6 +1181,25 @@ function splitRing(ctx, chain, whole, bands, taken, stats) {
   const { frame, o } = ctx;
   const m = chain.facets.length;
   const c = whole.Klo.c;
+  // ── Sperren: welche Ringe dürfen überhaupt in Bänder geteilt werden? ───────
+  // Ein VOLLRING ist im Normalfall eine Primitive-Wand (Zylinder/Kegel zwischen zwei
+  // Deckflächen). Für sie sind die Pfade mit den strengeren Gates zuständig:
+  //   - der Mantel-/Kegel-Pfad (konvexe Außenwand: Dellen, Verdrehung, Knick, Fase),
+  //   - der Bohrungs-Pfad (konkaves Loch: Steg zu dünn, Rand an der Plattenkante).
+  // Der Bogen-Pfad prüft das nicht — er würde die Wand unbemerkt analytisch machen und
+  // dabei die Form ändern (Delle geglättet, Knick weg) oder eine gefährliche
+  // Kreis-Kante erzeugen (Kreis schneidet den Nachbarn). Deshalb:
+  //   (1) Wand-Facetten gehören zu einem erkannten Primitive (Zylinder) → nicht teilen:
+  //       die Primitive-Pfade haben entschieden (oder bewusst verworfen) — das prüft
+  //       makeBand (blockedGroups) für ALLE Bänder, auch für die Ringe.
+  //   (2) Die Wand ist eine vollständige Primitive-Wand (beide Ebenen an einer
+  //       Deckfläche ⟂ d) → nicht teilen (Zylinder/Kegel zwischen zwei Deckflächen).
+  //   (3) Die Wand ist konvex (Außenwand, Normalen zeigen von der Achse weg) → nicht
+  //       teilen: das ist der Mantel-/Kegel-Pfad.
+  // Was bleibt, sind Wände, die KEIN anderer Pfad nehmen kann: ein Loch mit Fasen an
+  // beiden Enden (Ring aus Zylinder + Kegeln) — dort ist der Bogen-Pfad der einzige,
+  // der die Wand als echte Teil-Zylinder/-Kegel schreiben kann.
+  if (ringLevelHasDeck(ctx, chain, 'lo') && ringLevelHasDeck(ctx, chain, 'hi')) return false;
   // Seitenkanten, die Mantellinien sind, mit ihrem Polarwinkel (0 … 2π)
   const cands = [];
   for (let k = 0; k < m; k++) {
@@ -1194,6 +1263,10 @@ function splitRing(ctx, chain, whole, bands, taken, stats) {
     if (!mb) return false;
     made.push(mb);
   }
+  // KONVEXE Wand (Außenwand: die Facetten-Normalen zeigen von der Achse weg) → das ist der
+  // Mantel-/Kegel-Pfad (mit seinen strengeren Gates: Delle, Verdrehung, Knick, Fase). Der
+  // Bogen-Pfad darf sie nicht übernehmen — er würde die Wand dabei glätten.
+  if (made[0].band.sense > 0) return false;
   for (let i = 0; i < 3; i++) {
     const band = made[i].band;
     band.id = bands.length;
@@ -1371,7 +1444,7 @@ export function findArcBands(fds, opts) {
     const { facets, chains } = buildChains(list, d, frame, index, taken, o);
     stats.candidates += facets.size;
     stats.chains += chains.length;
-    const ctx = { fds: list, frame, o, vkey, facInfo: facets };
+    const ctx = { fds: list, frame, o, vkey, facInfo: facets, index };
 
     for (const chain of chains) {
       if (overBudget()) { stats.budgetHit = true; break axesLoop; }
