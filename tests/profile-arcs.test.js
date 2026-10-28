@@ -1503,4 +1503,28 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(g2).toBeTruthy();
     expect(Math.abs(g2.radius - g.radius)).toBeLessThan(1e-12);
   });
+
+  // Fein facettierte Ecken (1°-Segmente) direkt neben breiten GERADEN Profilseiten:
+  // der gierige Band-Scan darf die gerade Seite nicht mit den ersten Bogen-Facetten zu
+  // einem FAKE-Band verschmelzen (Kreis-Fit mit riesigem Radius → passt scheinbar) — sonst
+  // blieben die ersten Facetten des echten Bogens flach (schmale Splitter-Flächen).
+  test('34: fein facettierte Ecken (R3/R1, 90×1°) neben breiten geraden Seiten → 4 Bänder über die GANZE Ecke (keine flach gebliebene Facette)', () => {
+    for (const r of [3, 1]) {
+      // Koordinaten auf 4 Nachkommastellen runden (wie ein echtes geschriebenes Netz)
+      const prof = roundedRect(20, 14, [r, r, r, r], 90).map(([x, y]) => [
+        Math.round(x * 1e4) / 1e4, Math.round(y * 1e4) / 1e4,
+      ]);
+      const fds = extrude([{ z: -8, pts2d: prof }, { z: 8, pts2d: prof }]);
+      const det = run(fds);
+      validateArcBands(fds, det, { vtxKey });
+      expect(det.bands.length).toBe(4);                     // eine Ecke je Band
+      const all = new Set();
+      for (const b of det.bands) {
+        expect(b.kind).toBe('cyl');
+        expect(b.facets.length).toBe(90);                  // die GANZE Ecke in einem Band
+        for (const fi of b.facets) all.add(fi);
+      }
+      expect(all.size).toBe(360);                          // 4×90 Facetten, jede genau einmal
+    }
+  });
 });
