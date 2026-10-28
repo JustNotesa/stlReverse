@@ -195,6 +195,10 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Splitter-Flächen auf Profil-Bögen (2026-10-28, `wt/splitter`)** — findArcBands nahm breite Ebene + erste
+  Bogen-Facetten als Schein-Band (Fit-Radius ~200 mm, Toleranz > Pfeilhöhe) → 0,05-mm-Streifen quer über Wand und Fase.
+  Vorausschau: reicht das Band ab i+1 weiter, wird i übersprungen. Kabelhalter AN 234 → 218, AUS 475 → 233 Flächen.
+  Rest: 1 Stelle mit im STL um 2° verdrehten Fasen-Facetten (bräuchte Netzpunkt-Einfügung).
 - [x] **Bögen-Rest am Kabelhalter + Schalter „Blech-Biegungen schärfen“ (2026-10-28, `wt/boegen-rest`, 4–5 MiniMax
   parallel)** — Pfeilhöhen-Prüfung statt Umkreis-Radius (Netzrauschen), kurze Proben unbestimmt, Vollringe in drei
   Bänder mit gemeinsamen Schnitten je Stapel (Ø8,5-Loch beidseitig gefast: 3 Zyl. + 6 Kegel), Gravur neben Bohrung
