@@ -131,6 +131,9 @@
           <label class="micro" style="display:inline-flex; align-items:center; gap:.35em; cursor:pointer; flex-basis:100%;" title="Verrundungen beim Export entfernen: Loch-Mündungs-Verrundungen werden zu Kegel-Fasen, gerade Kanten-Verrundungen zu scharfen Kanten. Aus = Verrundungen bleiben facettiert erhalten.">
             <input type="checkbox" id="defeature-toggle" checked> Verrundungen entfernen (Fase/scharfe Kante)
           </label>
+          <label class="micro" style="display:inline-flex; align-items:center; gap:.35em; cursor:pointer; flex-basis:100%;" title="Biegungen von Blechprofilen (Innen- und Außenbogen koaxial, konstante Wandstärke) werden zu scharfen Ecken. Aus = Biegungen bleiben rund (echte Teil-Zylinder). Wirkt nur mit „Verrundungen entfernen“.">
+            <input type="checkbox" id="sharpen-bends-toggle"> Blech-Biegungen schärfen
+          </label>
           <label class="micro" style="display:inline-flex; align-items:center; gap:.35em; flex-basis:100%;" title="Kanten des STL-Netzes, die kürzer sind als dieser Wert, werden vor der Analyse zusammengezogen (Ecken und scharfe Kanten bleiben). Kein Drucker bildet solche Mikro-Details ab (FDM ~0,4 mm, SLA ~0,05 mm); sie blähen die STEP-Datei auf, und strikte CAD-Programme (z.B. CST/ACIS) verwerfen Flächen mit Mikro-Kanten. Änderung analysiert die Datei neu.">
             Kleinste Detailgröße
             <select id="min-detail-select">
