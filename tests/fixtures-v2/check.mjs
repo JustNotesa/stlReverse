@@ -10,7 +10,9 @@
 //   AN   — defeature:true, volle Pipeline (Bohrungen/v1/v2 + globaler Fallback)
 //   v2   — defeature:true, Primitive entfernt → v2 (defeatureBands) ISOLIERT, ohne Bohrungs-/v1-Pfad
 //   AN+B — wie AN, zusätzlich sharpenBends:true (Blech-Biegungen schärfen) — nur für Körper mit
-//          `bends` (p1–p4, p6): dort müssen die Biegungen scharf werden (Soll = Rohprofil).
+//          `bends` (p1–p4, p6): dort müssen die Biegungen scharf werden (Soll = Rohprofil) —
+//          außer bei `expect.bendsSharpenable: false` (p4/p6: Stirnseiten gefast → dort kann
+//          keine Entrundung die Biegung schärfen; AN+B darf „Rundung bleiben“ liefern).
 // Der v2-Lauf macht sichtbar, wenn der globale Fallback ein korrektes v2-Ergebnis verwirft, weil
 // ein ANDERER Schritt die Hülle öffnet (AN: alles facettiert, v2 allein: Bänder wasserdicht).
 //
@@ -39,8 +41,12 @@
 // Blech-Biegungen (p1–p4, p6 mit `bends`): im AN-Lauf (Schalter „Blech-Biegungen schärfen“ AUS)
 // bleiben die Biegungen RUND → Soll = „Rundung bleibt“ mit den Bögen als Teil-Zylinder (Bogen-Flächen
 // wie im AUS-Export, Volumen = Netz). Der Zusatz-Lauf AN+B (sharpenBends: true) muss sie SCHARF machen
-// → Soll = das scharfe Rohprofil (`bends.pts`, Volumen = polyArea × Höhe). Der v2-isoliert-Lauf kennt
-// keine Primitive (keine Biegungs-Erkennung) → dort frei (nur die universellen Pflichten).
+// → Soll = das scharfe Rohprofil (`bends.pts`, Volumen = polyArea × Höhe). Ausnahme: Körper mit
+// `expect.bendsSharpenable: false` (p4/p6 — Stirnseiten gefast: dort kann keine Entrundung die
+// Biegung schärfen, auch ohne den Schalter nicht) → AN+B darf „Rundung bleibt“ liefern (nur eine
+// Notiz). Für alle anderen Körper mit `bends` ist ein AN+B-Ergebnis ohne scharfe Biegungen eine
+// Soll-Verletzung (kein bloßer Hinweis). Der v2-isoliert-Lauf kennt keine Primitive (keine
+// Biegungs-Erkennung) → dort frei (nur die universellen Pflichten).
 // Taschenecken (p5, KEINE Biegung): die vier Ecken werden im AN-Lauf wie bisher geschärft → Soll =
 // „4 von 4 Eckrundungen scharf“ (`cornerVariants`). AUS bleibt voll geprüft (Bogen-Flächen `arcsOff`,
 // Volumen).
@@ -283,6 +289,10 @@ function variantsFor(body, vMeshParsed, heavy) {
 // Soll-Variante „Blech-Biegungen schärfen“ (AN+B): das scharfe Rohprofil eines Blechprofils —
 // bends.pts sind die Rohpunkte VOR der Rundung (gen.mjs: sheetLRaw/sheetURaw/sheetZRaw). Volumen =
 // polyArea(bends.pts) × Höhe (scharfes Profil = Fläche × Höhe), Netz = Körper mit dieser Kontur.
+// Diese Variante ist das ZIEL des AN+B-Laufs — aber nur für Körper, deren Biegungen sich
+// überhaupt schärfen lassen (`expect.bendsSharpenable !== false`, Default true). Bei p4/p6
+// (Stirnseiten gefast) kann keine Entrundung die Biegung schärfen (auch ohne Schalter nicht) →
+// dort darf der AN+B-Lauf „Rundung bleibt“ liefern (nur eine Notiz, keine Soll-Verletzung).
 function bendsSharpVariant(body) {
   if (!body.bends) return null;
   const col = body.bends.col ?? 0;
@@ -662,6 +672,10 @@ async function checkBody(body, occt) {
   // (sharpenBends: true) muss sie SCHARF machen (Soll = Rohprofil). Der v2-isoliert-Lauf kennt
   // keine Primitive (keine Biegungs-Erkennung) → dort frei.
   const hasBends = !!body.bends;
+  // Können die Biegungen dieses Körpers überhaupt geschärft werden? Default ja. Ausnahme: Körper,
+  // an denen keine Entrundung die Biegung schärfen kann (p4/p6: Stirnseiten gefast) — dort ist
+  // `expect.bendsSharpenable: false` gesetzt und der AN+B-Lauf darf „Rundung bleiben“ liefern.
+  const bendsSharpenable = body.expect.bendsSharpenable !== false;
   const out = { id: body.id, file: body.file, desc: body.desc, expect: body.expect.mode, hasBends, problems: [], notes: [] };
   const tris = buildMesh(body);
   const man = checkManifold(tris);
@@ -793,7 +807,8 @@ async function checkBody(body, occt) {
     }
     const vs = planarVs.slice();
     // Soll-Variante der geschärften Biegung: das scharfe Rohprofil (bends.pts), Volumen = Fläche × Höhe
-    if (tag !== 'v2') { const bs = bendsSharpVariant(body); if (bs) vs.push(bs); }
+    const bs = (tag !== 'v2') ? bendsSharpVariant(body) : null;
+    if (bs) vs.push(bs);
     if (tag === 'AN' && body.boreChamfer) {
       vs.push(boreSharpVariant(body, body.boreChamfer, r.step, roundedPairs(body).length));
       for (const b of body.boreChamfer) vs.push(boreVariant(body, b, r.step, roundedPairs(body).filter((p) => p.c !== b.col).length));
@@ -822,6 +837,17 @@ async function checkBody(body, occt) {
       if (m.tier === 'toleranz') out.notes.push(`${tag}: „${m.hit.label}” nur innerhalb 0.01 mm (ΔV ${m.dV.toFixed(3)}, max. Abstand ${m.maxDist.toFixed(4)} mm bei ${fmtPt(m.worstPt)})`);
       if (m.tier === 'bogen') out.notes.push(`${tag}: „${m.hit.label}” mit exakten Bögen (Pfeilhöhe ≤ ${r.arcSag.toFixed(4)} mm, ΔV ${m.dV.toFixed(3)} mm³)`);
       if (!m.hit.target) out.notes.push(`${tag}: sicher, aber Ziel verfehlt: „${m.hit.label}” (bands=${r.bands}, fillets=${r.fillets})`);
+    }
+    // AN+B (Schalter „Blech-Biegungen schärfen“): die Biegungen müssen SCHARF sein (Soll = Rohprofil).
+    // Der Treffer kann unter einem anderen Etikett laufen (z.B. „Profilecken scharf (v2b)“, das
+    // dieselbe Kontur hat) → deshalb über das Volumen vergleichen, nicht über die Identität.
+    if (tag === 'AN+B' && hasBends && bs) {
+      const hitBs = m.hit === bs || (m.hit && Math.abs(m.hit.volume - bs.volume) <= bs.tol(bs.volume));
+      if (bendsSharpenable && !hitBs) {
+        out.problems.push(`AN+B: Biegungen sind nicht scharf (${m.hit ? `„${m.hit.label}”` : 'keine passende Variante'}) — Soll „${bs.label}“ (V=${bs.volume.toFixed(3)})`);
+      } else if (!bendsSharpenable && !hitBs && m.hit) {
+        out.notes.push(`AN+B: Biegung bleibt rund („${m.hit.label}“) — bei diesem Körper kann keine Entrundung die Biegung schärfen (expect.bendsSharpenable: false)`);
+      }
     }
   }
   return out;
