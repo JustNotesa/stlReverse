@@ -1248,7 +1248,10 @@ export const BODIES = [
       plate(rectProfile(0, 0, 40, 30), 3, { kind: 'sharp' }),
       { name: 'senkung', profile: circleProfile(20, 15, 2.25, 48, true), z0: 0, z1: 3, bottom: { kind: 'countersink', depth: 1, r: 0, N: 8 }, top: { kind: 'countersink', depth: 0.5, r: 0, N: 8 } },
     ],
-    expect: { mode: 'sharp', bores: 1 },
+    // Im AUS-Export (Defeaturing aus) wird die Bohrung NICHT umgewandelt (der Kegel-Pfad für Fase/
+    // Senkung ist abgeschaltet) → die Bohrung bleibt facettiert und wird vom Bogen-Pfad als drei
+    // Bänder übernommen: 3 Zylinder (Wand) + 6 Kegel (Senkung + Fase) = 9 Bogen-Flächen.
+    expect: { mode: 'sharp', bores: 1, arcsOff: 9 },
     countersinkBoth: [{ col: 1, R: 2.25, seg: 48, bottom: { depth: 1, ang: 90 }, top: { depth: 0.5, ang: 90 } }],
   },
   {
