@@ -56,6 +56,8 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 ## Mittlere Priorität
 
 - [ ] **Analytischer STEP-Export — Rest-Fälle** (Voll-Durchgangsbohrungen sind erledigt, siehe unten). Offen:
+  - **Bögen, Rest:** Fächer-Splitter an der Kabelhalter-Hakenspitze (asymmetrisches Netz), ~100 Gravur-Facetten,
+    `oneCircle` lässt evtl. fast gerade feine Läufe als Bogen durch (mm/oc-Ansatz verschlechterte den Kabelhalter).
   - **Sacklöcher, Rest:** mit Fase/Senkung an der Mündung, Stufenbohrung, Kugelboden → facettiert.
   - **Kegel–Kegel-Rundungen**, konkave Fußrundung „Kegel auf Platte“ ungetestet; Panel 2 färbt Kegel nicht.
   - **Geneigte/verrundete Loch-Mündungen** (auch die 2 eBike-Durchgangslöcher im AUS-Modus) — wenn die Mündung nicht ~⟂ auf einer Flachfläche sitzt
@@ -184,6 +186,12 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Bögen-Rest am Kabelhalter + Schalter „Blech-Biegungen schärfen“ (2026-10-28, `wt/boegen-rest`, 4–5 MiniMax
+  parallel)** — Pfeilhöhen-Prüfung statt Umkreis-Radius (Netzrauschen), kurze Proben unbestimmt, Vollringe in drei
+  Bänder mit gemeinsamen Schnitten je Stapel (Ø8,5-Loch beidseitig gefast: 3 Zyl. + 6 Kegel), Gravur neben Bohrung
+  (circleRim), Ausweichstufen in bandSurface; Ring-Sperren für Bohrungs-/Mantel-Wände. Schalter `sharpenBends`
+  (Standard aus: Biegungen bleiben Teil-Zylinder), findBendGroups, report.bendsKept. Kabelhalter AN 1138 → 234 Flächen /
+  0,25 MB, AUS 1824 → 475 / 0,47 MB, OCP gültig. Härtetest p7–p10, 105 Unit-Tests profile-arcs.
 - [x] **Profil-Bögen als Teil-Zylinder/-Kegel (2026-10-27, `wt/profil-boegen`, Lead Claude + Code MiniMax)** — neues
   Modul `profile-arcs.js`: Bänder aus Facetten auf zwei koaxialen Kreisen → CYLINDRICAL/CONICAL_SURFACE-Teilflächen mit
   CIRCLE-Bogenkanten aus den geschriebenen Koordinaten; alignBands, Rückfall (gesperrte Bänder), Zeitbudget 2,5 s,
