@@ -164,10 +164,6 @@ Kreis-Kanten teilen.
   - Semantik: `watertight=false` erzwingt keinen Rückfall mehr — Downstream-Annahmen „!watertight ⇒ facettiert“ prüfen.
 - [ ] **CST-Rückmeldung des Users** zu den Testdateien in `cst-test/` (lokal, gitignored) abwarten — alle Dateien
   sind nach den Fixes frisch zu exportieren (dino jetzt 4 Körper ohne kaputte Zusatz-Schalen).
-- [ ] **Release 0.2.2** (nach CST-Rückmeldung zum Kabelhalter + Merge der laufenden Agenten): Version in
-  `manifest.json`/`package.json` hochzählen, `updates.json` um den neuen Eintrag ergänzen, `npm run build:xpi`,
-  bei AMO „Neue Version hochladen“ (Datei wählt der User — AMOs CSP blockt Skript-Uploads), Prüfer-Hinweise wie
-  bei 0.2.1, signierte Datei laden, als `stl-reverse-<version>.xpi` ans GitHub-Release hängen.
 - [ ] **Review der Etappen 05fb3c3…6d67e62 abschließen** — Workflow-Lauf `wf_a998fde1-33d` wurde durch einen
   Absturz unterbrochen (Bereiche: Erkennung, Fasen-Export, Defeaturing, STEP-Gültigkeit, Integration).
 - [ ] **Kegel/Kugel-Erkennung** — Kegel werden aktuell korrekt *verworfen* (RMS(n·Achse)- und Krümmungs-Rand-
@@ -195,6 +191,7 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Release 0.2.2 (2026-10-28)** — erstmals per CLI signiert (`.dev/amo-sign.sh`, web-ext sign unlisted, Schlüssel aus ClaudeFirefox/AMO-Konto.env), GitHub-Release v0.2.2 mit signierter xpi, updates.json ergänzt.
 - [x] **Splitter-Flächen auf Profil-Bögen (2026-10-28, `wt/splitter`)** — findArcBands nahm breite Ebene + erste
   Bogen-Facetten als Schein-Band (Fit-Radius ~200 mm, Toleranz > Pfeilhöhe) → 0,05-mm-Streifen quer über Wand und Fase.
   Vorausschau: reicht das Band ab i+1 weiter, wird i übersprungen. Kabelhalter AN 234 → 218, AUS 475 → 233 Flächen.
