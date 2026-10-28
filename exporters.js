@@ -407,13 +407,62 @@ export function buildVolumeStepBrepV2(analysis) {
   let arcStats = { tried: 0, retries: 0, dropped: 0 };
   // Normalgruppen, deren Wände die Primitive-Pfade (Mantel/Bohrung) beanspruchen: diese Wände
   // dürfen vom Bogen-Pfad NICHT in Bänder geteilt werden (deren Gates sind strenger).
-  let arcBlockedGroupsCache = null;
+  //  MANTEL: immer gesperrt — der Mantel-/Kegel-Pfad ist zuständig (Delle, Verdrehung, Knick, Fase).
+  //  BOHRUNG: gesperrt, wenn der Bohrungs-Pfad die Wand beansprucht hat:
+  //    * AN (Defeaturing an): der Bohrungs-Pfad prüft JEDE Bohrung (scharf/blind/Bestand) — er hat
+  //      entschieden: umgewandelt ODER geometrisch verworfen (Delle, Verdrehung, zu dünner Steg,
+  //      Rand an der Plattenkante). Seine Gates sind strenger als die des Bogen-Pfads: eine Teilung
+  //      würde sie umgehen (Delle geglättet, Kreis-Kante schneidet den Nachbarn).
+  //    * AUS (Defeaturing aus): der Bohrungs-Pfad ist auf Direkt-Treffer beschränkt (Fase/Senkung
+  //      wird NUR mit Toggle umgewandelt) — eine Bohrung kann dort also aus zwei Gründen ausfallen:
+  //        (a) NUR der Schalter: die Wand endet in einer Fase/Senkung (KEINE Deckfläche am Rand) —
+  //            im AN-Lauf nähme sie der Kegel-Pfad. Dann darf der Bogen-Pfad sie übernehmen, sonst
+  //            geht die gefaste Senkbohrung verloren (kein anderer Pfad nimmt sie).
+  //        (b) GEOMETRIE: die Wand ist kein sauberer Zylinder (Delle, Verdrehung) ODER sie endet an
+  //            einer Deckfläche, aber ein Gate des Bohrungs-Pfads hat sie abgelehnt (Freigang zu
+  //            klein, Rand nicht in der Deckebene) — im AN-Lauf bliebe sie facettiert → sperren.
+  //      Gesperrt werden im AUS-Export also: die umgewandelten Bohrungen (Direkt-Treffer), die
+  //      geometrisch verworfenen (Wand kaputt) und die mit Deckfläche am Rand (Gate-Abgelehnte).
+  // Die Sperre hängt von finalPlans und den aktuellen Flächen ab (je Lauf neu) → kein Cache; nur
+  // der Bohrungs-Plan (netz-unabhängig) wird gemerkt.
+  const arcBorePlan = new Map();       // Bohrung → Plan des Bohrungs-Pfads (null = Wand unbrauchbar)
+  const borePathPlan = (entry) => {
+    if (!arcBorePlan.has(entry)) {
+      let plan = null;
+      try { plan = attemptBore(entry); } catch (_) { plan = null; }
+      arcBorePlan.set(entry, plan);
+    }
+    return arcBorePlan.get(entry);
+  };
+  // Endet die Wand der Bohrung an einer ebenen DECKFLÄCHE (deren Innen-Loop auf den Rand passt)?
+  // Dann ist die Bohrung ein echtes Loch im Material (kein Fase-/Senkungs-Kegel am Rand).
+  const boreRimOnDeck = (plan) => {
+    for (const rim of plan.rims) {
+      for (const fd of faceDefs) {
+        if (!fd || !fd.normal) continue;
+        for (const inner of fd.inner || []) {
+          if (inner.circleRim) continue;
+          if (innerMatchesRim(inner, fd.normal, rim)) return true;
+        }
+      }
+    }
+    return false;
+  };
   const arcBlockedGroups = () => {
-    if (arcBlockedGroupsCache) return arcBlockedGroupsCache;
     const s = new Set();
-    for (const [, e] of boreById) for (const g of e.groups) s.add(g);
     for (const [, e] of mantleById) for (const g of e.groups) s.add(g);
-    arcBlockedGroupsCache = s;
+    for (const [, e] of boreById) {
+      if (DEFEATURE) { for (const g of e.groups) s.add(g); continue; }   // AN: der Bohrungs-Pfad entscheidet über jede Bohrung
+      let claimed = false;                                               // AUS: Direkt-Treffer (in diesem Lauf umgewandelt)
+      for (const pl of finalPlans) if (pl && pl.entry === e) { claimed = true; break; }
+      if (!claimed) {
+        const plan = borePathPlan(e);
+        if (!plan) { for (const g of e.groups) s.add(g); continue; }      // Wand kaputt (Delle, Verdrehung)
+        if (boreRimOnDeck(plan)) for (const g of e.groups) s.add(g);     // Gate-Abgelehntes Loch (z. B. Freigang)
+        continue;                                                        // …sonst nur der Schalter → Bogen-Pfad darf übernehmen
+      }
+      for (const g of e.groups) s.add(g);
+    }
     return s;
   };
 
