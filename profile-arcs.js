@@ -35,8 +35,10 @@
 //   3. Ketten gierig in Bänder teilen: alle Unten- und Oben-Punkte je auf einem Kreis (Toleranz
 //      tolFit = max(tolFitAbs, tolFitRel·r), relativ zur Sehnen-Pfeilhöhe klein), Mitten koaxial,
 //      jede Seitenkante eine Mantellinie (unten und oben im selben Winkel), Segmentwinkel ≤
-//      maxSegDeg, gleicher Drehsinn, ≥ minSegs Segmente. Vollkreise (geschlossene Ketten) bleiben
-//      den vorhandenen Mantel-/Bohrungs-Pfaden.
+//      maxSegDeg, gleicher Drehsinn, ≥ minSegs Segmente. Ein gültiger VOLLKREIS (geschlossene
+//      Kette, ganzer Ring besteht als Band) wird in DREI Bänder geteilt (Schnitt an den
+//      Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3) — zwei Halbkreise hätten dieselben zwei
+//      Endpunkte und würden sich in fd.arcEdges überschreiben.
 //   4. Rand des Bands = Vereinigung der gerichteten Facetten-Kanten (innere heben sich auf) → genau
 //      ein Loop aus Bogen unten, Seite, Bogen oben, Seite. same_sense aus den Facetten-Normalen
 //      (alle müssen zur STEP-Flächennormale gleich stehen).
@@ -69,6 +71,7 @@ export const ARC_DEFAULTS = {
   samples: 9,          // Abtastpunkte je Bogen für Prüfungen
   budgetMs: 2500,      // ms: Zeitbudget für findArcBands (Kettenverarbeitung stoppen)
   maxAxes: 6,          // Achsen-Kandidaten je Export höchstens so viele - die mit den meisten Deckflächen-Punkten; ein feines Kugelnetz lieferte 49 Achsen und je Achse einen vollen Durchlauf aller Facetten
+  noiseTol: 5e-4,      // mm: Rausch-Untergrenze der Pfeilhoehen-Pruefung, Netzpunkte sind auf ~1e-4 gerundet
 };
 
 // Zeitmessung (Budget) — performance.now() mit Fallback auf Date.now()
@@ -739,17 +742,49 @@ function circumRadius2d(a, b, c) {
 
 /**
  * Der Polygonzug muss ein Sehnenzug EINES Kreises sein (Kopf-Kommentar Punkt 3:
- * „alle Unten- und Oben-Punkte je auf einem Kreis“). Der Umkreis-Radius je drei
- * aufeinanderfolgenden Punkten muss zum gefitteten Radius passen — sonst rutscht ein
- * „gemischtes“ Band (Gerade + flacher Bogen) durch: dessen Fit-Radius ist riesig und
- * die Toleranz (∝ r) lässt dann jeden Restfehler zu.
+ * „alle Unten- und Oben-Punkte je auf einem Kreis”).
+ *
+ * Der Vergleich läuft über die PFEILHÖHE, nicht über den Umkreis-Radius: bei feiner
+ * Facettierung (Sehne 0.05 mm) ist das Dreieck A-B-C fast entartet — sein Umkreis-
+ * Radius schwankt zwischen 2.4 und 3.7, obwohl alle drei Punkte auf 6e-5 genau auf
+ * R=3 liegen (der Radius folgt aus h ∝ 1/Fehler der Pfeilhöhe). Der Abstand des
+ * mittleren Punktes B von der Sehne AC ist dagegen robust: er muss der erwarteten
+ * Pfeilhöhe auf dem Fit-Kreis entsprechen.
+ *
+ * Ein gemischter Lauf (lange Gerade + Bogen) fällt weiterhin durch: die lange Sehne
+ * erwartet eine große Pfeilhöhe, gemessen wird ~0. Kollineare Tripel sind damit kein
+ * Sonderfall mehr (h = 0 ≪ hx).
+ *
+ * UNGLEICHMÄSSIGE SEGMENTE: die Formel r − sqrt(r² − L²/4) gilt nur, wenn B in der
+ * SEHNENMITTE liegt (gleichmäßige Segmente). Bei ungleichmäßigen Segmenten (Dreiecks-
+ * fächer mit halben Randsegmenten) sitzt B seitlich → die erwartete Pfeilhöhe wird an
+ * der Stelle von B ausgewertet: der Kreispunkt an der Sehnen-Lage x liegt um
+ * sqrt(r² − x²) von der Sehne weg, der Kreismittelpunkt um s = sqrt(r² − L²/4) →
+ * hx = sqrt(r² − x²) − s (bei x = 0 identisch mit r − sqrt(r² − L²/4)).
+ *
+ * noiseTol (mm): Rausch-Untergrenze der Toleranz — die Netzpunkte sind auf ~1e-4
+ * gerundet, das Rauschen der Pfeilhöhe ist entsprechend groß.
  */
-function oneCircle(pts2d, K, tolAbs, tolRel) {
+export function oneCircle(pts2d, K, tolAbs, tolRel, noiseTol) {
+  const nt = Number.isFinite(noiseTol) ? noiseTol : 0;
+  const r = K.r;
   for (let i = 0; i + 2 < pts2d.length; i++) {
-    const R = circumRadius2d(pts2d[i], pts2d[i + 1], pts2d[i + 2]);
-    if (R === null) return false;                        // kollinear
-    const tol = Math.max(tolAbs, tolRel * Math.max(K.r, R));
-    if (Math.abs(R - K.r) > tol) return false;
+    const A = pts2d[i], B = pts2d[i + 1], C = pts2d[i + 2];
+    const dx = C[0] - A[0], dy = C[1] - A[1];
+    const L = Math.hypot(dx, dy);
+    if (L === 0) return false;                          // entartetes Tripel
+    if (L / 2 > r) return false;                       // Sehne länger als der Durchmesser
+    const h = Math.abs(dx * (B[1] - A[1]) - dy * (B[0] - A[0])) / L;   // Abstand B → Gerade AC
+    // Lage von B längs der Sehne: M = Mitte AC, e = Richtung AC, x = (B − M)·e
+    // (x = 0 → B in der Sehnenmitte, |x| ≤ L/2 → B zwischen A und C)
+    const ex = dx / L, ey = dy / L;
+    const x = (B[0] - (A[0] + C[0]) / 2) * ex + (B[1] - (A[1] + C[1]) / 2) * ey;
+    if (Math.abs(x) >= r) return false;                // B liegt nicht mehr auf dem Kreis
+    // Abstand Mittelpunkt → Sehne (s) und erwartete Pfeilhöhe an der Stelle von B
+    const s = Math.sqrt(Math.max(0, r * r - (L * L) / 4));
+    const hx = Math.sqrt(r * r - x * x) - s;
+    const tol = Math.max(nt, hx * Math.max(tolAbs / r, tolRel));
+    if (Math.abs(h - hx) > tol) return false;
   }
   return true;
 }
@@ -807,9 +842,9 @@ function tryBand(ctx, chain, i, j) {
   const tol = Math.max(o.tolFitAbs, o.tolFitRel * rMax);
   if (Klo.maxRes > tol || Khi.maxRes > tol) return null;
   if (Math.hypot(Klo.c[0] - Khi.c[0], Klo.c[1] - Khi.c[1]) > tol) return null;
-  // Sehnenzug EINES Kreises (lokaler Umkreis je drei Punkte passt zum Fit-Radius)
-  if (!oneCircle(lo2d, Klo, o.tolFitAbs, o.tolFitRel)) return null;
-  if (!oneCircle(hi2d, Khi, o.tolFitAbs, o.tolFitRel)) return null;
+  // Sehnenzug EINES Kreises (Pfeilhöhe je drei Punkte passt zum Fit-Radius)
+  if (!oneCircle(lo2d, Klo, o.tolFitAbs, o.tolFitRel, o.noiseTol)) return null;
+  if (!oneCircle(hi2d, Khi, o.tolFitAbs, o.tolFitRel, o.noiseTol)) return null;
   // Seitenkanten: NUR die beiden END-Kanten (sides[i], sides[j+1]) werden
   // LINE-Kanten des Bandes → sie müssen Mantellinien sein. Die inneren
   // Seitenkanten verschwinden beim Umwandeln in die Fläche — bei einem
@@ -851,7 +886,12 @@ function scanBandFrom(ctx, chain, i, m) {
     let r = cache.get(j);
     if (!r) {
       const c = tryBand(ctx, chain, i, j);
-      r = { st: !c ? 'bad' : (c.insufficient ? 'few' : 'ok'), c };
+      // Ein Fehlschlag mit weniger als minSegs Facetten ist UNBESTIMMT ('few'), nicht 'bad':
+      // die erste Probe j = i+1 hat nur 2 Facetten (3 Punkte je Ebene) — der 3-Punkte-Kreis
+      // ist exakt, aber seine Mitte so rauschempfindlich, dass die Koaxial-Prüfung
+      // scheitert. 'bad' bräche die Galopp-Suche ab, obwohl tryBand(i, i+3) gültig ist.
+      const few = (j - i + 1) < o.minSegs;
+      r = { st: !c ? (few ? 'few' : 'bad') : (c.insufficient ? 'few' : 'ok'), c };
       cache.set(j, r);
     }
     return r;
@@ -1067,6 +1107,106 @@ function cutCycle(chain, k) {
 }
 
 /**
+ * Einen gültigen VOLLRING (zyklische Kette, der ganze Ring besteht als Band) in
+ * DREI Bänder teilen.
+ *
+ * Warum drei und nicht zwei: zwei Halbkreise hätten dieselben zwei Endpunkte — ihre
+ * Bogen-Kanten bekämen in der Deckfläche denselben Kanten-Schlüssel edgeCanonKey(a,b)
+ * und würden sich in fd.arcEdges überschreiben.
+ *
+ * Die drei Schnitte liegen an den MANTELLINIEN mit den Polarwinkeln 0, 2π/3 und 4π/3
+ * (KANONISCHE Winkel, nicht die „breiteste Facette“): so schneiden übereinanderliegende
+ * Ringe desselben Stapels (Zylinder + Fasen-Kegel, gemeinsame Achse und Rahmen) an
+ * denselben Stellen; Restunterschiede gleicht alignBands aus.
+ *
+ * Scheitert einer der drei Teile (oder sind die drei Schnitte nicht verschieden), wird
+ * der ganze Ring wie bisher übersprungen — es entstehen KEINE Teil-Bänder eines Rings.
+ *
+ * Die Schnitte werden NACH KETTEN-INDEX sortiert (die Winkelreihenfolge 0, 2π/3, 4π/3
+ * gilt nur für die Auswahl der Schnittkante, nicht für die Reihenfolge der Teile).
+ *
+ * → true (der Ring ist in drei Bändern aufgeteilt) | false (Ring unverändert lassen)
+ */
+function splitRing(ctx, chain, whole, bands, taken, stats) {
+  const { frame, o } = ctx;
+  const m = chain.facets.length;
+  const c = whole.Klo.c;
+  // Seitenkanten, die Mantellinien sind, mit ihrem Polarwinkel (0 … 2π)
+  const cands = [];
+  for (let k = 0; k < m; k++) {
+    const side = chain.sides[k];
+    if (!side) continue;
+    if (!sideIsRuling(frame, side, whole.Klo.c, whole.Khi.c, whole.rMax, whole.tol)) continue;
+    const l = toLocal(frame, side[0]);
+    let phi = Math.atan2(l[1] - c[1], l[0] - c[0]);
+    if (phi < 0) phi += 2 * Math.PI;
+    if (phi >= 2 * Math.PI) phi -= 2 * Math.PI;
+    cands.push({ k, phi });
+  }
+  if (cands.length < 3) return false;
+  // Schnitte: Winkel 0, 2π/3, 4π/3 (Abstand modulo 2π)
+  const cuts = [];
+  for (const target of [0, 2 * Math.PI / 3, 4 * Math.PI / 3]) {
+    let best = -1, bd = Infinity;
+    for (const cd of cands) {
+      let d = Math.abs(cd.phi - target);
+      if (d > Math.PI) d = 2 * Math.PI - d;
+      if (d < bd) { bd = d; best = cd.k; }
+    }
+    if (best < 0) return false;
+    cuts.push(best);
+  }
+  if (new Set(cuts).size !== 3) return false;
+  // Die Schnitte MÜSSEN nach KETTEN-INDEX aufsteigend sortiert werden: die Teile laufen
+  // vorwärts im Ketten-Index (cuts[i] → cuts[i+1]), der Ketten-Index läuft aber je nach
+  // Facetten-Orientierung im Uhrzeigersinn oder dagegen. Ohne Sortierung läuft Teil 0 den
+  // langen Weg (über cuts[2]) — die drei Teile überlappen dann, ein Drittel des Rings fehlt
+  // und die Bogen-Kanten werden doppelt benutzt (alle Bögen verworfen).
+  cuts.sort((a, b) => a - b);
+  // Die drei Teile als Pfad-Ketten (sides hat facets.length + 1 Einträge)
+  const parts = [];
+  for (let i = 0; i < 3; i++) {
+    const a = cuts[i], b = cuts[(i + 1) % 3];
+    const idx = [];
+    for (let k = a; k !== b; k = (k + 1) % m) idx.push(k);
+    if (!idx.length) return false;
+    const facets = idx.map((k) => chain.facets[k]);
+    const sides = [];
+    for (let t = 0; t <= idx.length; t++) sides.push(chain.sides[(a + t) % m]);
+    parts.push({ cyclic: false, facets, sides });
+  }
+  // Jeder Facetten-Index des Rings muss in GENAU EINEM Teil liegen (sonst: Lücke oder
+  // Doppelbelegung → der Ring bleibt facettiert)
+  const seen = new Set();
+  for (const part of parts) {
+    for (const fi of part.facets) {
+      if (seen.has(fi)) return false;
+      seen.add(fi);
+    }
+  }
+  if (seen.size !== m) return false;
+  // Alle drei Teile müssen Bänder ergeben — sonst bleibt der ganze Ring facettiert
+  const made = [];
+  for (const part of parts) {
+    const chk = tryBand(ctx, part, 0, part.facets.length - 1);
+    if (!chk || chk.insufficient || !chk.endsOk || chk.nSegs < o.minSegs) return false;
+    const mb = makeBand(ctx, part, 0, part.facets.length - 1, chk, -1);
+    if (!mb) return false;
+    made.push(mb);
+  }
+  for (let i = 0; i < 3; i++) {
+    const band = made[i].band;
+    band.id = bands.length;
+    setBandSrc(band, ctx, parts[i], 0, parts[i].facets.length - 1);
+    bands.push(band);
+    for (const fi of band.facets) taken.add(fi);
+    stats.bands++;
+    if (band.kind === 'cyl') stats.cyl++; else stats.cone++;
+  }
+  return true;
+}
+
+/**
  * Herkunft eines Bands merken (Kontext, Kette, Facettenbereich) — nicht aufzählbar,
  * damit validate/apply es ignorieren.
  */
@@ -1237,9 +1377,14 @@ export function findArcBands(fds, opts) {
       if (overBudget()) { stats.budgetHit = true; break axesLoop; }
       let work = chain;
       if (chain.cyclic) {
-        // Vollkreis? → nichts anlegen (bleibt facettiert)
+        // Vollkreis? → in DREI Bänder teilen (Schnitt an den Mantellinien mit den
+        // Polarwinkeln 0, 2π/3, 4π/3). Scheitert die Teilung, bleibt der Ring
+        // facettiert (es entstehen keine Teil-Bänder eines Rings).
         const whole = tryBand(ctx, chain, 0, chain.facets.length - 1);
-        if (whole && !whole.insufficient) continue;
+        if (whole && !whole.insufficient) {
+          splitRing(ctx, chain, whole, bands, taken, stats);
+          continue;
+        }
         // sonst an der Seitenkante nach der breitesten lo-Kante aufschneiden
         work = cutCycle(chain, widestFacet(ctx, chain));
       }
