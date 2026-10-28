@@ -380,18 +380,17 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(bands.every((b) => b.facets.length === 12)).toBe(true);
   });
 
-  test('6: Vollzylinder R5 (32 Seg.) → 3 Bänder (Vollkreis in drei Teile geteilt)', () => {
+  test('6: Vollzylinder R5 (32 Seg.) zwischen zwei Deckflächen → 0 Bänder (Primitive-Wand)', () => {
     const prof = regularPolygon(5, 32);
     const fds = extrude([{ z: 0, pts2d: prof }, { z: 10, pts2d: prof }]);
     const { bands, stats } = run(fds);
-    // Der Vollkreis wird an den Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3
-    // geschnitten → drei Bänder (zwei wären zu wenig: gleiche Endpunkte).
-    expect(bands.length).toBe(3);
-    expect(stats.bands).toBe(3);
-    expect(bands.every((b) => b.kind === 'cyl')).toBe(true);
-    const covered = new Set();
-    for (const b of bands) for (const fi of b.facets) covered.add(fi);
-    expect(covered.size).toBe(32);
+    // Der Vollring grenzt an BEIDEN Ebenen an eine ebene Deckfläche → er ist eine
+    // Primitive-Wand (Zylinder zwischen zwei Deckflächen). Dafür sind die Pfade mit
+    // den strengeren Gates zuständig (Bohrungs-/Mantel-Pfad) — der Bogen-Pfad teilt
+    // solche Ringe NICHT (er würde die Wand unbemerkt analytisch machen und die
+    // Form ändern). Erwartung: 0 Bänder.
+    expect(bands.length).toBe(0);
+    expect(stats.bands).toBe(0);
   });
 
   test('7: Sechseck-Prisma → 0 Bänder; Rechteck scharf → 0 Bänder', () => {
@@ -966,9 +965,9 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(det.stats.valid).toBe(1);
   });
 
-  // ── Vollring (geschlossene Kette) → drei Bänder (120°-Schnitte) ────────────
+  // ── Vollring (geschlossene Kette) zwischen zwei Deckflächen → KEIN Band ────
   // ── Fein facettierter Profil-Bogen mit Rauschen → EIN Band über den ganzen Bogen ──
-  test('27: Vollring (Zylinder-Rohrwand, 72 Facetten, mit Rauschen) → genau 3 Bänder, alle Facetten abgedeckt', () => {
+  test('27: Vollring (Zylinder-Rohrwand, 72 Facetten, mit Rauschen) zwischen zwei Deckflächen → 0 Bänder (Primitive-Wand)', () => {
     const n = 72, R = 5;
     const rnd = lcg(20261030);
     const ring = (z) => Array.from({ length: n }, (_, i) => {
@@ -978,25 +977,17 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     });
     const fds = extrude3([ring(0), ring(10)]);
     const det = run(fds);
-    expect(det.bands.length).toBe(3);
-    expect(det.bands.every((b) => b.kind === 'cyl')).toBe(true);
-    // die Facetten decken den ganzen Ring ab (3 × 24)
-    const covered = new Set();
-    for (const b of det.bands) for (const fi of b.facets) covered.add(fi);
-    expect(covered.size).toBe(n);
-    // die Schnitte liegen 120° auseinander (Seitenkanten-Winkel)
-    const angs = det.bands.map((b) => {
-      const p = toLocal(b.frame, b.segs[0].pts[0]);
-      return Math.atan2(p[1] - b.levels.lo.c2[1], p[0] - b.levels.lo.c2[0]) * 180 / Math.PI;
-    }).sort((a, b) => a - b);
-    expect(angs.length).toBe(3);
-    expect(Math.abs(angs[1] - angs[0] - 120)).toBeLessThan(1);
-    expect(Math.abs(angs[2] - angs[1] - 120)).toBeLessThan(1);
-    // alle Bänder gültig: je Deckfläche 3 Bogen-Kanten
+    // Der Vollring steht an BEIDEN Ebenen frei auf einer ebenen Deckfläche → er ist
+    // ein Zylinder zwischen zwei Deckflächen (Primitive-Wand). Für solche Wände sind
+    // der Bohrungs-/Mantel-Pfad zuständig; der Bogen-Pfad teilt sie NICHT (er würde
+    // die Wand analytisch machen und dabei die Form ändern). Erwartung: 0 Bänder.
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.bands).toBe(0);
+    // keine Bogen-Kanten auf den Deckflächen
     validateArcBands(fds, det, { vtxKey });
-    expect(det.bands.length).toBe(3);
-    expect(det.stats.valid).toBe(3);
-    expect(det.capEdits.length).toBe(6);                  // 3 unten + 3 oben
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.valid).toBe(0);
+    expect(det.capEdits.length).toBe(0);
   });
 
   // Der Ketten-Index läuft im UHRZEIGERSINN (gegen den Polarwinkel): die drei
@@ -1004,34 +995,97 @@ describe('profile-arcs.js — Band-Erkennung', () => {
   // Ohne Sortierung läuft Teil 0 den langen Weg (über cuts[2]) — die drei Teile
   // überlappen, ein Drittel des Rings fehlt und die Bogen-Kanten werden doppelt
   // benutzt (dann werden alle Bögen verworfen).
-  test('28: Vollring im Uhrzeigersinn (72 Facetten) → genau 3 Bänder, jede Facette genau einmal', () => {
-    const n = 72, R = 5;
-    const ring = (z) => Array.from({ length: n }, (_, i) => {
-      const a = -2 * Math.PI * i / n;                     // gegen den Uhrzeigersinn
-      return [R * Math.cos(a), R * Math.sin(a), z];
-    });
-    const fds = extrude3([ring(0), ring(10)]);
+  //
+  // Ein Vollring zwischen ZWEI Deckflächen wird nicht mehr geteilt (Primitive-Wand:
+  // Zylinder zwischen zwei Deckflächen → Bohrungs-/Mantel-Pfad). Damit der Ring
+  // überhaupt geteilt wird, muss er an mindestens EINER Ebene an einen anderen Ring
+  // grenzen (nicht an eine Deckfläche) und konkav sein: hier eine BOHRUNG (konkav)
+  // mit 0.5-Fase an einem Ende — die Bohrungswand grenzt unten an die Deckfläche
+  // und oben an die Fase.
+  /**
+   * Rohr (R8) mit einer BOHRUNG R4.25 (t = 0…2) und 0.5-Fase (Kegel R4.25 → 4.75,
+   * t = 2…2.5). Die Ringe laufen im UHRZEIGERSINN (psi = −k·d) → der Ketten-Index
+   * läuft gegen den Polarwinkel. Die Bohrungswand ist konkav (Normalen nach innen),
+   * die Außenwand konvex (Normalen nach außen).
+   */
+  function cwChamferedBore(N) {
+    const R = 4.25, RC = 4.75, RO = 8, T = 2, TC = 2.5;
+    const d = 2 * Math.PI / N;
+    const P = (psi, r, t) => [r * Math.cos(psi), r * Math.sin(psi), t];
+    const innerLo = [], innerHi = [], coneHi = [], outerLo = [], outerHi = [];
+    for (let k = 0; k < N; k++) {
+      const psi = -k * d;                                // UHRZEIGERSINN
+      innerLo.push(P(psi, R, 0));
+      innerHi.push(P(psi, R, T));
+      coneHi.push(P(psi, RC, TC));
+      outerLo.push(P(psi, RO, 0));
+      outerHi.push(P(psi, RO, TC));
+    }
+    const wall = (lo, hi, flip) => {
+      const out = [];
+      for (let k = 0; k < N; k++) {
+        const j = (k + 1) % N;
+        const q = [lo[k], lo[j], hi[j], hi[k]];
+        out.push(face(flip ? [q[3], q[2], q[1], q[0]] : q));
+      }
+      return out;
+    };
+    const cyl = wall(innerLo, innerHi, false);          // Bohrungswand: Normale nach innen
+    const cone = wall(innerHi, coneHi, false);          // Fase: Normale nach innen/oben
+    const outer = wall(outerLo, outerHi, true);          // Außenwand: Normale nach außen
+    const capLo = face(outerLo.slice().reverse(), [0, 0, -1]);   // unten: Ring mit Loch
+    capLo.inner = [innerLo.slice()];
+    const capHi = face(outerHi.slice().reverse(), [0, 0, 1]);    // oben: Ring mit Loch
+    capHi.inner = [coneHi.slice()];
+    return [...cyl, ...cone, ...outer, capLo, capHi];
+  }
+
+  test('28: Bohrung (konkav) mit Fase an einem Ende, Kette im Uhrzeigersinn → Bohrungsring in 3 Bänder geteilt, jede Facette genau einmal', () => {
+    const n = 72;
+    const fds = cwChamferedBore(n);
     const det = run(fds);
-    expect(det.bands.length).toBe(3);
-    expect(det.bands.every((b) => b.kind === 'cyl')).toBe(true);
-    // jede Facette des Rings kommt in GENAU EINEM Teil vor
+    // Die Außenwand (konvex, zwischen zwei Deckflächen) wird NICHT geteilt → 0 Bänder.
+    // Die Bohrung (konkav, an einer Ebene an die Fase) und die Fase werden je in drei
+    // Bänder geteilt.
+    const bore = det.bands.filter((b) => b.kind === 'cyl');
+    const cone = det.bands.filter((b) => b.kind === 'cone');
+    expect(det.bands.length).toBe(6);
+    expect(bore.length).toBe(3);
+    expect(cone.length).toBe(3);
+    // jede Facette des Bohrungs-Rings kommt in GENAU EINEM Teil vor
     const counts = new Map();
-    for (const b of det.bands) for (const fi of b.facets) counts.set(fi, (counts.get(fi) || 0) + 1);
+    for (const b of bore) for (const fi of b.facets) counts.set(fi, (counts.get(fi) || 0) + 1);
     expect(counts.size).toBe(n);
     expect([...counts.values()].every((c) => c === 1)).toBe(true);
     // die drei Teile sind gleich groß (je 24 Facetten)
-    expect(det.bands.map((b) => b.facets.length).sort((a, b) => a - b)).toEqual([24, 24, 24]);
+    expect(bore.map((b) => b.facets.length).sort((a, b) => a - b)).toEqual([24, 24, 24]);
     // die Schnitte liegen 120° auseinander
-    const angs = det.bands.map((b) => {
+    const angs = bore.map((b) => {
       const p = toLocal(b.frame, b.segs[0].pts[0]);
       return Math.atan2(p[1] - b.levels.lo.c2[1], p[0] - b.levels.lo.c2[0]) * 180 / Math.PI;
     }).sort((a, b) => a - b);
+    expect(angs.length).toBe(3);
     expect(Math.abs(angs[1] - angs[0] - 120)).toBeLessThan(1);
     expect(Math.abs(angs[2] - angs[1] - 120)).toBeLessThan(1);
+    // Der Ketten-Index läuft gegen den Polarwinkel (UHRZEIGERSINN): in jedem Teil
+    // läuft der Lo-Bogen um 120° im Uhrzeigersinn (negatives Vorzeichen). Deshalb
+    // müssen die drei Schnitte nach KETTEN-INDEX sortiert werden — sonst läuft Teil 0
+    // den langen Weg (die Teile überlappen, ein Drittel des Rings fehlt).
+    for (const b of bore) {
+      const a0 = toLocal(b.frame, b.segs[0].pts[0]);
+      const a1 = toLocal(b.frame, b.segs[0].pts[b.segs[0].pts.length - 1]);
+      const p0 = Math.atan2(a0[1] - b.levels.lo.c2[1], a0[0] - b.levels.lo.c2[0]);
+      const p1 = Math.atan2(a1[1] - b.levels.lo.c2[1], a1[0] - b.levels.lo.c2[0]);
+      let d = p1 - p0;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      expect(d).toBeLessThan(0);                       // im Uhrzeigersinn
+      expect(Math.abs(d + 2 * Math.PI / 3)).toBeLessThan(0.02);
+    }
     // alle Bänder gültig
     validateArcBands(fds, det, { vtxKey });
-    expect(det.bands.length).toBe(3);
-    expect(det.stats.valid).toBe(3);
+    expect(det.bands.length).toBe(6);
+    expect(det.stats.valid).toBe(6);
   });
 
   // ── Analytischer Kreis-Rand (circleRim) in einem ANDEREN Loop der Deckfläche ──
@@ -1191,18 +1245,21 @@ describe('profile-arcs.js — Band-Erkennung', () => {
   // Zylinder-Ring und Fase-Ring: die Schnitte MÜSSEN an denselben Mantellinien liegen,
   // sonst passen die Bögen (unterschiedliche Polygonzüge → unterschiedlicher arcKey)
   // nicht mehr aufeinander und validateArcBands verwirft die Bänder.
-  test('29: Bohrung R4.25 + 0.5-Fase (72 Seg.) mit Fächer-Facetten an den Schnittstellen → alle Bänder gültig, alle Facetten abgedeckt', () => {
+  test('29: Bohrung R4.25 + 0.5-Fase (72 Seg.) mit Fächer-Facetten an den Schnittstellen → alle Bänder gültig, alle Facetten abgedeckt (Außenwand: nicht geteilt)', () => {
     const N = 72;
     const fds = chamferedBore(N, FAN_IDX, 'coneFirst');
     const det = run(fds);
     validateArcBands(fds, det, { vtxKey });
-    // drei Ringe (Bohrungswand, Fase, Außenwand) je drei Bänder
-    expect(det.bands.length).toBe(9);
-    expect(det.stats.valid).toBe(9);
-    // alle Facetten der drei Ringe liegen in gültigen Bändern
+    // Die Außenwand ist eine Primitive-Wand (konvex, zwischen zwei Deckflächen) →
+    // sie wird NICHT geteilt (Mantel-/Bohrungs-Pfad ist zuständig). Geteilt werden nur
+    // die beiden Ringe der Bohrung (Bohrungswand + Fase), die an einer Ebene an
+    // einen anderen Ring grenzen und konkav sind: je drei Bänder.
+    expect(det.bands.length).toBe(6);
+    expect(det.stats.valid).toBe(6);
+    // alle Facetten der beiden Bohrungs-Ringe liegen in gültigen Bändern
     const covered = new Set();
     for (const b of det.bands) for (const fi of b.facets) covered.add(fi);
-    expect(covered.size).toBe(3 * N);
+    expect(covered.size).toBe(2 * N);
     // die Bänder der Bohrungswand und der Fase teilen sich die Bögen auf der Ebene
     // t = 2 (unten = oben): gleicher Polygonzug → gleicher arcKey → Nachbar-Bänder
     const bore = det.bands.filter((b) => b.kind === 'cyl' && b.levels.lo.r < 5);
@@ -1211,7 +1268,8 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(cone.length).toBe(3);
     expect(bore.map((b) => b.segs[2].arcKey).sort()).toEqual(cone.map((b) => b.segs[0].arcKey).sort());
     // die Bögen an den Deckflächen (unten t=0, oben t=2.5) gehören je einem Band
-    expect(det.capEdits.length).toBe(12);
+    // (die Außenwand liefert keine Bogen-Kanten auf den Deckflächen mehr)
+    expect(det.capEdits.length).toBe(6);
   });
 
   // alignBands schneidet ein Band an den Bogen-ENDpunkten der Nachbarbänder nach: das
@@ -1275,17 +1333,18 @@ describe('profile-arcs.js — Band-Erkennung', () => {
   // Der gemeinsame Schnitt des Stapels (nur eine Winkelstelle, an der JEDER Ring eine
   // Mantellinie hat) schneidet alle drei Ringe an derselben Stelle → alle Bögen
   // passen aufeinander.
-  test('31: Stapel Kegel A + Zylinder + Kegel B mit Fächern an benachbarten Facetten → gemeinsamer Schnitt, alle Bänder gültig, keine 1-Facetten-Bänder', () => {
+  test('31: Stapel Kegel A + Zylinder + Kegel B mit Fächern an benachbarten Facetten → gemeinsamer Schnitt, alle Bänder gültig, keine 1-Facetten-Bänder (Außenwand: nicht geteilt)', () => {
     const N = 72;
     const fds = stackedBore(N, FAN_IDX, FAN_IDX.map((k) => (k + 1) % N));
     const det = run(fds);
     validateArcBands(fds, det, { vtxKey });
-    // Bohrung (drei Ringe) und Außenwand — je drei Bänder
+    // Bohrung (drei Ringe) — je drei Bänder. Die Außenwand ist eine Primitive-Wand
+    // (konvex, zwischen zwei Deckflächen) → sie wird NICHT geteilt (Mantel-Pfad).
     const bore = det.bands.filter((b) => b.levels.lo.r < 5);
     const outer = det.bands.filter((b) => b.levels.lo.r >= 5);
     expect(bore.length).toBe(9);
-    expect(outer.length).toBe(3);
-    expect(det.stats.valid).toBe(12);
+    expect(outer.length).toBe(0);
+    expect(det.stats.valid).toBe(9);
     // alle Facetten der drei Bohrungs-Ringe liegen in gültigen Bändern
     const covered = new Set();
     for (const b of bore) for (const fi of b.facets) covered.add(fi);
