@@ -1165,7 +1165,9 @@ export const BODIES = [
     columns: [plate(sheetZProfile(15, 20, 2, 3, 12), 17, { kind: 'chamfer', r: 0.5 })],
     bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
     jitter: 3e-5,
-    expect: { mode: 'skip', arcsOff: 12 },
+    // wie p4/p6: die gefasten Stirnseiten verhindern, dass eine Entrundung die Biegung schärft
+    // (auch mit dem Schalter nicht) → der AN+B-Lauf darf „Rundung bleibt“ liefern.
+    expect: { mode: 'skip', arcsOff: 12, bendsSharpenable: false },
   },
   // Durchgangsloch mit 45°-Fase an BEIDEN Enden: die drei Ringe (Zylinder + 2 Kegel)
   // sind geschlossene Ketten (Vollkreise) → je Ring drei Bänder (Schnitt bei 0°, 120°,
