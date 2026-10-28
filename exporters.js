@@ -227,10 +227,18 @@ export function buildOutlinesStep(outlines) {
 //   (4) gleicher Winkelbereich: die Polarwinkel-Intervalle der Gruppen-Punkte (im Rahmen
 //       senkrecht zur Achse) haben Start und Ende je auf ≤ 3° gleich — Innen- und Außenbogen
 //       überstreichen denselben Bogen; daraus folgt: die anschliessenden geraden Wandstücke
-//       sind parallel im Abstand t = konstante Wandstärke
+//       sind parallel im Abstand t = konstante Wandstärke. ZUSÄTZLICH müssen die Bogenweiten
+//       (span) je auf ≤ 3° gleich sein — sonst gelten z.B. ein 90°- und ein 270°-Bogen mit
+//       vertauschten Enden (gleiche Endrichtungen) als Paar
 //   (5) axiale Überdeckung: die Projektionen der Gruppen-Punkte auf die Achse überlappen zu
 //       ≥ 50 % der kürzeren
-// Alle Gruppen beider Primitive eines Paares sind „Biegungs-Gruppen“.
+// Ein Primitive kommt überhaupt nur als Biegungsbogen in Frage, wenn sein Bogen höchstens 200°
+// überstreicht (KEIN Fast-Vollkreis: `full === false` heißt nur „Abdeckung unter der Schwelle“,
+// ein 350°-Zylinder ist full:false) UND die größte Winkel-Lücke mindestens 3× so groß ist wie die
+// zweitgrößte (sonst sind Start und Ende des Bogens nicht bestimmt — Schlitzrohr, C-Profil).
+// Biegungs-Gruppen sind nur die Gruppen, die WIRKLICH auf dem Zylinder liegen (Streifen-Semantik
+// wie in defeatureOne: alle Punkte radial ≤ tolM) — die tangential anschliessende Ebene, die die
+// Erkennung dem Primitiv mitunter zuschlägt, gehört NICHT dazu und wird nicht ausgenommen.
 //
 // Rückgabe: { groups: Set der Biegungs-Gruppen, prims: Set der Primitive-IDs,
 //             pairs: [[id1, id2], …] }.
@@ -247,6 +255,8 @@ export function findBendGroups(normalGroups) {
   const ANG_TOL = 3;                             // (4) Winkelbereich-Toleranz [Grad]
   const T_MIN = 0.1;                             // (3) Mindest-Wandstärke [mm]
   const OVERLAP_MIN = 0.5;                       // (5) axiale Überdeckung
+  const SPAN_MAX = 200;                          // (4a) Bogen höchstens 200° (kein Fast-Vollkreis)
+  const GAP_RATIO = 3;                           // (4a) größte Lücke ≥ 3× zweitgrößte Lücke
 
   // Primitive sammeln (Gruppen mit gleichem primitive.id gehören zusammen)
   const byId = new Map();
@@ -256,7 +266,7 @@ export function findBendGroups(normalGroups) {
     if (!Number.isFinite(p.radius) || !(p.radius > 0)) continue;
     if (!Array.isArray(p.axis) || !Array.isArray(p.axisPoint)) continue;
     let e = byId.get(p.id);
-    if (!e) { e = { prim: p, groups: [], pts: [] }; byId.set(p.id, e); }
+    if (!e) { e = { prim: p, groups: [], strip: [], pts: [] }; byId.set(p.id, e); }
     e.groups.push(g);
     // Nur Punkte, die WIRKLICH auf dem Zylinder liegen: die Erkennung schlägt dem Primitiv
     // mitunter die tangential anschliessende Ebene zu (Kabelhalter/Taschenecken) — die gehört
@@ -270,6 +280,7 @@ export function findBendGroups(normalGroups) {
       return Math.abs(Math.hypot(w[0] - a[0] * al, w[1] - a[1] * al, w[2] - a[2] * al) - p.radius);
     };
     if (vs.every((v) => Array.isArray(v) && v.length >= 3 && rad(v) <= tolM)) {
+      e.strip.push(g);                       // Streifen: nur diese Gruppen sind Biegungs-Gruppen
       for (const v of vs) e.pts.push(v);
     }
   }
@@ -297,20 +308,32 @@ export function findBendGroups(normalGroups) {
     if (!rad.length) { e.arc = null; continue; }
     // (4) Polarwinkel-Intervall: der Bogen ist das Komplement der größten Lücke
     rad.sort((x, y) => x.ang - y.ang);
-    let gap = -1, gi = 0;
+    const gaps = [];
     for (let k = 0; k < rad.length; k++) {
       const p0 = rad[k].ang, p1 = (k + 1 < rad.length) ? rad[k + 1].ang : rad[0].ang + 2 * Math.PI;
-      const g = p1 - p0;
-      if (g > gap) { gap = g; gi = k; }
+      gaps.push(p1 - p0);
     }
-    e.arc = { start: rad[(gi + 1) % rad.length].dir, end: rad[gi].dir, span: (2 * Math.PI - gap) * 180 / Math.PI };
+    let gi = 0;
+    for (let k = 1; k < gaps.length; k++) if (gaps[k] > gaps[gi]) gi = k;
+    const gap = gaps[gi];
+    const gap2 = gaps.reduce((m, g, k) => (k === gi ? m : Math.max(m, g)), 0);
+    const span = (2 * Math.PI - gap) * 180 / Math.PI;
+    // (4a) Kein Fast-Vollkreis und eindeutiger Bogen: der Bogen darf höchstens 200° überstreichen
+    //      (ein 350°-Zylinder ist full:false, wäre aber kein Bogen) und die größte Lücke muss
+    //      mindestens 3× so groß sein wie die zweitgrößte — sonst sind Start und Ende des Bogens
+    //      nicht bestimmt (Schlitzrohr/C-Profil: Innen- UND Außenbogen).
+    if (span > SPAN_MAX || gap * 180 / Math.PI < GAP_RATIO * gap2 * 180 / Math.PI) { e.arc = null; continue; }
+    e.arc = { start: rad[(gi + 1) % rad.length].dir, end: rad[gi].dir, span };
   }
 
   const bendGroups = new Set(), bendPrims = new Set(), pairs = [];
   for (let i = 0; i < ents.length; i++) for (let j = i + 1; j < ents.length; j++) {
     if (!isBendPair(ents[i], ents[j])) continue;
-    for (const g of ents[i].groups) bendGroups.add(g);
-    for (const g of ents[j].groups) bendGroups.add(g);
+    // Biegungs-Gruppen sind nur die STREIFEN (Gruppen, die WIRKLICH auf dem Zylinder liegen) —
+    // die tangential anschliessende Ebene, die die Erkennung dem Primitiv zuschlägt, wird
+    // NICHT von der Entrundung ausgenommen.
+    for (const g of ents[i].strip) bendGroups.add(g);
+    for (const g of ents[j].strip) bendGroups.add(g);
     bendPrims.add(ents[i].prim.id); bendPrims.add(ents[j].prim.id);
     pairs.push([ents[i].prim.id, ents[j].prim.id]);
   }
@@ -339,6 +362,9 @@ export function findBendGroups(normalGroups) {
     const same = (ang(E1.arc.start, E2.arc.start) <= ANG_TOL && ang(E1.arc.end, E2.arc.end) <= ANG_TOL)
       || (ang(E1.arc.start, E2.arc.end) <= ANG_TOL && ang(E1.arc.end, E2.arc.start) <= ANG_TOL);
     if (!same) return false;
+    // (4) gleiche BOGENWEITE: sonst wären z.B. ein 90°- und ein 270°-Bogen mit vertauschten
+    //     Enden (gleiche Endrichtungen) ein Paar
+    if (Math.abs(E1.arc.span - E2.arc.span) > ANG_TOL) return false;
     // (5) axiale Überdeckung (beide Primitive auf die Achse von P1 bezogen)
     const O1 = P1.axisPoint, O2 = P2.axisPoint;
     const c = (O2[0] - O1[0]) * a1[0] + (O2[1] - O1[1]) * a1[1] + (O2[2] - O1[2]) * a1[2];
@@ -4398,6 +4424,13 @@ export function buildVolumeStepBrepV2(analysis) {
         if (bType !== 'DECK' && !outwardOk(B.faces, 0.05)) return rej('out-B');
         // Gesperrt? (Rückfall je Merkmal) oder Biegung eines Blechprofils → Lauf bleibt facettiert
         for (const fj of runFaces) { const g = faceDefs[fj].group; if (g && (blockedGroups.has(g) || bendGroups.has(g))) return rej('blocked'); }
+        // Auch die NACHBAR-Flächen, deren Punkte verschoben werden (replaceFaces: die erste Reihe von
+        // B bzw. die letzte Reihe von A), dürfen keine Biegungs-Gruppe sein — sonst zöge der
+        // Kegel-Band-Lauf die Biegung (Innen-/Außenbogen) mit auf den scharfen Punkt und
+        // zerstörte sie.
+        const firstRowB = bType === 'DECK' ? [] : B.rows[0].faces;
+        const lastRowA = aType === 'DECK' ? [] : A.rows[A.rows.length - 1].faces;
+        for (const fj of [...firstRowB, ...lastRowA]) { const g = faceDefs[fj].group; if (g && bendGroups.has(g)) return rej('blocked'); }
         // Scharfer Punkt X = Schnitt der Nachbar-Geraden
         const den = cross2(A.dir, B.dir);
         if (Math.abs(den) < 1e-9) return rej('parallel');
@@ -4415,8 +4448,6 @@ export function buildVolumeStepBrepV2(analysis) {
         const lastRow = run[run.length - 1].rows[run[run.length - 1].rows.length - 1];
         const Re = lastRow.ring;
         // Sicherheit: keine andere Fläche benutzt die Ring-Punkte
-        const firstRowB = bType === 'DECK' ? [] : B.rows[0].faces;
-        const lastRowA = aType === 'DECK' ? [] : A.rows[A.rows.length - 1].faces;
         const allowed = new Set([pi]);
         if (endDeck) allowed.add(endDeck.fi);
         for (const fj of runFaces) allowed.add(fj);

@@ -22,6 +22,9 @@
 // Bogen-Flächen (Zylinder + Kegel) im AUS-Export. Körper mit `bends` (p1–p4, p6: Blechprofile):
 // im AN-Lauf bleiben die Biegungen RUND (Soll: Bogen-Flächen wie AUS, Volumen = Netz), im Zusatz-
 // Lauf AN+B (Schalter „Blech-Biegungen schärfen“) werden sie scharf (Soll: Rohprofil = `bends.pts`).
+// Ausnahme: `expect.bendsSharpenable: false` (p4/p6 — Stirnseiten gefast: dort kann keine
+// Entrundung die Biegung schärfen, auch ohne den Schalter nicht) → der AN+B-Lauf darf „Rundung
+// bleibt“ liefern (nur eine Notiz, keine Soll-Verletzung).
 // `bends.col` = die Säule mit der Biege-Kontur. p5 (Taschenecke, KEINE Biegung): die vier Ecken
 // werden im AN-Lauf wie bisher geschärft — `cornerVariants` liefert die Soll-Varianten.
 //
@@ -1082,7 +1085,9 @@ export const BODIES = [
     desc: 'wie (p3), Stirnseiten oben+unten 0.5×45° gefast (Kabelhalter-Fall: die Fase läuft als Kegel um die Biegungen) — je Bogen 1 Zylinder + 2 Kegel',
     columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'chamfer', r: 0.5 })],
     bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2, col: 0 },
-    expect: { mode: 'skip', arcsOff: 12 },
+    // Die gefasten Stirnseiten verhindern, dass eine Entrundung die Biegung schärft (auch ohne den
+    // Schalter nicht) → der AN+B-Lauf darf „Rundung bleibt“ liefern (nur Notiz, kein Soll-Bruch).
+    expect: { mode: 'skip', arcsOff: 12, bendsSharpenable: false },
   },
   {
     id: 'p5', extra: true, file: 'v2_x_bogen_taschenecke',
@@ -1107,7 +1112,8 @@ export const BODIES = [
     columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'chamfer', r: 0.5 })],
     bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2, col: 0 },
     transform: { rot: [20, 35, 10], t: [50, -20, 7] },
-    expect: { mode: 'skip', arcsOff: 12 },
+    // wie p4: die Biegung lässt sich wegen der gefasten Stirnseiten nicht schärfen
+    expect: { mode: 'skip', arcsOff: 12, bendsSharpenable: false },
   },
   // Senkung + Fase an BEIDEN Enden der Bohrung (Kabelhalter-Befund: die Mündungs-Kegel wurden über
   // Kreuz dem falschen Rand zugeordnet → Orientierungsfehler, alles facettiert)
