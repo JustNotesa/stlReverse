@@ -1027,4 +1027,57 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(det.bands.length).toBe(3);
     expect(det.stats.valid).toBe(3);
   });
+
+  // ── Analytischer Kreis-Rand (circleRim) in einem ANDEREN Loop der Deckfläche ──
+  // Bohrungs-Mündung (Loop mit circleRim) neben einem Bogen: der Bogen liegt im
+  // Außen-Loop → die Deckfläche darf als cap gelten; der Kreis-Rand-Loop muss beim
+  // Anwenden (applyArcBands) OBJEKTGLEICH erhalten bleiben (sonst Polygon statt
+  // Kreis-Kante → die Hülle reißt an der Mündung auf).
+  const rimLoop = (z) => {
+    const L = [];
+    for (let i = 0; i < 12; i++) { const a = 2 * Math.PI * i / 12; L.push([2 * Math.cos(a), 2 * Math.sin(a), z]); }
+    L.circleRim = { rimKey: 'test-rim', center: [0, 0, z], radius: 2, axis: [0, 0, 1], refDir: [1, 0, 0] };
+    return L;
+  };
+
+  test('25: Deckfläche mit circleRim in einem ANDEREN Loop → Band bleibt gültig (cap)', () => {
+    const prof = roundedRect(20, 10, [3, 0, 0, 0], 6);        // eine Eckrundung R3 (6 Seg.)
+    const fds = extrude([{ z: 0, pts2d: prof }, { z: 8, pts2d: prof }]);
+    const top = fds[fds.length - 1];                         // obere Deckfläche
+    top.inner = [rimLoop(8)];                                 // Bohrungs-Mündung (Innen-Loop)
+    const det = run(fds);
+    expect(det.bands.length).toBe(1);
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(1);                        // ohne Fix: 0 (hasRim(fd) verworfen)
+    expect(det.stats.valid).toBe(1);
+    expect(det.capEdits.length).toBe(2);                     // lo (unten) + hi (oben)
+    expect(det.capEdits.every((ce) => ce.li === 0)).toBe(true);   // der Bogen liegt im Außen-Loop
+    expect(det.capEdits.some((ce) => ce.fi === fds.length - 1)).toBe(true);
+  });
+
+  test('26: applyArcBands — der unberührte Loop mit circleRim bleibt erhalten', () => {
+    const prof = roundedRect(20, 10, [3, 0, 0, 0], 6);
+    const fds = extrude([{ z: 0, pts2d: prof }, { z: 8, pts2d: prof }]);
+    const top = fds[fds.length - 1];
+    top.inner = [rimLoop(8)];
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    const res = applyArcBands(fds, det, { vtxKey });
+    const caps = res.fds.filter((fd) => fd.arcEdges instanceof Map && fd.arcEdges.size);
+    expect(caps.length).toBe(2);                            // Deckflächen unten + oben
+    const cap = caps.find((fd) => fd.inner && fd.inner.length);
+    expect(cap).toBeTruthy();
+    // der editierte Außen-Loop: die 5 inneren Bogen-Punkte sind weg
+    expect(cap.outer.length).toBe(prof.length - 5);
+    // der UNBERÜHRTE Innen-Loop mit dem analytischen Kreis-Rand bleibt objektgleich erhalten
+    expect(cap.inner.length).toBe(1);
+    expect(cap.inner[0].circleRim).toBeTruthy();
+    expect(cap.inner[0].circleRim.rimKey).toBe('test-rim');
+    expect(cap.inner[0]).toBe(top.inner[0]);
+    // der editierte Loop trägt KEINEN Kreis-Rand (sein Polygonzug ist kürzer)
+    expect(cap.outer.circleRim).toBeUndefined();
+    // das Original bleibt unverändert
+    expect(fds[fds.length - 1].outer.length).toBe(prof.length);
+    expect(fds[fds.length - 1].inner[0].circleRim.rimKey).toBe('test-rim');
+  });
 });
