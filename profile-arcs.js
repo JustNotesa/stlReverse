@@ -38,10 +38,12 @@
 //      maxSegDeg, gleicher Drehsinn, ≥ minSegs Segmente. Ein gültiger VOLLKREIS (geschlossene
 //      Kette, ganzer Ring besteht als Band) wird in DREI Bänder geteilt (Schnitt an den
 //      Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3) — zwei Halbkreise hätten dieselben zwei
-//      Endpunkte und würden sich in fd.arcEdges überschreiben. Übereinanderliegende Ringe
-//      (Zylinder + Fasen-Kegel) schneiden über ein REGISTER (je Achse: die Schnittpunkte der
-//      schon geteilten Ringe) an derselben Kante — sonst lägen die Schnitte eine Facette
-//      auseinander und die Bögen passten nicht mehr aufeinander.
+//      Endpunkte und würden sich in fd.arcEdges überschreiben. Ringe, die sich eine Ebene teilen
+//      (Zylinder + Fasen-Kegel), bilden einen STAPEL: der Schnitt wird für den ganzen Stapel
+//      GEMEINSAM gewählt (eine Winkelstelle, an der JEDER Ring eine Mantellinie hat) — sonst
+//      lägen die Schnitte der Ringe auseinander und die Bögen passten nicht mehr aufeinander.
+//      Ringe ohne Stapel schneiden über ein REGISTER (je Achse: die Schnittpunkte der schon
+//      geteilten Ringe) an derselben Kante.
 //   4. Rand des Bands = Vereinigung der gerichteten Facetten-Kanten (innere heben sich auf) → genau
 //      ein Loop aus Bogen unten, Seite, Bogen oben, Seite. same_sense aus den Facetten-Normalen
 //      (alle müssen zur STEP-Flächennormale gleich stehen).
@@ -1129,21 +1131,24 @@ function angDist(a, b) {
  * und würden sich in fd.arcEdges überschreiben.
  *
  * Die drei Schnitte liegen an den MANTELLINIEN mit den Polarwinkeln 0, 2π/3 und 4π/3
- * (KANONISCHE Winkel, nicht die „breiteste Facette“): so schneiden übereinanderliegende
- * Ringe desselben Stapels (Zylinder + Fasen-Kegel, gemeinsame Achse und Rahmen) an
- * denselben Stellen; Restunterschiede gleicht alignBands aus.
+ * (KANONISCHE Winkel, nicht die „breiteste Facette“).
+ *
+ * ÜBEREINANDERLIEGENDE RINGE (STAPEL: gleiche Achse, gemeinsame Ebene): die Schnitt-
+ * wahl erfolgt GEMEINSAM für den ganzen Stapel (stackCutPlan) — nur eine Winkelstelle,
+ * an der JEDER Ring eine Mantellinie hat. Sonst schneidet jeder Ring an seiner eigenen
+ * Stelle (der Ring mit dem Dreiecksfächer schneidet neben dem Schnitt des Nachbarrings)
+ * und die Bögen passen nicht mehr aufeinander (andere Polygonzüge → anderer arcKey) →
+ * validateArcBands verwirft die Bänder.
  *
  * REGISTER (je Achse, `reg`): die Schnittpunkte der bereits geteilten Ringe (vkey der
  * lo- und hi-Punkte ihrer Schnitt-Seitenkanten). Ein Ring, der an einer Stelle NICHT
  * mehr eine Mantellinie hat (Fasen-Fächer: die Seitenkanten der Fächer-Dreiecke sind
  * schräg), fände sonst die NÄCHSTE Mantellinie zum Zielwinkel — eine Facette neben dem
- * Schnitt des Nachbarrings. Der Bogen des Nachbarrings passt dann nicht mehr auf den
- * Bogen dieses Rings (andere Polygonzüge → anderer arcKey) → validateArcBands verwirft
- * beide. Deshalb wird zuerst unter den Mantellinien gesucht, deren lo-/hi-Punkt im
- * Register steht (d. h. die Schnittkante ist dieselbe Kante wie bei einem früheren Ring
- * desselben Stapels — die Ringe teilen sich den Kreis an der Bandgrenze); nur wenn
- * keine solche Mantellinie im Zielwinkel-Fenster (≤ 30°) liegt, gilt die nächste
- * Mantellinie zum Zielwinkel.
+ * Schnitt des Nachbarrings. Deshalb wird zuerst unter den Mantellinien gesucht, deren
+ * lo-/hi-Punkt im Register steht (d. h. die Schnittkante ist dieselbe Kante wie bei
+ * einem früheren Ring desselben Stapels — die Ringe teilen sich den Kreis an der
+ * Bandgrenze); nur wenn keine solche Mantellinie im Zielwinkel-Fenster (≤ 30°) liegt,
+ * gilt die nächste Mantellinie zum Zielwinkel.
  *
  * Scheitert einer der drei Teile (oder sind die drei Schnitte nicht verschieden), wird
  * der ganze Ring wie bisher übersprungen — es entstehen KEINE Teil-Bänder eines Rings.
@@ -1175,13 +1180,144 @@ function ringCandidates(ctx, chain, whole) {
   return out;
 }
 
-function splitRing(ctx, chain, whole, bands, taken, stats, reg) {
-  const { o, vkey } = ctx;
-  const m = chain.facets.length;
-  // Seitenkanten, die Mantellinien sind, mit ihrem Polarwinkel (0 … 2π)
+/**
+ * Ring-Info für die STAPEL-Schnittwahl: die Mantellinien des Rings (ringCandidates)
+ * je Ebene indexiert (lo- bzw. hi-Vertex → Mantellinie) und die Vertex-Mengen der
+ * beiden Ebenen (zur Erkennung gemeinsamer Ebenen).
+ */
+function ringInfo(ctx, chain, whole) {
+  const { vkey } = ctx;
   const cands = ringCandidates(ctx, chain, whole);
-  if (cands.length < 3) return false;
-  // Schnitte: Winkel 0, 2π/3, 4π/3 (Abstand modulo 2π)
+  const byLo = new Map(), byHi = new Map();
+  for (const cd of cands) {
+    if (!byLo.has(cd.loKey)) byLo.set(cd.loKey, cd);
+    if (!byHi.has(cd.hiKey)) byHi.set(cd.hiKey, cd);
+  }
+  const loKeys = new Set((whole.loPts || []).map(vkey));
+  const hiKeys = new Set((whole.hiPts || []).map(vkey));
+  return {
+    chain, whole, cands, byLo, byHi, loKeys, hiKeys,
+    tlo: whole.tlo, thi: whole.thi,
+    levels: [
+      { t: whole.tlo, keys: loKeys },
+      { t: whole.thi, keys: hiKeys },
+    ],
+  };
+}
+
+/**
+ * STAPEL: die Vollringe einer Achse, die sich eine Ebene teilen — gleiche Höhe t
+ * UND gemeinsame Vertices dort. Solche Ringe liegen übereinander (Zylinder zwischen
+ * zwei Fasen-Kegeln) und müssen an derselben Winkelstelle geschnitten werden, damit
+ * ihre Bögen aufeinander passen (gleicher Polygonzug → gleicher Bogen-Schlüssel).
+ *
+ * Ringe ohne gemeinsame Ebene bilden je einen eigenen (einelementigen) Stapel.
+ * → [[info, …], …]   (jeder Stapel von unten nach oben)
+ */
+function ringStacks(ctx, rings) {
+  const tol = ctx.o.levelTol;
+  const parent = rings.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+  // gemeinsame Ebene: gleiche Höhe UND mindestens ein gemeinsamer Vertex
+  const shares = (a, b) => {
+    for (const la of a.levels) {
+      for (const lb of b.levels) {
+        if (Math.abs(la.t - lb.t) > tol) continue;
+        for (const k of la.keys) if (lb.keys.has(k)) return true;
+      }
+    }
+    return false;
+  };
+  for (let i = 0; i < rings.length; i++) {
+    for (let j = i + 1; j < rings.length; j++) {
+      if (shares(rings[i], rings[j])) union(i, j);
+    }
+  }
+  const groups = new Map();
+  for (let i = 0; i < rings.length; i++) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(rings[i]);
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    g.sort((a, b) => (a.tlo - b.tlo) || (a.thi - b.thi));
+    out.push(g);
+  }
+  return out;
+}
+
+/**
+ * ZULÄSSIGE SCHNITTPOSITIONEN eines Stapels: eine Position ist eine Kette von
+ * Mantellinien — je Ring eine —, die sich an den gemeinsamen Ebenen im selben Vertex
+ * treffen. Der Schnitt liegt damit an derselben Winkelstelle in ALLEN Ringen des
+ * Stapels:
+ *
+ *   Zylinder: die Mantellinie durch den Vertex an beiden Ebenen (sie bestimmt den
+ *             Vertex der nächsten Ebene),
+ *   Kegel:    die Mantellinie, deren Punkt auf der gemeinsamen Ebene genau der
+ *             Vertex des Nachbarrings ist.
+ *
+ * Fehlt einem Ring an der Stelle die Mantellinie (Fasen-Fächer: die Seitenkante ist
+ * schräg), ist die Position für den ganzen Stapel unzulässig — genau das war die
+ * Fehlerquelle der Einzellogik (jeder Ring schnitt an seiner eigenen Stelle).
+ *
+ * → [{ phi, edges: [Mantellinie je Ring, unten→oben] }]
+ */
+function stackPositions(stack) {
+  const out = [];
+  for (const c0 of stack[0].cands) {
+    const edges = [c0];
+    let ok = true;
+    for (let q = 1; q < stack.length; q++) {
+      const next = stack[q].byLo.get(edges[q - 1].hiKey);
+      if (!next) { ok = false; break; }
+      edges.push(next);
+    }
+    if (ok) out.push({ phi: c0.phi, edges });
+  }
+  return out;
+}
+
+/**
+ * SCHNITTWAHL eines Stapels: je Zielwinkel 0, 2π/3, 4π/3 den zulaessigen Schnitt mit
+ * dem kleinsten Winkelabstand wählen (höchstens 60° — weiter weg liegt kein Schnitt).
+ * Gibt es für einen Zielwinkel keinen zulaessigen Schnitt, wird der Stapel NICHT
+ * gemeinsam geschnitten (→ Einzellogik mit Register).
+ *
+ * → { cuts: [{ phi, edges } × 3], positions } | null
+ */
+function stackCutPlan(stack) {
+  const positions = stackPositions(stack);
+  if (!positions.length) return null;
+  const maxDev = 60 * Math.PI / 180;
+  const cuts = [];
+  for (const target of [0, 2 * Math.PI / 3, 4 * Math.PI / 3]) {
+    let best = null, bd = Infinity;
+    for (const pos of positions) {
+      const d = angDist(pos.phi, target);
+      if (d > maxDev) continue;
+      if (d < bd) { bd = d; best = pos; }
+    }
+    if (!best) return null;
+    cuts.push(best);
+  }
+  // die drei Schnitte müssen verschiedene Mantellinien sein — in JEDEM Ring des Stapels
+  for (let q = 0; q < stack.length; q++) {
+    if (new Set(cuts.map((c) => c.edges[q].k)).size !== 3) return null;
+  }
+  return { cuts, positions };
+}
+
+/**
+ * Schnittwahl EINZELNES Rings (alte Logik): je Zielwinkel 0, 2π/3, 4π/3 zuerst die
+ * Mantellinie, deren lo-/hi-Punkt ein Schnittpunkt eines früheren Rings derselben
+ * Achse ist (REGISTER, nur im Zielwinkel-Fenster ≤ 30°), sonst die nächste
+ * Mantellinie zum Zielwinkel.
+ * → [k, k, k] (Ketten-Index der drei Schnitt-Seitenkanten) | null
+ */
+function pickRingCuts(cands, reg) {
   const cuts = [];
   const regWin = 30 * Math.PI / 180;
   for (const target of [0, 2 * Math.PI / 3, 4 * Math.PI / 3]) {
@@ -1204,20 +1340,49 @@ function splitRing(ctx, chain, whole, bands, taken, stats, reg) {
         if (d < bd) { bd = d; best = cd.k; }
       }
     }
-    if (best < 0) return false;
+    if (best < 0) return null;
     cuts.push(best);
   }
+  if (new Set(cuts).size !== 3) return null;
+  return cuts;
+}
+
+/**
+ * Einen gültigen VOLLRING (zyklische Kette, der ganze Ring besteht als Band) in
+ * DREI Bänder teilen — an den drei vorgegebenen Schnitt-Seitenkanten
+ * (Ketten-Index). Die Schnittwahl selbst: pickRingCuts (Einzellogik mit Register)
+ * oder stackCutPlan (gemeinsame Wahl für den ganzen Stapel).
+ */
+function splitRing(ctx, chain, whole, bands, taken, stats, reg) {
+  // Seitenkanten, die Mantellinien sind, mit ihrem Polarwinkel (0 … 2π)
+  const cands = ringCandidates(ctx, chain, whole);
+  if (cands.length < 3) return false;
+  const cuts = pickRingCuts(cands, reg);
+  if (!cuts) return false;
+  return splitRingAt(ctx, chain, whole, bands, taken, stats, cuts, reg);
+}
+
+/**
+ * Den Ring an den drei Schnitt-Seitenkanten `cuts` (Ketten-Index) in drei Bänder
+ * teilen. Scheitert einer der drei Teile (oder sind die drei Schnitte nicht
+ * verschieden), wird der ganze Ring übersprungen — es entstehen KEINE Teil-Bänder
+ * eines Rings.
+ */
+function splitRingAt(ctx, chain, whole, bands, taken, stats, cuts, reg) {
+  const { o, vkey } = ctx;
+  const m = chain.facets.length;
+  if (!cuts || cuts.length !== 3) return false;
   if (new Set(cuts).size !== 3) return false;
   // Die Schnitte MÜSSEN nach KETTEN-INDEX aufsteigend sortiert werden: die Teile laufen
   // vorwärts im Ketten-Index (cuts[i] → cuts[i+1]), der Ketten-Index läuft aber je nach
   // Facetten-Orientierung im Uhrzeigersinn oder dagegen. Ohne Sortierung läuft Teil 0 den
   // langen Weg (über cuts[2]) — die drei Teile überlappen dann, ein Drittel des Rings fehlt
   // und die Bogen-Kanten werden doppelt benutzt (alle Bögen verworfen).
-  cuts.sort((a, b) => a - b);
+  const cs = cuts.slice().sort((a, b) => a - b);
   // Die drei Teile als Pfad-Ketten (sides hat facets.length + 1 Einträge)
   const parts = [];
   for (let i = 0; i < 3; i++) {
-    const a = cuts[i], b = cuts[(i + 1) % 3];
+    const a = cs[i], b = cs[(i + 1) % 3];
     const idx = [];
     for (let k = a; k !== b; k = (k + 1) % m) idx.push(k);
     if (!idx.length) return false;
@@ -1256,7 +1421,7 @@ function splitRing(ctx, chain, whole, bands, taken, stats, reg) {
   }
   // Schnittpunkte dieses Rings ins Register (die lo-/hi-Punkte der Schnitt-Seitenkanten)
   if (reg) {
-    for (const k of cuts) {
+    for (const k of cs) {
       const s = chain.sides[k];
       if (!s) continue;
       reg.add(vkey(s[0]));
@@ -1541,14 +1706,40 @@ export function findArcBands(fds, opts) {
       if (!whole || whole.insufficient) { wholeRings.set(chain, { whole: null, nCand: 0 }); continue; }
       wholeRings.set(chain, { whole, nCand: ringCandidates(ctx, chain, whole).length });
     }
-    let refChain = null, refNCand = Infinity;
+    // STAPEL: die Vollringe, die sich eine Ebene teilen (Zylinder zwischen zwei
+    // Fasen-Kegeln o. ä.) — ihre Schnitte werden GEMEINSAM gewählt, damit alle Ringe
+    // an derselben Winkelstelle geschnitten werden (die Bögen müssen aufeinander
+    // passen). Ringe ohne Stapel folgen dem REGISTER (die Schnittpunkte der schon
+    // geteilten Ringe).
+    const ringInfos = [];
     for (const [chain, info] of wholeRings) {
       if (!info.whole) continue;
+      ringInfos.push(ringInfo(ctx, chain, info.whole));
+    }
+    const planOf = new Map();                    // chain → { plan, qi }
+    const planned = [];
+    for (const st of ringStacks(ctx, ringInfos)) {
+      if (st.length < 2) continue;               // einzelner Ring → Einzellogik
+      const plan = stackCutPlan(st);
+      if (!plan) continue;                       // kein gemeinsamer Schnitt → Einzellogik
+      planned.push({ stack: st, plan });
+      st.forEach((r, qi) => planOf.set(r.chain, { plan, qi }));
+    }
+    // Reihenfolge: der Stapel mit den WENIGSTEN zulaessigen Schnittpositionen zuerst
+    // (er legt die Schnittkanten fest), danach die übrigen Ketten: der Ring mit den
+    // WENIGSTEN Mantellinien zuerst (er legt die Schnittkanten fest, die übrigen
+    // folgen dem Register). Sonst hinge die Ausrichtung an der Netz-Reihenfolge.
+    planned.sort((a, b) => a.plan.positions.length - b.plan.positions.length);
+    let refChain = null, refNCand = Infinity;
+    for (const [chain, info] of wholeRings) {
+      if (!info.whole || planOf.has(chain)) continue;
       if (info.nCand < refNCand) { refNCand = info.nCand; refChain = chain; }
     }
-    const ordered = refChain
-      ? [refChain].concat(chains.filter((c) => c !== refChain))
-      : chains;
+    const rest = chains.filter((c) => !planOf.has(c));
+    const ordered = planned
+      .flatMap((s) => s.stack.map((r) => r.chain))
+      .concat(refChain ? [refChain] : [])
+      .concat(rest.filter((c) => c !== refChain));
 
     for (const chain of ordered) {
       if (overBudget()) { stats.budgetHit = true; break axesLoop; }
@@ -1560,7 +1751,15 @@ export function findArcBands(fds, opts) {
         const cached = wholeRings.get(chain);
         const whole = cached ? cached.whole : tryBand(ctx, chain, 0, chain.facets.length - 1);
         if (whole && !whole.insufficient) {
-          splitRing(ctx, chain, whole, bands, taken, stats, cutReg);
+          const pl = planOf.get(chain);
+          if (pl) {
+            // gemeinsamer Schnitt des Stapels: alle Ringe werden an DENSELBEN drei
+            // Winkelstellen geschnitten → ihre Bögen passen aufeinander
+            const cuts = pl.plan.cuts.map((c) => c.edges[pl.qi].k);
+            splitRingAt(ctx, chain, whole, bands, taken, stats, cuts, cutReg);
+          } else {
+            splitRing(ctx, chain, whole, bands, taken, stats, cutReg);
+          }
           continue;
         }
         // sonst an der Seitenkante nach der breitesten lo-Kante aufschneiden

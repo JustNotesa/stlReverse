@@ -1137,6 +1137,57 @@ describe('profile-arcs.js — Band-Erkennung', () => {
   // Die Fächer sitzen an den Rahmen-Winkeln 0°, 120°, 240° (Welt-Winkel 90°, 210°, 330°)
   const FAN_IDX = [18, 42, 66];
 
+  /**
+   * Rohr (R8) mit einer Bohrung aus DREI Ringen derselben Achse (ein STAPEL):
+   * Kegel A (R4.75 → R4.25, t = −0.5 … 0), Zylinder Z (R4.25, t = 0 … 2), Kegel B
+   * (R4.25 → R4.75, t = 2 … 2.5). Kegel A teilt mit Z die Ebene t = 0, Kegel B mit Z
+   * die Ebene t = 2 — dort haben beide Ringe dieselben Vertices.
+   *
+   * `fanB`: Indizes, an denen Kegel B seine Mantellinie verliert (der hi-Punkt ist um
+   *         halbe Segmentweite versetzt → die Seitenkante wird schräg).
+   * `fanA`: Indizes, an denen Kegel A seine Mantellinie verliert (der lo-Punkt ist
+   *         versetzt).
+   */
+  function stackedBore(N, fanB, fanA) {
+    const R = 4.25, RC = 4.75, RO = 8;
+    const T0 = -0.5, T1 = 0, T2 = 2, T3 = 2.5;
+    const d = 2 * Math.PI / N;
+    const P = (psi, r, t) => [r * Math.cos(psi), r * Math.sin(psi), t];
+    const aLo = [], aHi = [], zLo = [], zHi = [], bLo = [], bHi = [], oLo = [], oHi = [];
+    for (let k = 0; k < N; k++) {
+      const psi = k * d;
+      aLo.push(P(psi + (fanA.includes(k) ? d / 2 : 0), RC, T0));   // A unten (versetzt)
+      aHi.push(P(psi, R, T1));                                     // A oben = Z unten
+      zLo.push(P(psi, R, T1));
+      zHi.push(P(psi, R, T2));
+      bLo.push(P(psi, R, T2));                                      // B unten = Z oben
+      bHi.push(P(psi + (fanB.includes(k) ? d / 2 : 0), RC, T3));    // B oben (versetzt)
+      oLo.push(P(psi, RO, T0));
+      oHi.push(P(psi, RO, T3));
+    }
+    const wall = (lo, hi, inward) => {
+      const out = [];
+      for (let k = 0; k < N; k++) {
+        const j = (k + 1) % N;
+        const q = [lo[k], lo[j], hi[j], hi[k]];
+        out.push(face(inward ? [q[3], q[2], q[1], q[0]] : q));
+      }
+      return out;
+    };
+    const fds = [
+      ...wall(aLo, aHi, true),        // Kegel A
+      ...wall(zLo, zHi, true),        // Zylinder Z
+      ...wall(bLo, bHi, true),        // Kegel B
+      ...wall(oLo, oHi, false),       // Außenwand
+    ];
+    const capLo = face(oLo.slice(), [0, 0, -1]);   // unten: Ring mit Loch
+    capLo.inner = [aLo.slice().reverse()];
+    const capHi = face(oHi.slice(), [0, 0, 1]);    // oben: Ring mit Loch
+    capHi.inner = [bHi.slice().reverse()];
+    fds.push(capLo, capHi);
+    return fds;
+  }
+
   // Zylinder-Ring und Fase-Ring: die Schnitte MÜSSEN an denselben Mantellinien liegen,
   // sonst passen die Bögen (unterschiedliche Polygonzüge → unterschiedlicher arcKey)
   // nicht mehr aufeinander und validateArcBands verwirft die Bänder.
@@ -1209,5 +1260,47 @@ describe('profile-arcs.js — Band-Erkennung', () => {
       expect(['cyl', 'cone']).toContain(p.surf.kind);
       expect(p.tris.length).toBeGreaterThan(0);
     }
+  });
+
+  // STAPEL: drei Ringe derselben Achse, die sich EINE Ebene teilen (Kegel A — Zylinder
+  // Z — Kegel B). Die beiden Kegel haben je einen Dreiecksfächer an der Naht, aber an
+  // BENACHBARTEN Facetten: B verliert die Mantellinie an v_k, A an v_{k+1}.
+  //
+  // Die Einzellogik (jeder Ring schneidet für sich, der Register-Ausgleich versucht
+  // danach, die Schnitte aneinander zu binden) schneidet A an der einen und B an der
+  // anderen Stelle → die Bögen der gestapelten Ringe passen nicht mehr aufeinander
+  // (unterschiedlicher Polygonzug → unterschiedlicher arcKey) → validateArcBands
+  // verwirft die Bänder, ein Drittel des Lochs bleibt facettiert.
+  //
+  // Der gemeinsame Schnitt des Stapels (nur eine Winkelstelle, an der JEDER Ring eine
+  // Mantellinie hat) schneidet alle drei Ringe an derselben Stelle → alle Bögen
+  // passen aufeinander.
+  test('31: Stapel Kegel A + Zylinder + Kegel B mit Fächern an benachbarten Facetten → gemeinsamer Schnitt, alle Bänder gültig, keine 1-Facetten-Bänder', () => {
+    const N = 72;
+    const fds = stackedBore(N, FAN_IDX, FAN_IDX.map((k) => (k + 1) % N));
+    const det = run(fds);
+    validateArcBands(fds, det, { vtxKey });
+    // Bohrung (drei Ringe) und Außenwand — je drei Bänder
+    const bore = det.bands.filter((b) => b.levels.lo.r < 5);
+    const outer = det.bands.filter((b) => b.levels.lo.r >= 5);
+    expect(bore.length).toBe(9);
+    expect(outer.length).toBe(3);
+    expect(det.stats.valid).toBe(12);
+    // alle Facetten der drei Bohrungs-Ringe liegen in gültigen Bändern
+    const covered = new Set();
+    for (const b of bore) for (const fi of b.facets) covered.add(fi);
+    expect(covered.size).toBe(3 * N);
+    // kein Band mit nur EINER Facette (Reststück aus alignBands)
+    expect(det.bands.every((b) => b.facets.length > 1)).toBe(true);
+    // die Bänder des Stapels teilen sich die Bögen auf den gemeinsamen Ebenen
+    // (t = 0: Kegel A oben = Zylinder unten; t = 2: Zylinder oben = Kegel B unten)
+    const coneA = bore.filter((b) => b.kind === 'cone' && b.levels.hi.r < b.levels.lo.r);
+    const cyl = bore.filter((b) => b.kind === 'cyl');
+    const coneB = bore.filter((b) => b.kind === 'cone' && b.levels.hi.r > b.levels.lo.r);
+    expect(coneA.length).toBe(3);
+    expect(cyl.length).toBe(3);
+    expect(coneB.length).toBe(3);
+    expect(coneA.map((b) => b.segs[2].arcKey).sort()).toEqual(cyl.map((b) => b.segs[0].arcKey).sort());
+    expect(cyl.map((b) => b.segs[2].arcKey).sort()).toEqual(coneB.map((b) => b.segs[0].arcKey).sort());
   });
 });
