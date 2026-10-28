@@ -1442,7 +1442,9 @@ export const edgeCanonKey = (vtxKey, a, b) => {
  *
  * Jeder Bogen eines Bands muss Kante für Kante an GENAU eine fremde Fläche grenzen:
  *   (a) ein anderes, noch gültiges Band mit demselben Polygonzug  → Typ 'band'
- *   (b) eine ebene Deckfläche ⟂ d (kein Band-Facet, kein circleRim/arcEdges)
+ *   (b) eine ebene Deckfläche ⟂ d (kein Band-Facet, kein arcEdges; der Loop, in dem
+ *       der Bogen liegt, darf kein analytischer Kreis-Rand (circleRim) sein — andere
+ *       Loops derselben Fläche, z. B. eine Bohrungs-Mündung, stören nicht)
  *       mit demselben Loop                                        → Typ 'cap'
  *   (c) sonst → das Band fällt weg; das invalidiert wiederum seine Nachbarn.
  *
@@ -1462,9 +1464,11 @@ export function validateArcBands(fds, det, opts) {
   const bandFacets = new Set();
   for (const b of det.bands || []) for (const fi of b.facets || []) bandFacets.add(fi);
 
-  const hasRim = (fd) => {
-    for (const L of [fd.outer, ...(fd.inner || [])]) if (L && L.circleRim) return true;
-    return false;
+  // Loop li einer Fläche (0 = außen, k = innen[k−1])
+  const loopAt = (fd, li) => {
+    if (!fd) return null;
+    if (li === 0) return fd.outer || null;
+    return (fd.inner || [])[li - 1] || null;
   };
 
   // Typ eines Bogen-Segments bestimmen (null → Band ungültig)
@@ -1494,7 +1498,10 @@ export function validateArcBands(fds, det, opts) {
     const fi = owners[0].fi, li = owners[0].li;
     if (owners.every((e) => e.fi === fi && e.li === li)) {
       const fd = list[fi];
-      if (fd && !bandFacets.has(fi) && !hasArcEdges(fd) && !hasRim(fd)) {
+      // Nur der Loop, in dem der Bogen liegt, darf kein analytischer Kreis-Rand (circleRim)
+      // sein — ANDERE Loops derselben Fläche (z. B. die Mündung einer Bohrung) stören nicht.
+      const capLoop = fd ? loopAt(fd, li) : null;
+      if (fd && capLoop && !bandFacets.has(fi) && !hasArcEdges(fd) && !capLoop.circleRim) {
         const nn = fd.normal ? norm(fd.normal) : null;
         if (nn && len(nn) > 0 && Math.abs(dot(nn, band.d)) >= o.capCos) {
           return { type: 'cap', cap: { fi, li } };
@@ -1569,6 +1576,9 @@ export function validateArcBands(fds, det, opts) {
  * Inneren Abschnitt eines Bogens aus einem Loop entfernen.
  * Die inneren Punkte (ohne Endpunkte) müssen GENAU der zusammenhängende Abschnitt
  * zwischen a und b sein — in einer der beiden Laufrichtungen.
+ * Nicht-Index-Eigenschaften des Loops werden übernommen — `circleRim` jedoch NICHT:
+ * der Loop ist danach ein kürzerer Polygonzug, ein analytischer Kreis-Rand (Bohrungs-
+ * Mündung) passt nicht mehr zu ihm.
  * → neue Punktliste (Original unverändert)
  */
 function removeArcPoints(L, ce, vkey) {
@@ -1602,7 +1612,13 @@ function removeArcPoints(L, ce, vkey) {
   else if (same(bwd, inner.slice().reverse())) del = bwd;
   if (!del) throw new Error('applyArcBands: Bogen-Abschnitt passt nicht zum Loop ' + ce.li);
   const rm = new Set(del);
-  return L.filter((_, i) => !rm.has(i));
+  const out = L.filter((_, i) => !rm.has(i));
+  for (const k of Object.keys(L)) {
+    if (/^\d+$/.test(k)) continue;              // Index
+    if (k === 'circleRim') continue;            // analytischer Kreis-Rand: gehört zum ALTEN Loop
+    out[k] = L[k];
+  }
+  return out;
 }
 
 /**
@@ -1628,7 +1644,11 @@ export function applyArcBands(fds, det, opts) {
     const edits = editsByFi.get(fi);
     if (!edits || !edits.length) { out.push(fd); return; }
     const loops = [fd.outer, ...(fd.inner || [])];
-    const newLoops = loops.map((L) => (L && L.length ? L.slice() : L));
+    // Loops, die NICHT editiert werden, bleiben das ORIGINAL-Objekt: eine Kopie
+    // (Array.prototype.slice) würde die Eigenschaft `circleRim` verlieren — der
+    // analytische Kreis-Rand einer Bohrungs-Mündung in einem ANDEREN Loop derselben
+    // Fläche würde dann als Polygon geschrieben und die Hülle aufreißen.
+    const newLoops = loops.slice();
     const arcEdges = new Map();
     for (const ce of edits) {
       const L = newLoops[ce.li];
