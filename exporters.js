@@ -214,6 +214,146 @@ export function buildOutlinesStep(outlines) {
 // Gibt null zurück, wenn zu wenig Flächen für einen sinnvollen Körper vorliegen.
 // ============================================================================
 
+// ============================================================================
+// Biegungs-Erkennung (Blechprofile): Innen- und Außenbogen KOAXIAL um dieselbe
+// Achse, konstante Wandstärke t = r_außen − r_innen.
+//
+// DEFINITION eines Biegungs-Paares P1, P2 (zwei Zylinder-Primitive mit
+// group.primitive.type === 'cylinder' und full === false; alle Gruppen mit gleichem
+// primitive.id gehören zu einem Primitive):
+//   (1) Achsen parallel:  |a1·a2| ≥ cos(0,5°)
+//   (2) koaxial:          Abstand der Achsgeraden ≤ tolC = max(0,02; 0,01·max(r1,r2)) mm
+//   (3) Radiusdifferenz:  t = |r2 − r1| ≥ 0,1 mm (= Wandstärke) und t ≤ 3·max(r1,r2) + 10 mm
+//   (4) gleicher Winkelbereich: die Polarwinkel-Intervalle der Gruppen-Punkte (im Rahmen
+//       senkrecht zur Achse) haben Start und Ende je auf ≤ 3° gleich — Innen- und Außenbogen
+//       überstreichen denselben Bogen; daraus folgt: die anschliessenden geraden Wandstücke
+//       sind parallel im Abstand t = konstante Wandstärke
+//   (5) axiale Überdeckung: die Projektionen der Gruppen-Punkte auf die Achse überlappen zu
+//       ≥ 50 % der kürzeren
+// Alle Gruppen beider Primitive eines Paares sind „Biegungs-Gruppen“.
+//
+// Rückgabe: { groups: Set der Biegungs-Gruppen, prims: Set der Primitive-IDs,
+//             pairs: [[id1, id2], …] }.
+export function findBendGroups(normalGroups) {
+  const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const cross3 = (a, b) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]
+  ];
+  const norm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+  const PAR_COS = Math.cos(0.5 * Math.PI / 180);   // (1) Achsen parallel (0,5°)
+  const ANG_TOL = 3;                             // (4) Winkelbereich-Toleranz [Grad]
+  const T_MIN = 0.1;                             // (3) Mindest-Wandstärke [mm]
+  const OVERLAP_MIN = 0.5;                       // (5) axiale Überdeckung
+
+  // Primitive sammeln (Gruppen mit gleichem primitive.id gehören zusammen)
+  const byId = new Map();
+  for (const g of normalGroups || []) {
+    const p = g?.primitive;
+    if (!p || p.type !== 'cylinder' || p.full !== false) continue;
+    if (!Number.isFinite(p.radius) || !(p.radius > 0)) continue;
+    if (!Array.isArray(p.axis) || !Array.isArray(p.axisPoint)) continue;
+    let e = byId.get(p.id);
+    if (!e) { e = { prim: p, groups: [], pts: [] }; byId.set(p.id, e); }
+    e.groups.push(g);
+    // Nur Punkte, die WIRKLICH auf dem Zylinder liegen: die Erkennung schlägt dem Primitiv
+    // mitunter die tangential anschliessende Ebene zu (Kabelhalter/Taschenecken) — die gehört
+    // nicht zum Bogen (s. auch defeatureOne, s. „strip“).
+    const vs = g.vertices;
+    if (!Array.isArray(vs) || !vs.length) continue;
+    const tolM = Math.max(0.1, 0.06 * p.radius);
+    const a = norm3(p.axis);
+    const rad = (v) => {
+      const w = sub3(v, p.axisPoint), al = dot3(w, a);
+      return Math.abs(Math.hypot(w[0] - a[0] * al, w[1] - a[1] * al, w[2] - a[2] * al) - p.radius);
+    };
+    if (vs.every((v) => Array.isArray(v) && v.length >= 3 && rad(v) <= tolM)) {
+      for (const v of vs) e.pts.push(v);
+    }
+  }
+  const ents = [...byId.values()];
+
+  // Je Primitive einmal: Winkelbereich (Start-/Endrichtung als WELT-Vektoren — rahmenunabhängig,
+  // damit der Paar-Vergleich O(1) bleibt) und axiale Ausdehnung (entlang der eigenen Achse).
+  for (const e of ents) {
+    const p = e.prim;
+    const a = norm3(p.axis), O = p.axisPoint;
+    const ref = Math.abs(a[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+    const u = norm3(cross3(a, ref)), v = norm3(cross3(a, u));
+    const rad = [];                                   // { ang, dir } je Punkt
+    let lo = Infinity, hi = -Infinity;
+    for (const q of e.pts) {
+      const w = sub3(q, O), s = dot3(w, a);
+      if (s < lo) lo = s; if (s > hi) hi = s;
+      const dir = [w[0] - a[0] * s, w[1] - a[1] * s, w[2] - a[2] * s];
+      const l = Math.hypot(dir[0], dir[1], dir[2]);
+      if (!(l > 1e-9)) continue;                      // Punkt auf der Achse → kein Winkel
+      const n = [dir[0] / l, dir[1] / l, dir[2] / l];
+      rad.push({ ang: Math.atan2(dot3(n, v), dot3(n, u)), dir: n });
+    }
+    e.axLo = lo; e.axHi = hi;
+    if (!rad.length) { e.arc = null; continue; }
+    // (4) Polarwinkel-Intervall: der Bogen ist das Komplement der größten Lücke
+    rad.sort((x, y) => x.ang - y.ang);
+    let gap = -1, gi = 0;
+    for (let k = 0; k < rad.length; k++) {
+      const p0 = rad[k].ang, p1 = (k + 1 < rad.length) ? rad[k + 1].ang : rad[0].ang + 2 * Math.PI;
+      const g = p1 - p0;
+      if (g > gap) { gap = g; gi = k; }
+    }
+    e.arc = { start: rad[(gi + 1) % rad.length].dir, end: rad[gi].dir, span: (2 * Math.PI - gap) * 180 / Math.PI };
+  }
+
+  const bendGroups = new Set(), bendPrims = new Set(), pairs = [];
+  for (let i = 0; i < ents.length; i++) for (let j = i + 1; j < ents.length; j++) {
+    if (!isBendPair(ents[i], ents[j])) continue;
+    for (const g of ents[i].groups) bendGroups.add(g);
+    for (const g of ents[j].groups) bendGroups.add(g);
+    bendPrims.add(ents[i].prim.id); bendPrims.add(ents[j].prim.id);
+    pairs.push([ents[i].prim.id, ents[j].prim.id]);
+  }
+  return { groups: bendGroups, prims: bendPrims, pairs };
+
+  function isBendPair(E1, E2) {
+    const P1 = E1.prim, P2 = E2.prim;
+    if (!Array.isArray(P2.axis) || !Array.isArray(P2.axisPoint)) return false;
+    if (!E1.arc || !E2.arc) return false;                            // (4) ohne Winkelbereich
+    const a1 = norm3(P1.axis), a2 = norm3(P2.axis);
+    const par = dot3(a1, a2);
+    if (Math.abs(par) < PAR_COS) return false;                        // (1) parallel
+    const r1 = P1.radius, r2 = P2.radius;
+    const t = Math.abs(r2 - r1);
+    if (t < T_MIN || t > 3 * Math.max(r1, r2) + 10) return false;     // (3) Wandstärke
+    const tolC = Math.max(0.02, 0.01 * Math.max(r1, r2));
+    const w = sub3(P2.axisPoint, P1.axisPoint), al = dot3(w, a1);
+    const dist = Math.hypot(w[0] - a1[0] * al, w[1] - a1[1] * al, w[2] - a1[2] * al);
+    if (dist > tolC) return false;                                     // (2) koaxial
+    // (4) gleicher Winkelbereich: Start und Ende je auf ≤ 3° gleich (in beide Richtungen
+    //     möglich: die Achsen der beiden Primitive können gegenläufig gerichtet sein)
+    const ang = (d1, d2) => {
+      const c = Math.max(-1, Math.min(1, dot3(d1, d2)));
+      return Math.acos(c) * 180 / Math.PI;
+    };
+    const same = (ang(E1.arc.start, E2.arc.start) <= ANG_TOL && ang(E1.arc.end, E2.arc.end) <= ANG_TOL)
+      || (ang(E1.arc.start, E2.arc.end) <= ANG_TOL && ang(E1.arc.end, E2.arc.start) <= ANG_TOL);
+    if (!same) return false;
+    // (5) axiale Überdeckung (beide Primitive auf die Achse von P1 bezogen)
+    const O1 = P1.axisPoint, O2 = P2.axisPoint;
+    const c = (O2[0] - O1[0]) * a1[0] + (O2[1] - O1[1]) * a1[1] + (O2[2] - O1[2]) * a1[2];
+    const k = par >= 0 ? 1 : -1;
+    const lo2 = c + Math.min(k * E2.axLo, k * E2.axHi), hi2 = c + Math.max(k * E2.axLo, k * E2.axHi);
+    if (!Number.isFinite(E1.axLo) || !Number.isFinite(lo2)) return false;
+    const shorter = Math.min(E1.axHi - E1.axLo, hi2 - lo2);
+    if (!(shorter > 0)) return false;
+    if (Math.min(E1.axHi, hi2) - Math.max(E1.axLo, lo2) < OVERLAP_MIN * shorter) return false;
+    return true;
+  }
+}
+
+// ============================================================================
+
 export function buildVolumeStepBrepV2(analysis) {
   // V2-Exporter: Nutzt echte Boundary-Loops aus normalGroups (wie Panel 3).
   // Jede normalGroup wird zu einer oder mehreren ADVANCED_FACE mit echten Polygon-Grenzen.
@@ -225,6 +365,16 @@ export function buildVolumeStepBrepV2(analysis) {
   // v2 nicht schärfen kann (z.B. echte Fase), → Kegel-Fase (Chamfer-Pfad).
   // OFF = Verrundungen bleiben (facettiert); nur exakte Direkt-Treffer konvertieren weiter.
   const DEFEATURE = analysis?.defeature !== false;
+  // Blech-Biegungen (Schalter „Blech-Biegungen schärfen“, Standard AUS): die Biegungen eines
+  // Blechprofils (Innen- und Außenbogen KOAXIAL, konstante Wandstärke) bleiben per Default RUND —
+  // der Exporter macht daraus echte Teil-Zylinder (profile-arcs.js). Nur mit sharpenBends=true
+  // werden sie wie die übrigen Verrundungen geschärft. Echte Kanten-Verrundungen (ohne koaxialen
+  // Gegenbogen: Taschenecken, Plattenkanten) werden weiterhin geschärft.
+  const SHARPEN_BENDS = analysis?.sharpenBends === true;
+  // Biegungs-Gruppen (einmal je Export bestimmt, s. findBendGroups): alle Gruppen, die zu einem
+  // Biegungs-Paar gehören. Sie werden von JEDER Entrundung ausgenommen (v1, v2, v2b, v2c).
+  const bendInfo = (DEFEATURE && !SHARPEN_BENDS) ? findBendGroups(normalGroups) : { groups: new Set(), prims: new Set(), pairs: [] };
+  const bendGroups = bendInfo.groups;
   // Profil-Bögen (profile-arcs.js): Schalter + Sperrliste
   const ARCS = analysis?.profileArcs !== false;   // Profil-Bögen (profile-arcs.js)
   const arcBlocked = new Set();                     // Band-Signaturen, die facettiert bleiben (Rückfall)
@@ -1410,7 +1560,10 @@ export function buildVolumeStepBrepV2(analysis) {
   // an Zylinder oder Fasen-Kegel). Die übrigen Bohrungen bleiben analytisch.
   const blockedBores = new Set();  // boreById-Einträge, die facettiert bleiben (Rückfall je Bohrung)
   let featureOps = [];
-  const isBlocked = (groups) => { for (const g of groups) if (g && blockedGroups.has(g)) return true; return false; };
+  // Gesperrt = Rückfall je Merkmal (blockedGroups) ODER Biegungs-Gruppe (Blech-Biegung bleibt
+  // rund, s. bendGroups). bendGroups steht in einem EIGENEN Set: blockedGroups wird im Rückfall
+  // (buildStage) geleert und wiederhergestellt — die Biegungen bleiben dabei IMMER ausgenommen.
+  const isBlocked = (groups) => { for (const g of groups) if (g && (blockedGroups.has(g) || bendGroups.has(g))) return true; return false; };
   const markOp = (fd, op) => { if (!fd.ops) fd.ops = new Set(); fd.ops.add(op); };
   const addLoopKeys = (set, fd) => { for (const L of [fd.outer, ...fd.inner]) if (!L.circleRim) for (const p of L) set.add(vtxKey(p)); };
   // Test-Hook (nur Node, tests/orientation-guard.mjs): STLREV_TEST_BREAK='v1'|'v2'|'v2b' verdirbt die
@@ -1799,6 +1952,9 @@ export function buildVolumeStepBrepV2(analysis) {
         return true;
       };
       for (const entry of filletById.values()) {
+        // Biegung eines Blechprofils (Innen-/Außenbogen koaxial): bleibt per Default rund
+        // (Schalter „Blech-Biegungen schärfen“); nur mit SHARPEN_BENDS wird sie geschärft.
+        if (entry.groups.some((g) => bendGroups.has(g))) continue;
         try { if (defeatureOne(entry)) filletsDefeatured++; } catch (_) { /* Guard */ }
       }
       if (defeaturedGroups.size) faceDefs = faceDefs.filter(fd => !defeaturedGroups.has(fd.group));
@@ -1944,7 +2100,8 @@ export function buildVolumeStepBrepV2(analysis) {
     // NACH dem Schärfen der Deck-Bänder bekommt eine Seitenwand zwei Abschnitte (links und rechts die
     // senkrechten Profil-Eckrundungen) — die bleiben v2b (defeatureProfileCorners).
     // gesperrte Rundungen (Rückfall je Merkmal) bleiben stehen
-    const bandBlocked = (plan) => { for (const fi of plan.band) if (fds[fi].group && blockedGroups.has(fds[fi].group)) return true; return false; };
+    // gesperrte Rundungen (Rückfall je Merkmal) und Biegungen von Blechprofilen bleiben stehen
+    const bandBlocked = (plan) => { for (const fi of plan.band) if (fds[fi].group && (blockedGroups.has(fds[fi].group) || bendGroups.has(fds[fi].group))) return true; return false; };
     const evalLoop = (pi, L, multiOk) => {
       const info = { runs: 1 };
       for (let run = 0; run < info.runs; run++) { const plan = evaluateBand(pi, L, run, info, multiOk); if (plan && !bandBlocked(plan)) return plan; }
@@ -3018,8 +3175,8 @@ export function buildVolumeStepBrepV2(analysis) {
             }
             if (!ok) { ok = true; continue; }
             if (!removeSet.size || !capEdits.length) continue;
-            // gesperrte Eckrundung (Rückfall je Merkmal) bleibt stehen
-            if ([...removeSet].some((fi) => fds[fi].group && blockedGroups.has(fds[fi].group))) continue;
+            // gesperrte Eckrundung (Rückfall je Merkmal) und Biegung eines Blechprofils bleiben stehen
+            if ([...removeSet].some((fi) => fds[fi].group && (blockedGroups.has(fds[fi].group) || bendGroups.has(fds[fi].group)))) continue;
             // Fälle endA/endB: neue Wand E für die wiederhergestellte Kante. Ihre senkrechten
             // Kanten müssen ALLE Höhenpunkte der Nachbarwände an den Nahtstellen enthalten
             // (sonst T-Stoß). E's Außennormale = Laufrichtung × d (Material liegt links der Kontur).
@@ -4239,8 +4396,8 @@ export function buildVolumeStepBrepV2(analysis) {
         if (!outwardOk(runFaces, -1e-6)) return rej('out-run');
         if (aType !== 'DECK' && !outwardOk(A.faces, 0.05)) return rej('out-A');
         if (bType !== 'DECK' && !outwardOk(B.faces, 0.05)) return rej('out-B');
-        // Gesperrt? (Rückfall je Merkmal) → Lauf bleibt facettiert
-        for (const fj of runFaces) { const g = faceDefs[fj].group; if (g && blockedGroups.has(g)) return rej('blocked'); }
+        // Gesperrt? (Rückfall je Merkmal) oder Biegung eines Blechprofils → Lauf bleibt facettiert
+        for (const fj of runFaces) { const g = faceDefs[fj].group; if (g && (blockedGroups.has(g) || bendGroups.has(g))) return rej('blocked'); }
         // Scharfer Punkt X = Schnitt der Nachbar-Geraden
         const den = cross2(A.dir, B.dir);
         if (Math.abs(den) < 1e-9) return rej('parallel');
@@ -6562,6 +6719,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // Rückfall je Merkmal: Neubauten und gesperrte (facettiert belassene) Entrundungen über alle Stufen
   asm.report.featureRetries = featureRetries;
   asm.report.featuresDropped = fallbackStage === 2 ? 0 : featuresDropped;   // facettierte Basislinie: nichts übrig
+  // Blech-Biegungen: Zahl der Biegungs-Primitive, die von der Entrundung ausgenommen wurden
+  // (0 mit Schalter „Blech-Biegungen schärfen“ oder ohne Entrundung).
+  asm.report.bendsKept = bendInfo.prims.size;
   asm.report.boresDropped = fallbackStage === 2 ? 0 : boresDropped;         // dito: Bohrungen, die facettiert bleiben
   asm.report.boreNotes = [...boreNotes].map(([id, why]) => ({ id, why }));   // Diagnose je Bohrung
   // Profil-Bögen (profile-arcs.js): Neubauten und gesperrte (facettiert belassene) Bänder
