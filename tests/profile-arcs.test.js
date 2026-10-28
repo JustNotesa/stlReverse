@@ -2,7 +2,7 @@
 // extrudierten Profilen. Eigener Generator, keine Projektdateien als Quelle.
 import {
   ARC_DEFAULTS, findArcBands, fitCircle2d, makeFrame, toLocal, axisCandidates,
-  validateArcBands, applyArcBands, edgeCanonKey,
+  validateArcBands, applyArcBands, edgeCanonKey, oneCircle,
   arcGeometry, arcSamples, bandSurface, buildArcPlans, expandArcLoop,
   fitCoaxial2d, stackLevels,
 } from '../profile-arcs.js';
@@ -271,6 +271,19 @@ function twoTangentArcs(inset) {
   return pts;
 }
 
+// Profil mit EINEM Bogen (Mittelpunkt c, Radius R, Winkel a0…a1 in Grad, segs Segmente)
+// und zwei Geraden zurück — CCW (das Material liegt links der Laufrichtung).
+function arcProfile(c, R, a0, a1, segs) {
+  const pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const a = (a0 + (a1 - a0) * i / segs) * Math.PI / 180;
+    pts.push([c[0] + R * Math.cos(a), c[1] + R * Math.sin(a)]);
+  }
+  pts.push([c[0] - 20, c[1] + R * Math.sin(a1 * Math.PI / 180)]);
+  pts.push([c[0] - 20, c[1] - 20]);
+  return pts;
+}
+
 const run = (fds, opts = {}) => findArcBands(fds, { vtxKey, ...opts });
 
 describe('profile-arcs.js — Band-Erkennung', () => {
@@ -367,12 +380,18 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(bands.every((b) => b.facets.length === 12)).toBe(true);
   });
 
-  test('6: Vollzylinder R5 (32 Seg.) → 0 Bänder (Vollkreis)', () => {
+  test('6: Vollzylinder R5 (32 Seg.) → 3 Bänder (Vollkreis in drei Teile geteilt)', () => {
     const prof = regularPolygon(5, 32);
     const fds = extrude([{ z: 0, pts2d: prof }, { z: 10, pts2d: prof }]);
     const { bands, stats } = run(fds);
-    expect(bands.length).toBe(0);
-    expect(stats.bands).toBe(0);
+    // Der Vollkreis wird an den Mantellinien mit den Polarwinkeln 0, 2π/3, 4π/3
+    // geschnitten → drei Bänder (zwei wären zu wenig: gleiche Endpunkte).
+    expect(bands.length).toBe(3);
+    expect(stats.bands).toBe(3);
+    expect(bands.every((b) => b.kind === 'cyl')).toBe(true);
+    const covered = new Set();
+    for (const b of bands) for (const fi of b.facets) covered.add(fi);
+    expect(covered.size).toBe(32);
   });
 
   test('7: Sechseck-Prisma → 0 Bänder; Rechteck scharf → 0 Bänder', () => {
@@ -860,5 +879,152 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(det.stats.bands).toBe(0);
     expect(det.stats.axes).toBe(0);
     expect(ARC_DEFAULTS.maxAxes).toBe(6);
+  });
+
+  // ── Pfeilhöhen-Prüfung (oneCircle) statt Umkreis-Radius ────────────────────
+  // Der Umkreis-Radius je drei Punkte ist bei feiner Facettierung extrem
+  // rauschempfindlich (R=3, 1°-Segmente: der Radius schwankt zwischen 2.4 und 3.7,
+  // obwohl alle Punkte auf 6e-5 genau auf R=3 liegen). Geprüft wird die Pfeilhöhe.
+  test('25: oneCircle — fein facettierter Bogen (R3, 90×1°) mit Rauschen ±6e-5 wird angenommen, Gerade+Bogen abgelehnt', () => {
+    const rnd = lcg(20261028);
+    const jit = () => (rnd() * 2 - 1) * 6e-5;
+    const arc = [];
+    for (let i = 0; i <= 90; i++) {
+      const a = i * Math.PI / 180;
+      const r = 3 + jit();
+      arc.push([r * Math.cos(a), r * Math.sin(a)]);
+    }
+    const K = fitCircle2d(arc);
+    expect(K).toBeTruthy();
+    expect(K.r).toBeCloseTo(3, 3);
+    expect(oneCircle(arc, K, ARC_DEFAULTS.tolFitAbs, ARC_DEFAULTS.tolFitRel, ARC_DEFAULTS.noiseTol)).toBe(true);
+
+    // gemischter Lauf: Gerade (Länge 5, 1 Segment) + Bogen → Ablehnung
+    const mixed = [[-5, 0], [0, 0]];
+    for (let i = 0; i <= 90; i++) {
+      const a = i * Math.PI / 180;
+      const r = 3 + jit();
+      mixed.push([r * Math.cos(a), r * Math.sin(a)]);
+    }
+    const K2 = fitCircle2d(mixed);
+    expect(K2).toBeTruthy();
+    expect(oneCircle(mixed, K2, ARC_DEFAULTS.tolFitAbs, ARC_DEFAULTS.tolFitRel, ARC_DEFAULTS.noiseTol)).toBe(false);
+    expect(ARC_DEFAULTS.noiseTol).toBe(5e-4);
+  });
+
+  // ── Ungleichmäßige Segmente: die erwartete Pfeilhöhe hängt von der LAGE von B ──
+  // Die Formel r − sqrt(r² − L²/4) gilt nur, wenn B in der SEHNENMITTE liegt
+  // (gleichmäßige Segmente). Bei ungleichmäßigen Segmenten (Dreiecksfächer mit
+  // halben Randsegmenten) sitzt B seitlich → die erwartete Pfeilhöhe muss an der
+  // Stelle von B auf dem Fit-Kreis ausgewertet werden (sqrt(r² − x²) − s).
+  test('25b: oneCircle — ungleichmäßige Segmente (Winkel 0, 5, 15, 25, 30° auf R5) werden angenommen', () => {
+    const R = 5;
+    const pts = [0, 5, 15, 25, 30].map((a) => {
+      const t = a * Math.PI / 180;
+      return [R * Math.cos(t), R * Math.sin(t)];
+    });
+    const K = fitCircle2d(pts);
+    expect(K).toBeTruthy();
+    expect(K.r).toBeCloseTo(5, 9);
+    expect(oneCircle(pts, K, ARC_DEFAULTS.tolFitAbs, ARC_DEFAULTS.tolFitRel, ARC_DEFAULTS.noiseTol)).toBe(true);
+    // Gegenprobe: derselbe Punktsatz, aber mit einem Punkt WELTweit daneben
+    // (nicht auf dem Kreis) → Ablehnung
+    const off = pts.map((p) => [p[0], p[1]]);
+    off[2] = [off[2][0], off[2][1] + 0.01];
+    const K2 = fitCircle2d(off);
+    expect(oneCircle(off, K2, ARC_DEFAULTS.tolFitAbs, ARC_DEFAULTS.tolFitRel, ARC_DEFAULTS.noiseTol)).toBe(false);
+  });
+
+  // ── Fein facettierter Profil-Bogen mit Rauschen → EIN Band über den ganzen Bogen ──
+  test('26: findArcBands — Profil-Bogen (R3, 12 Seg. über 90°) mit Rauschen ±6e-5 → ein einziges Band über den ganzen Bogen', () => {
+    const prof = arcProfile([0, 0], 3, -45, 45, 12);      // 13 Bogenpunkte + 2 Geradenpunkte
+    const rnd = lcg(20261029);
+    const ring = (z) => prof.map(([x, y]) => {
+      const l = Math.hypot(x, y) || 1;
+      const nr = (rnd() * 2 - 1) * 6e-5;                   // radial verrauscht
+      return [x + (x / l) * nr, y + (y / l) * nr, z];
+    });
+    const fds = extrude3([ring(0), ring(10)]);
+    const det = run(fds);
+    expect(det.bands.length).toBe(1);
+    const b = det.bands[0];
+    expect(b.kind).toBe('cyl');
+    expect(b.facets.length).toBe(12);                     // der ganze Bogen
+    expect(b.levels.lo.r).toBeCloseTo(3, 2);
+    expect(b.levels.hi.r).toBeCloseTo(3, 2);
+    expect(b.segs[0].pts.length).toBe(13);                // lo-Bogen: 13 Punkte
+    expect(b.segs[2].pts.length).toBe(13);                // hi-Bogen: 13 Punkte
+    // die Bänder sind gültig (der Bogen grenzt an die Deckflächen)
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(1);
+    expect(det.stats.valid).toBe(1);
+  });
+
+  // ── Vollring (geschlossene Kette) → drei Bänder (120°-Schnitte) ────────────
+  // ── Fein facettierter Profil-Bogen mit Rauschen → EIN Band über den ganzen Bogen ──
+  test('27: Vollring (Zylinder-Rohrwand, 72 Facetten, mit Rauschen) → genau 3 Bänder, alle Facetten abgedeckt', () => {
+    const n = 72, R = 5;
+    const rnd = lcg(20261030);
+    const ring = (z) => Array.from({ length: n }, (_, i) => {
+      const a = 2 * Math.PI * i / n;
+      const r = R + (rnd() * 2 - 1) * 6e-5;
+      return [r * Math.cos(a), r * Math.sin(a), z];
+    });
+    const fds = extrude3([ring(0), ring(10)]);
+    const det = run(fds);
+    expect(det.bands.length).toBe(3);
+    expect(det.bands.every((b) => b.kind === 'cyl')).toBe(true);
+    // die Facetten decken den ganzen Ring ab (3 × 24)
+    const covered = new Set();
+    for (const b of det.bands) for (const fi of b.facets) covered.add(fi);
+    expect(covered.size).toBe(n);
+    // die Schnitte liegen 120° auseinander (Seitenkanten-Winkel)
+    const angs = det.bands.map((b) => {
+      const p = toLocal(b.frame, b.segs[0].pts[0]);
+      return Math.atan2(p[1] - b.levels.lo.c2[1], p[0] - b.levels.lo.c2[0]) * 180 / Math.PI;
+    }).sort((a, b) => a - b);
+    expect(angs.length).toBe(3);
+    expect(Math.abs(angs[1] - angs[0] - 120)).toBeLessThan(1);
+    expect(Math.abs(angs[2] - angs[1] - 120)).toBeLessThan(1);
+    // alle Bänder gültig: je Deckfläche 3 Bogen-Kanten
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(3);
+    expect(det.stats.valid).toBe(3);
+    expect(det.capEdits.length).toBe(6);                  // 3 unten + 3 oben
+  });
+
+  // Der Ketten-Index läuft im UHRZEIGERSINN (gegen den Polarwinkel): die drei
+  // Schnitte (Winkel 0, 120°, 240°) müssen nach KETTEN-INDEX sortiert werden.
+  // Ohne Sortierung läuft Teil 0 den langen Weg (über cuts[2]) — die drei Teile
+  // überlappen, ein Drittel des Rings fehlt und die Bogen-Kanten werden doppelt
+  // benutzt (dann werden alle Bögen verworfen).
+  test('28: Vollring im Uhrzeigersinn (72 Facetten) → genau 3 Bänder, jede Facette genau einmal', () => {
+    const n = 72, R = 5;
+    const ring = (z) => Array.from({ length: n }, (_, i) => {
+      const a = -2 * Math.PI * i / n;                     // gegen den Uhrzeigersinn
+      return [R * Math.cos(a), R * Math.sin(a), z];
+    });
+    const fds = extrude3([ring(0), ring(10)]);
+    const det = run(fds);
+    expect(det.bands.length).toBe(3);
+    expect(det.bands.every((b) => b.kind === 'cyl')).toBe(true);
+    // jede Facette des Rings kommt in GENAU EINEM Teil vor
+    const counts = new Map();
+    for (const b of det.bands) for (const fi of b.facets) counts.set(fi, (counts.get(fi) || 0) + 1);
+    expect(counts.size).toBe(n);
+    expect([...counts.values()].every((c) => c === 1)).toBe(true);
+    // die drei Teile sind gleich groß (je 24 Facetten)
+    expect(det.bands.map((b) => b.facets.length).sort((a, b) => a - b)).toEqual([24, 24, 24]);
+    // die Schnitte liegen 120° auseinander
+    const angs = det.bands.map((b) => {
+      const p = toLocal(b.frame, b.segs[0].pts[0]);
+      return Math.atan2(p[1] - b.levels.lo.c2[1], p[0] - b.levels.lo.c2[0]) * 180 / Math.PI;
+    }).sort((a, b) => a - b);
+    expect(Math.abs(angs[1] - angs[0] - 120)).toBeLessThan(1);
+    expect(Math.abs(angs[2] - angs[1] - 120)).toBeLessThan(1);
+    // alle Bänder gültig
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(3);
+    expect(det.stats.valid).toBe(3);
   });
 });

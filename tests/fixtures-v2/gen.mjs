@@ -391,6 +391,9 @@ export function triangulateWithHoles(outer, holes) {
 // body.columns: [{ name, profile, z0, z1, bottom, top, draftDeg? }]
 // body.caps (optional): [{ z, up, outer: {c, end, rev?}, holes: [{c, end, rev?}] }]
 //   Default: Deckel oben/unten aus allen Säulen (CCW-Säulen = Außen, CW-Säulen = Löcher).
+// body.jitter (optional): mm — deterministisches Rauschen auf jedem Netzpunkt
+//   (gleicher Punkt → gleiches Rauschen, Hash der gerundeten Koordinate). Die Punkte
+//   werden VOR der starren Transformation verrauscht (die Drehung bleibt exakt).
 export function buildMesh(body) {
   const rings = body.columns.map(buildRings);
   const tris = [];
@@ -428,12 +431,38 @@ export function buildMesh(body) {
     const outer = ringAt(cap.outer), holes = (cap.holes || []).map(ringAt);
     for (const [a, b, c] of triangulateWithHoles(outer, holes)) tris.push(cap.up ? [a, b, c] : [a, c, b]);
   }
-  if (!body.transform) return tris;
+  let out = tris;
+  if (body.jitter) {
+    const jm = new Map();
+    const jit = (p) => {
+      const k = p.map((x) => Math.round(x * 1e6)).join(',');
+      let q = jm.get(k);
+      if (!q) { q = hashJitter(p, body.jitter); jm.set(k, q); }
+      return q;
+    };
+    out = tris.map((t) => t.map(jit));
+  }
+  if (!body.transform) return out;
   // Lage im Raum (gedreht/verschoben): jeden Punkt genau einmal abbilden → geteilte Punkte bleiben geteilt
   const T = makeTransform(body.transform);
   const memo = new Map();
   const map = (p) => { let q = memo.get(p); if (!q) { q = T.apply(p); memo.set(p, q); } return q; };
-  return tris.map((t) => t.map(map));
+  return out.map((t) => t.map(map));
+}
+
+// Deterministisches Rauschen (FNV-1a über die gerundeten Koordinaten, je Achse ein
+// eigener Versatz in [−amp, amp]) — gleicher Punkt → gleiches Rauschen.
+function hashJitter(p, amp) {
+  let h = 2166136261 >>> 0;
+  const key = p.map((x) => Math.round(x * 1e6)).join(',');
+  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  const out = p.slice();
+  for (let k = 0; k < 3; k++) {
+    h ^= h >>> 15; h = Math.imul(h, 2246822507) >>> 0;
+    h ^= h >>> 13; h = Math.imul(h, 3266489909) >>> 0;
+    out[k] = p[k] + ((h >>> 0) / 4294967296 * 2 - 1) * amp;
+  }
+  return out;
 }
 
 // Starre Transformation: Drehung um X, dann Y, dann Z (Grad), danach Verschiebung t.
@@ -1103,6 +1132,43 @@ export const BODIES = [
     bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
     transform: { rot: [20, 35, 10], t: [50, -20, 7] },
     expect: { mode: 'skip', arcsOff: 12 },
+  },
+  // Fein facettierte Bögen + verrauschte Netzpunkte: der Umkreis-Radius je drei
+  // Punkte schwankt stark, der Bogen muss trotzdem als EIN Band erkannt werden
+  // (Kabelhalter-Befund).
+  // Segmentzahl: 12 je Bogen (7.5°/Segment). MIT 90 Segmenten (1°/Segment) werden
+  // die Bögen in der Pipeline NICHT erkannt: das Region-Growing (2°-Schwelle,
+  // 0.05 mm Ebenenversatz) verschmilzt den Bogen-Streifen zu einem Vieleck mit
+  // 12…42 Punkten — solche Flächen sind keine Band-Facetten (maxFacetPts = 6) —
+  // und selbst bei getrennten Flächen wäre die Koaxial-Prüfung (zwei Ebenen-Mitten)
+  // der eigentliche Blockierer (0.3 mm bei 4 Punkten, Toleranz 6e-3 mm).
+  // Rausch-Amplitude ±3e-5 mm: das Rauschen muss UNTER der Ebenen-Toleranz des
+  // Exporters bleiben (PLANAR_TOL = 5e-5 mm, exporters.js) — sonst zerlegt der
+  // Exporter die Deckflächen in Dreiecke, und die Bogen-Kanten der Deckfläche
+  // gehören dann zu verschiedenen Flächen: das Band kann nicht mehr bestätigt
+  // werden (validateArcBands) und bleibt facettiert. Die Erkennung selbst
+  // (Pfeilhöhen-Prüfung) verkraftet bis ~2e-4 mm Rauschen (noiseTol 5e-4).
+  {
+    id: 'p7', extra: true, file: 'v2_x_bogen_s_fase_fein_rauschen',
+    desc: 'wie (p4), aber 12 Segmente je Bogen UND deterministisches Rauschen ±3e-5 mm auf jedem Netzpunkt (gleicher Punkt → gleiches Rauschen) — die vier Biegungen müssen trotzdem als Bänder erkannt werden (12 Bogen-Flächen wie p4)',
+    columns: [plate(sheetZProfile(15, 20, 2, 3, 12), 17, { kind: 'chamfer', r: 0.5 })],
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
+    jitter: 3e-5,
+    expect: { mode: 'skip', arcsOff: 12 },
+  },
+  // Durchgangsloch mit 45°-Fase an BEIDEN Enden: die drei Ringe (Zylinder + 2 Kegel)
+  // sind geschlossene Ketten (Vollkreise) → je Ring drei Bänder (Schnitt bei 0°, 120°,
+  // 240°) → 3 Zylinder + 6 Kegel. 90 Segmente (4°/Segment): ab 2°/Segment verschmilzt
+  // das Region-Growing die Streifen zu Flächen mit >6 Punkten (keine Band-Facetten).
+  {
+    id: 'p8', extra: true, file: 'v2_x_platte_loch_fase_beidseitig',
+    desc: 'Platte 40×30×3 (scharf), Durchgangsloch R4.25 (90 Seg.), oben und unten 0.5×45° gefast — der Ring wird in Bänder umgewandelt (je Ring drei: 3 Zylinder + 6 Kegel)',
+    columns: [
+      plate(rectProfile(0, 0, 40, 30), 3, { kind: 'sharp' }),
+      { name: 'loch', profile: circleProfile(20, 15, 4.25, 90, true), z0: 0, z1: 3, bottom: { kind: 'chamfer', r: 0.5 }, top: { kind: 'chamfer', r: 0.5 } },
+    ],
+    expect: { mode: 'skip', arcsOff: 9 },
+    boreChamfer: [{ col: 1, R: 4.25, seg: 90, r: 0.5, H: 3 }],
   },
   // Senkung + Fase an BEIDEN Enden der Bohrung (Kabelhalter-Befund: die Mündungs-Kegel wurden über
   // Kreuz dem falschen Rand zugeordnet → Orientierungsfehler, alles facettiert)
