@@ -1737,7 +1737,19 @@ export function arcGeometry(arc, Aw, Bw, opts, hint2d) {
   if (!(sweep > 1e-9) || sweep > 2 * Math.PI - 1e-9) return null;
 
   const tol = Math.max(o.tolFitAbs, o.tolFitRel * radius);
-  if (!(Math.abs(radius - level.r) <= tol)) return null;
+  if (!(Math.abs(radius - level.r) <= tol)) {
+    // Der Stapel-Hinweis (die gemeinsame Achse des Bogen-Stapels) liegt bei KURZEN Bögen
+    // mitunter weit neben der Wahrheit: der Mittelpunkt ist dann entlang der Mittelsenk-
+    // rechten schlecht bestimmt (Fehler ∝ Rauschen/Bogenwinkel), und der daraus berechnete
+    // Radius passt dann nicht zum Radius der Ebene (level.r). Der eigene Fit der Ebene
+    // (level.c2) bestimmt den Radius genau — mit ihm wird der Bogen wieder brauchbar.
+    // Die Prüfung selbst bleibt streng (tolFit) — es wird nur ein anderer Mittelpunkt
+    // versucht, nicht die Toleranz gelockert.
+    if (hint2d && hint2d.length >= 2 && Number.isFinite(hint2d[0]) && Number.isFinite(hint2d[1])) {
+      return arcGeometry(arc, Aw, Bw, opts, null);          // → level.c2
+    }
+    return null;
+  }
   // Abstand jedes Polygonzug-Punktes zur Kreislinie (3D)
   for (const p of pts) {
     const v = sub(p, center);
@@ -1802,10 +1814,33 @@ const coneDist = (surf, p) => {
 };
 
 /**
- * Bandfläche aus den beiden Bogen-Geometrien:
- *   Zylinder  — Achse = band.d, Radius = Mittel der beiden Radien
- *   Kegel     — Lage im großen Kreis, Achse zum wachsenden Radius,
- *               semiAngle = atan2(R_groß − R_klein, Höhenabstand)
+ * Bandfläche aus den beiden Bogen-Geometrien.
+ *
+ * KANDIDATEN (in der Reihenfolge der Präferenz — der erste, der beide Bögen trägt, gewinnt):
+ *   Zylinder-Band ('cyl'):
+ *     1. Zylinder mit Achse ∥ band.d durch gLo.center, Radius = Mittel der Radien
+ *        (unverändertes Verhalten; die Kreise stehen senkrecht zur Achse → exakte Querschnitte)
+ *     2. Kegel mit Achse ∥ band.d, wenn sich die Radien um mehr als surfTol unterscheiden
+ *        (unverändertes Verhalten für echte Kegel-Bänder; NEU als Ausweichstufe für ein
+ *        'cyl'-Band — das ist in Wahrheit minimal konisch, z. B. R_lo 0.663 / R_hi 0.658;
+ *        vorher wurde es verworfen)
+ *     3. Zylinder mit Achse durch BEIDE Bogen-Mitten (Mitten-Versatz, s. unten)
+ *     4. Kegel mit Achse durch BEIDE Bogen-Mitten
+ *   Kegel-Band ('cone'):
+ *     1. Kegel mit Achse ∥ band.d (Achse zeigt zum wachsenden Radius),
+ *        semiAngle = atan2(R_groß − R_klein, Höhenabstand) — unverändertes Verhalten
+ *     2. Kegel mit Achse durch BEIDE Bogen-Mitten
+ *
+ * ACHSE AUS BEIDEN MITTEN: die beiden Bogen-Mitten liegen nicht auf einer gemeinsamen
+ * Achsgeraden parallel zu d. arcGeometry holt den Mittelpunkt aus dem Stapel-Hinweis und
+ * projiziert ihn auf die Mittelsenkrechte der jeweiligen Sehne — die beiden Sehnen sind aber
+ * nur näherungsweise parallel (Rauschen der geschriebenen Punkte). Der Rest-Versatz der Mitten
+ * (bei kleinem Radius schon ~1e-4 mm) schob die Hi-Proben neben die Fläche (surfTol 5e-5) →
+ * das Band fiel weg (Kabelhalter: Gravur mit Eckrundungen r=0.3). Mit der Achse durch BEIDE
+ * Mitten liegen beide Kreise auf der Fläche (die Kreise stehen dann nur O(ε²) daneben).
+ * Diese Kandidaten kommen erst dran, wenn die unveränderten nicht tragen — sonst läge ein
+ * Band, das vorher genau auf der Fläche lag, jetzt daneben (p7, eBike).
+ *
  * Beide Bögen müssen auf der Fläche liegen (opts.surfTol) → sonst null.
  */
 export function bandSurface(band, gLo, gHi, opts) {
@@ -1813,36 +1848,69 @@ export function bandSurface(band, gLo, gHi, opts) {
   if (!band || !gLo || !gHi) return null;
   const d = band.d;
   if (!d || !(len(d) > 0)) return null;
-  let surf = null;
-  if (band.kind === 'cone') {
-    const L = gLo.radius >= gHi.radius ? gLo : gHi;
-    const K = L === gLo ? gHi : gLo;
-    const dv = sub(L.center, K.center);
-    const hd = dot(dv, d);
-    const h = Math.abs(hd);
-    if (!(h > 1e-12)) return null;
-    const axis = norm(mul(d, hd >= 0 ? 1 : -1));         // zeigt zum wachsenden Radius
-    let rd = sub(L.refDir, mul(axis, dot(L.refDir, axis)));
+  const rLo = gLo.radius, rHi = gHi.radius, dr = rHi - rLo;
+  const L = rLo >= rHi ? gLo : gHi;                      // großer Kreis
+  const K = L === gLo ? gHi : gLo;                        // kleiner Kreis
+  const dLK = sub(L.center, K.center);                   // von K nach L
+  const hLK = len(dLK);
+  const dv = sub(gHi.center, gLo.center);                // von lo nach hi
+  const hBoth = len(dv);
+
+  const cylSurf = (axis) => {
+    const rd = sub(gLo.refDir, mul(axis, dot(gLo.refDir, axis)));
     if (!(len(rd) > 1e-12)) return null;
-    surf = {
+    return { kind: 'cyl', loc: gLo.center, axis, refDir: norm(rd), radius: (rLo + rHi) / 2 };
+  };
+  const coneSurf = (axis, h) => {
+    const rd = sub(L.refDir, mul(axis, dot(L.refDir, axis)));
+    if (!(len(rd) > 1e-12)) return null;
+    return {
       kind: 'cone', loc: L.center, axis, refDir: norm(rd),
       radius: L.radius, semiAngle: Math.atan2(L.radius - K.radius, h),
     };
+  };
+
+  const cands = [];
+  const hd = dot(dLK, d);
+  const coneD = Math.abs(hd) > 1e-12 ? coneSurf(mul(d, hd >= 0 ? 1 : -1), Math.abs(hd)) : null;
+  const coneBoth = hLK > 1e-12 ? coneSurf(mul(dLK, 1 / hLK), hLK) : null;
+  if (band.kind === 'cone') {
+    // Kegel-Band: Kegel ∥ d (unverändertes Verhalten), dann Kegel durch beide Mitten
+    if (coneD) cands.push(coneD);
+    if (coneBoth) cands.push(coneBoth);
   } else {
-    let rd = sub(gLo.refDir, mul(d, dot(gLo.refDir, d)));
-    if (!(len(rd) > 1e-12)) return null;
-    surf = {
-      kind: 'cyl', loc: gLo.center, axis: d, refDir: norm(rd),
-      radius: (gLo.radius + gHi.radius) / 2,
-    };
-  }
-  for (const g of [gLo, gHi]) {
-    for (const p of arcSamples(g, o.samples)) {
-      const dist = surf.kind === 'cone' ? coneDist(surf, p) : cylDist(surf, p);
-      if (!(dist <= o.surfTol)) return null;
+    // Zylinder-Band: Zylinder ∥ d (unverändertes Verhalten) …
+    const s1 = cylSurf(d);
+    if (s1) cands.push(s1);
+    // … dann der Kegel, wenn die Radien zu weit auseinanderliegen (das Band ist in
+    // Wahrheit minimal konisch: R_lo 0.663 / R_hi 0.658) …
+    if (Math.abs(dr) > o.surfTol) {
+      if (coneD) cands.push(coneD);
     }
+    // … dann der Zylinder mit Achse durch BEIDE Bogen-Mitten (der Mitten-Versatz) …
+    if (hBoth > 1e-12) {
+      let ax = mul(dv, 1 / hBoth);
+      if (dot(ax, d) < 0) ax = mul(ax, -1);                 // Vorzeichen wie d (STEP-Ausgabe stabil)
+      const s3 = cylSurf(ax);
+      if (s3) cands.push(s3);
+    }
+    // … und zuletzt der Kegel mit Achse durch beide Mitten
+    if (Math.abs(dr) > o.surfTol && coneBoth) cands.push(coneBoth);
   }
-  return surf;
+
+  // Erster Kandidat, der beide Bögen trägt (≤ surfTol), gewinnt
+  for (const surf of cands) {
+    let ok = true;
+    for (const g of [gLo, gHi]) {
+      for (const p of arcSamples(g, o.samples)) {
+        const dist = surf.kind === 'cone' ? coneDist(surf, p) : cylDist(surf, p);
+        if (!(dist <= o.surfTol)) { ok = false; break; }
+      }
+      if (!ok) break;
+    }
+    if (ok) return surf;
+  }
+  return null;
 }
 
 // ── Pläne (Abschnitt 4) ────────────────────────────────────────────────────

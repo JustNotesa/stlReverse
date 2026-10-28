@@ -1080,4 +1080,145 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(fds[fds.length - 1].outer.length).toBe(prof.length);
     expect(fds[fds.length - 1].inner[0].circleRim.rimKey).toBe('test-rim');
   });
+
+  // ── Bogen-Band mit Mitten-Versatz zwischen lo und hi (Kabelhalter-Gravur, r=0.3) ──
+  // arcGeometry holt den Mittelpunkt aus dem Stapel-Hinweis und projiziert ihn auf die
+  // Mittelsenkrechte der jeweiligen Sehne. Die Sehnen der beiden Ebenen sind nicht genau
+  // parallel (Rauschen der geschriebenen Punkte) → die beiden Mitten liegen nicht auf
+  // einer gemeinsamen Achsgeraden. Der Versatz (bei kleinem Radius ~1e-4 mm) schob die
+  // Hi-Proben neben die Bandfläche (surfTol 5e-5) → das Band fiel weg.
+  // bandSurface bestimmt die Achse jetzt aus BEIDEN Bogen-Mitten.
+  const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const mul3 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+  // Bogen-Geometrie wie arcGeometry sie liefert: Kreis in der Ebene z = t, Radius r,
+  // refDir = +x, Sweep 90° (die Punkte A/B wie die geschriebenen Endpunkte).
+  const arcGeom = (cx, cy, z, r, key = 'a') => {
+    const sweep = Math.PI / 2;
+    const pt = (t) => [cx + r * Math.cos(t), cy + r * Math.sin(t), z];
+    return {
+      key, center: [cx, cy, z], axis: [0, 0, 1], refDir: [1, 0, 0], radius: r, sweep,
+      A: pt(0), B: pt(sweep), Aw: pt(0), Bw: pt(sweep),
+    };
+  };
+  // Abstand eines Punktes zur Achse (loc + λ·axis)
+  const distToAxis = (surf, p) => {
+    const x = sub3(p, surf.loc);
+    return len3(sub3(x, mul3(surf.axis, dot3(x, surf.axis))));
+  };
+
+  test('29: bandSurface — Mitten-Versatz 7.2e-5 (r=0.3): Zylinder-Achse aus BEIDEN Mitten', () => {
+    const r = 0.3;
+    const gLo = arcGeom(0, 0, 2.5, r);
+    const gHi = arcGeom(6e-5, 4e-5, 3.0, r);          // Mitten-Versatz ~7.2e-5 > surfTol
+    const band = { d: [0, 0, 1], kind: 'cyl' };
+    const surf = bandSurface(band, gLo, gHi, {});
+    expect(surf).toBeTruthy();                        // vorher: null (Hi-Proben neben der Fläche)
+    expect(surf.kind).toBe('cyl');
+    expect(Math.abs(surf.radius - r)).toBeLessThan(1e-12);
+    // beide Bogen-Mitten liegen auf der Achse
+    expect(distToAxis(surf, gLo.center)).toBeLessThan(1e-12);
+    expect(distToAxis(surf, gHi.center)).toBeLessThan(1e-12);
+    // beide Bögen liegen auf der Fläche (surfTol)
+    for (const g of [gLo, gHi]) {
+      for (const p of arcSamples(g, 9)) {
+        const x = sub3(p, surf.loc);
+        const perp = sub3(x, mul3(surf.axis, dot3(x, surf.axis)));
+        expect(Math.abs(len3(perp) - surf.radius)).toBeLessThanOrEqual(ARC_DEFAULTS.surfTol);
+      }
+    }
+  });
+
+  test('30: bandSurface — koaxiale Mitten: Achse bleibt band.d (unveränderter Export)', () => {
+    const r = 0.3;
+    const gLo = arcGeom(0, 0, 2.5, r);
+    const gHi = arcGeom(0, 0, 3.0, r);
+    const band = { d: [0, 0, 1], kind: 'cyl' };
+    const surf = bandSurface(band, gLo, gHi, {});
+    expect(surf).toBeTruthy();
+    expect(surf.kind).toBe('cyl');
+    expect(Math.abs(surf.axis[0] - 0)).toBeLessThan(1e-15);
+    expect(Math.abs(surf.axis[1] - 0)).toBeLessThan(1e-15);
+    expect(Math.abs(surf.axis[2] - 1)).toBeLessThan(1e-15);
+    expect(Math.abs(surf.radius - r)).toBeLessThan(1e-12);
+  });
+
+  test('31: bandSurface — cyl-Band mit Radien-Differenz 0.005 → Kegel statt verwerfen', () => {
+    // Kabelhalter: ein als 'cyl' eingestuftes Band (|dr| ≤ tol) ist in Wahrheit minimal
+    // konisch (R_lo 0.663 / R_hi 0.658) — dafür gibt es den Kegel.
+    const gLo = arcGeom(0, 0, 2.5, 0.663);
+    const gHi = arcGeom(0, 0, 3.0, 0.658);
+    const band = { d: [0, 0, 1], kind: 'cyl' };
+    const surf = bandSurface(band, gLo, gHi, {});
+    expect(surf).toBeTruthy();                        // vorher: null (Radien passen nicht)
+    expect(surf.kind).toBe('cone');
+    expect(Math.abs(surf.radius - 0.663)).toBeLessThan(1e-12);
+    expect(Math.abs(surf.semiAngle - Math.atan2(0.005, 0.5))).toBeLessThan(1e-12);
+    // beide Kreise liegen auf der Kegelfläche
+    for (const g of [gLo, gHi]) {
+      for (const p of arcSamples(g, 9)) {
+        const x = sub3(p, surf.loc);
+        const hh = dot3(x, surf.axis);
+        const perp = sub3(x, mul3(surf.axis, hh));
+        const R = surf.radius + hh * Math.tan(surf.semiAngle);
+        expect(Math.abs(len3(perp) - R) * Math.cos(surf.semiAngle)).toBeLessThanOrEqual(ARC_DEFAULTS.surfTol);
+      }
+    }
+  });
+
+  test('32: buildArcPlans — Taschenecke mit Mitten-Versatz (r=0.3) → 4 Pläne, failed leer', () => {
+    // Kontur 12×6 mit Eckrundungen r=0.3 (24 Seg. je Ecke), Wand 2.5 → 3.0;
+    // der obere Ring ist um 7.2e-5 mm seitlich versetzt (Rauschen der geschriebenen
+    // Punkte → die Sehnen der beiden Ebenen sind nicht parallel).
+    const prof = roundedRect(12, 6, [0.3, 0.3, 0.3, 0.3], 24);
+    const lo = prof.map(([x, y]) => [x, y, 2.5]);
+    const hi = prof.map(([x, y]) => [x + 6e-5, y + 4e-5, 3.0]);
+    const fds = extrude3([lo, hi]);
+    const det = run(fds);
+    expect(det.bands.length).toBe(4);
+    validateArcBands(fds, det, { vtxKey });
+    expect(det.bands.length).toBe(4);
+    const { plans, geoms, failed } = buildArcPlans(fds, det, written9, { vtxKey });
+    expect(failed.size).toBe(0);                      // vorher: 2 Bänder fielen (Fläche neben den Bögen)
+    expect(plans.length).toBe(4);
+    for (const g of geoms.values()) expect(g).toBeTruthy();
+    for (const p of plans) {
+      expect(p.surf.kind).toBe('cyl');
+      expect(Math.abs(p.surf.radius - 0.3)).toBeLessThan(1e-4);
+    }
+  });
+
+  test('33: arcGeometry — verdorbener Stapel-Hinweis → Rückfall auf den Fit der Ebene', () => {
+    // Der Stapel-Hinweis (die gemeinsame Achse des Bogens) liegt bei kurzen Bögen mitunter
+    // weit neben der Wahrheit — der daraus berechnete Radius passt dann nicht zum Radius
+    // der Ebene. Dann muss der EIGENE Fit der Ebene (level.c2) einspringen; die Prüfung
+    // |radius − level.r| bleibt streng (tolFit) — es wird nur ein anderer Mittelpunkt
+    // versucht, nicht die Toleranz gelockert.
+    const frame = makeFrame([0, 0, 1]);
+    const c = [1.5, -2.25], r = 0.3, z = 2.5;         // c = Kreismitte im Rahmen (u, v)
+    const at = (u, v, t) => [
+      frame.e1[0] * u + frame.e2[0] * v + frame.d[0] * t,
+      frame.e1[1] * u + frame.e2[1] * v + frame.d[1] * t,
+      frame.e1[2] * u + frame.e2[2] * v + frame.d[2] * t,
+    ];
+    const pts = [];
+    for (let k = 0; k <= 8; k++) {
+      const a = (Math.PI / 2) * k / 8;
+      pts.push(at(c[0] + r * Math.cos(a), c[1] + r * Math.sin(a), z));
+    }
+    const arc = {
+      key: 'a', pts, d: [0, 0, 1], frame,
+      level: { t: z, c2: c, r },                     // der Fit der Ebene
+    };
+    const Aw = pts[0], Bw = pts[pts.length - 1];
+    // Hinweis 0.05 mm daneben (radial) → der Radius passt nicht mehr
+    const bad = [c[0] + 0.05 * Math.cos(Math.PI / 4), c[1] + 0.05 * Math.sin(Math.PI / 4)];
+    const g = arcGeometry(arc, Aw, Bw, { vtxKey }, bad);
+    expect(g).toBeTruthy();                          // vorher: null
+    expect(Math.abs(g.radius - r)).toBeLessThan(1e-9);
+    expect(len3(sub3(g.center, at(c[0], c[1], z)))).toBeLessThan(1e-9);
+    // ohne den (unbrauchbaren) Hinweis kommt der eigene Fit der Ebene zum selben Ergebnis
+    const g2 = arcGeometry(arc, Aw, Bw, { vtxKey }, null);
+    expect(g2).toBeTruthy();
+    expect(Math.abs(g2.radius - g.radius)).toBeLessThan(1e-12);
+  });
 });
