@@ -50,7 +50,11 @@ let workerJobCounter = 0;
 // Defeaturing-Toggle: Verrundungen beim Export entfernen (Mündung → Kegel-Fase,
 // gerade Kanten-Verrundung → scharfe Kante). Aus = Verrundungen bleiben facettiert.
 const _defeatureOn = () => document.getElementById('defeature-toggle')?.checked !== false;
-const withDefeature = (a) => (a ? { ...a, defeature: _defeatureOn() } : a);
+// Blech-Biegungen (Schalter, Standard AUS): die Biegungen eines Blechprofils (Innen-/Außenbogen
+// koaxial, konstante Wandstärke) bleiben RUND (echte Teil-Zylinder); nur angehakt werden sie
+// geschärft. Wirkt nur zusammen mit „Verrundungen entfernen“.
+const _sharpenBendsOn = () => document.getElementById('sharpen-bends-toggle')?.checked === true;
+const withDefeature = (a) => (a ? { ...a, defeature: _defeatureOn(), sharpenBends: _sharpenBendsOn() } : a);
 
 const WORKER_TIMEOUT_MS = 60000;
 
@@ -430,6 +434,15 @@ document.getElementById('defeature-toggle')?.addEventListener('change', () => {
     const v2 = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
     setStepWatertightStatus(v2 ? v2.report : null);
   } catch (e) { console.warn('Defeaturing-Toggle: Verdikt-Update fehlgeschlagen:', e.message); }
+});
+
+// Blech-Biegungen schärfen: Verdikt sofort neu berechnen (gleicher Ablauf wie der Defeaturing-Toggle).
+document.getElementById('sharpen-bends-toggle')?.addEventListener('change', () => {
+  if (!lastAnalysis) return;
+  try {
+    const v2 = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
+    setStepWatertightStatus(v2 ? v2.report : null);
+  } catch (e) { console.warn('Biegungen-Schärfen-Toggle: Verdikt-Update fehlgeschlagen:', e.message); }
 });
 
 // Warum blieb ein gebogener Kanal facettiert? Aus den verworfenen tube-sweep-Kandidaten

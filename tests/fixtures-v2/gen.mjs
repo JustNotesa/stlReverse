@@ -19,9 +19,11 @@
 // Profile mit echten Bögen: `filletedPolygon` (Eckrundung je Ecke, konvex wie einspringend) und
 // die Blech-Profile L/U/Z (konstante Wandstärke, Innen-/Außenbogen konzentrisch). Solche Bögen
 // wandelt der Exporter in Teil-Zylinder/-Kegel um — `expect.arcsOff` zählt die erwarteten
-// Bogen-Flächen (Zylinder + Kegel) im AUS-Export. `expect.anFree` (p1–p3, p5): im AN-/v2-Lauf
-// schärfen v1/v2 die Biegungen bzw. Taschenecken — dort wird KEINE Variante verlangt, nur
-// wasserdicht/occt/strikt; AUS bleibt voll geprüft (Bögen, Volumen).
+// Bogen-Flächen (Zylinder + Kegel) im AUS-Export. Körper mit `bends` (p1–p4, p6: Blechprofile):
+// im AN-Lauf bleiben die Biegungen RUND (Soll: Bogen-Flächen wie AUS, Volumen = Netz), im Zusatz-
+// Lauf AN+B (Schalter „Blech-Biegungen schärfen“) werden sie scharf (Soll: Rohprofil = `bends.pts`).
+// `bends.col` = die Säule mit der Biege-Kontur. p5 (Taschenecke, KEINE Biegung): die vier Ecken
+// werden im AN-Lauf wie bisher geschärft — `cornerVariants` liefert die Soll-Varianten.
 //
 // Aufruf:  node tests/fixtures-v2/gen.mjs [zielordner]   (Default: tests/fixtures-v2/stl)
 //          → schreibt je Körper eine binäre STL + prüft Manifold/Orientierung.
@@ -1058,33 +1060,33 @@ export const BODIES = [
     id: 'p1', extra: true, file: 'v2_x_bogen_l',
     desc: 'L-Profil als Blech (Schenkel 30×2 und 2×20, Wandstärke 2, Bogen-Innenradius 3, 8 Seg. je Bogen), 15 hoch, Kanten scharf — zwei Biege-Bögen (ein Zylinder innen, einer außen)',
     columns: [plate(sheetLProfile(30, 20, 2, 3, 8), 15, { kind: 'sharp' })],
-    bends: { pts: sheetLRaw(30, 20, 2), radii: sheetLRadii(3, 2), t: 2 },
-    expect: { mode: 'skip', arcsOff: 2, anFree: true },
+    bends: { pts: sheetLRaw(30, 20, 2), radii: sheetLRadii(3, 2), t: 2, col: 0 },
+    expect: { mode: 'skip', arcsOff: 2 },
   },
   {
     id: 'p2', extra: true, file: 'v2_x_bogen_u',
     desc: 'U-Profil als Blech (30×20, Wandstärke 2, Bogen-Innenradius 4, 8 Seg. je Bogen), 15 hoch, Kanten scharf — vier Biege-Bögen (zwei Biegungen)',
     columns: [plate(sheetUProfile(30, 20, 2, 4, 8), 15, { kind: 'sharp' })],
-    bends: { pts: sheetURaw(30, 20, 2), radii: sheetURadii(4, 2), t: 2 },
-    expect: { mode: 'skip', arcsOff: 4, anFree: true },
+    bends: { pts: sheetURaw(30, 20, 2), radii: sheetURadii(4, 2), t: 2, col: 0 },
+    expect: { mode: 'skip', arcsOff: 4 },
   },
   {
     id: 'p3', extra: true, file: 'v2_x_bogen_s',
     desc: 'Z-Haken als Blech (Flansch 15 unten links, Steg, Flansch 15 oben rechts, Wandstärke 2, Bogen-Innenradius 3, 8 Seg. je Bogen), 17 hoch, Kanten scharf — vier Biege-Bögen (zwei gegenläufige Biegungen)',
     columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'sharp' })],
-    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
-    expect: { mode: 'skip', arcsOff: 4, anFree: true },
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2, col: 0 },
+    expect: { mode: 'skip', arcsOff: 4 },
   },
   {
     id: 'p4', extra: true, file: 'v2_x_bogen_s_fase',
     desc: 'wie (p3), Stirnseiten oben+unten 0.5×45° gefast (Kabelhalter-Fall: die Fase läuft als Kegel um die Biegungen) — je Bogen 1 Zylinder + 2 Kegel',
     columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'chamfer', r: 0.5 })],
-    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2, col: 0 },
     expect: { mode: 'skip', arcsOff: 12 },
   },
   {
     id: 'p5', extra: true, file: 'v2_x_bogen_taschenecke',
-    desc: 'Platte 30×20×5 (scharf), Tasche 12×8 Tiefe 1 von oben, Kontur mit senkrechten Eckrundungen r=0.3 (6 Seg.) — vier Bogen-Flächen an den Taschenecken',
+    desc: 'Platte 30×20×5 (scharf), Tasche 12×8 Tiefe 1 von oben, Kontur mit senkrechten Eckrundungen r=0.3 (6 Seg.) — vier Bogen-Flächen an den Taschenecken. KEINE Biegung (kein koaxialer Gegenbogen) → die vier Ecken werden im AN-Lauf wie bisher geschärft',
     columns: [
       { name: 'platte', profile: rectProfile(0, 0, 30, 20), z0: 0, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
       { name: 'tasche', profile: roundedRectProfile(12, 8, 0.3, 6).map(([x, y]) => [x + 9, y + 6]).reverse(), z0: 4, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
@@ -1094,13 +1096,16 @@ export const BODIES = [
       { up: false, outer: { c: 0, end: 'bottom' }, holes: [] },
       { up: true, outer: { c: 1, end: 'bottom', rev: true }, holes: [] }, // Taschenboden (z=4)
     ],
-    expect: { mode: 'skip', arcsOff: 4, anFree: true },
+    // v1-Varianten: jede Teilmenge der vier Eckrundungen scharf (sharpenCorners); Ziel = alle vier.
+    // Die Kontur hat 4 Bögen × 7 Punkte (roundedRectProfile(…, 6) → je Bogen 6 Segmente + Startpunkt).
+    cornerVariants: { col: 1, corners: [0, 1, 2, 3].map((k) => [k * 7, k * 7 + 6]), kind: 'v2' },
+    expect: { mode: 'sharp', arcsOff: 4 },
   },
   {
     id: 'p6', extra: true, file: 'v2_x_bogen_s_fase_gedreht',
     desc: 'wie (p4), schräg im Raum gedreht (20°/35°/10°) und verschoben — die Bögen stehen schräg, die Kegel der Fase ebenso',
     columns: [plate(sheetZProfile(15, 20, 2, 3, 8), 17, { kind: 'chamfer', r: 0.5 })],
-    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2 },
+    bends: { pts: sheetZRaw(15, 20, 2), radii: sheetZRadii(3, 2), t: 2, col: 0 },
     transform: { rot: [20, 35, 10], t: [50, -20, 7] },
     expect: { mode: 'skip', arcsOff: 12 },
   },

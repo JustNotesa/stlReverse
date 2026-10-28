@@ -5,10 +5,12 @@
 // prüfen: Volumen (Divergenzsatz über das occt-Netz), Schnittflächen auf mehreren Höhen,
 // Bounding-Box und Abstand jedes STEP-Punkts zur Soll-Oberfläche.
 //
-// Drei Exporte je Körper:
+// Drei Exporte je Körper (vier für Körper mit `bends`):
 //   AUS  — defeature:false (Basislinie: muss das Netz exakt wiedergeben)
 //   AN   — defeature:true, volle Pipeline (Bohrungen/v1/v2 + globaler Fallback)
 //   v2   — defeature:true, Primitive entfernt → v2 (defeatureBands) ISOLIERT, ohne Bohrungs-/v1-Pfad
+//   AN+B — wie AN, zusätzlich sharpenBends:true (Blech-Biegungen schärfen) — nur für Körper mit
+//          `bends` (p1–p4, p6): dort müssen die Biegungen scharf werden (Soll = Rohprofil).
 // Der v2-Lauf macht sichtbar, wenn der globale Fallback ein korrektes v2-Ergebnis verwirft, weil
 // ein ANDERER Schritt die Hülle öffnet (AN: alles facettiert, v2 allein: Bänder wasserdicht).
 //
@@ -34,11 +36,14 @@
 // Passt eine Variante, die nicht das Ziel ist (Rundung bleibt, obwohl v2 schärfen sollte) →
 // Hinweis „Ziel verfehlt“ (sicher, aber nicht defeaturet).
 //
-// Körper mit `expect.anFree` (Blech-Biegungen p1–p3, Taschenecke p5): im AN-Lauf schärfen v1/v2 die
-// Biegungen bzw. die Taschenecken (bestehendes Verhalten, hier nicht Teil der Prüfung) → für AN und
-// v2-isoliert KEINE Varianten-Zuordnung, nur die universellen Pflichten (dicht, occt, strikt) plus
-// der Hinweis „AN/v2: freie Entrundung (Bögen nur AUS geprüft)“. AUS bleibt voll geprüft
-// (Bogen-Flächen `arcsOff`, Volumen).
+// Blech-Biegungen (p1–p4, p6 mit `bends`): im AN-Lauf (Schalter „Blech-Biegungen schärfen“ AUS)
+// bleiben die Biegungen RUND → Soll = „Rundung bleibt“ mit den Bögen als Teil-Zylinder (Bogen-Flächen
+// wie im AUS-Export, Volumen = Netz). Der Zusatz-Lauf AN+B (sharpenBends: true) muss sie SCHARF machen
+// → Soll = das scharfe Rohprofil (`bends.pts`, Volumen = polyArea × Höhe). Der v2-isoliert-Lauf kennt
+// keine Primitive (keine Biegungs-Erkennung) → dort frei (nur die universellen Pflichten).
+// Taschenecken (p5, KEINE Biegung): die vier Ecken werden im AN-Lauf wie bisher geschärft → Soll =
+// „4 von 4 Eckrundungen scharf“ (`cornerVariants`). AUS bleibt voll geprüft (Bogen-Flächen `arcsOff`,
+// Volumen).
 //
 // Aufruf:  node tests/fixtures-v2/check.mjs [--only a,b,...] [--json] [--quick]
 //          --quick: ohne Zusatz-/Stresskörper (nur a–i)
@@ -250,16 +255,17 @@ function variantsFor(body, vMeshParsed, heavy) {
       target: body.expect.mode === 'sharp' ? m === all : m === 0,
     });
   }
-  // v1 an senkrechten Eckrundungen (body.cornerVariants, Körper ohne Deck-Rundungen): jede Teilmenge der
+  // v1/v2 an senkrechten Eckrundungen (body.cornerVariants, Körper ohne Deck-Rundungen): jede Teilmenge der
   // Ecken scharf (Schnittpunkt der angrenzenden Kanten, s. gen.mjs sharpenCorners); Ziel = alle Ecken.
+  // sharpMax = Zahl der Ecken: je Ecke entfernt der Exporter EIN Band (v2) bzw. eine Verrundung (v1).
   if (body.cornerVariants) {
-    const { col, corners } = body.cornerVariants;
+    const { col, corners, kind } = body.cornerVariants;
     for (const v of vs) v.target = false;
     for (let m = 1; m < (1 << corners.length); m++) {
       const sel = corners.filter((_, i) => m & (1 << i));
       const bodyC = { ...body, columns: body.columns.map((c, i) => (i === col ? { ...c, profile: sharpenCorners(c.profile, sel) } : c)) };
       const tris = f32(buildMesh(bodyC));
-      vs.push({ label: `${sel.length} von ${corners.length} Eckrundungen scharf (v1)`, sharpCount: 0, planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: sel.length === corners.length });
+      vs.push({ label: `${sel.length} von ${corners.length} Eckrundungen scharf (${kind || 'v1'})`, sharpCount: 0, sharpMax: corners.length, planar: true, tris, volume: meshVolume(tris), tol: tolPlanar, target: sel.length === corners.length });
     }
   }
   // v2b (seit 2026-10-24): nach den Deck-Bändern werden auch die senkrechten Profil-Eckrundungen
@@ -272,6 +278,23 @@ function variantsFor(body, vMeshParsed, heavy) {
     }
   }
   return vs;
+}
+
+// Soll-Variante „Blech-Biegungen schärfen“ (AN+B): das scharfe Rohprofil eines Blechprofils —
+// bends.pts sind die Rohpunkte VOR der Rundung (gen.mjs: sheetLRaw/sheetURaw/sheetZRaw). Volumen =
+// polyArea(bends.pts) × Höhe (scharfes Profil = Fläche × Höhe), Netz = Körper mit dieser Kontur.
+function bendsSharpVariant(body) {
+  if (!body.bends) return null;
+  const col = body.bends.col ?? 0;
+  const c = body.columns[col];
+  if (!c) return null;
+  const raw = body.bends.pts.map((p) => [p[0], p[1]]);
+  const bodyC = { ...body, columns: body.columns.map((cc, i) => (i === col ? { ...cc, profile: raw } : cc)) };
+  const tris = f32(buildMesh(bodyC));
+  return {
+    label: 'Blech-Biegungen scharf (Rohprofil)', sharpCount: 0, sharpMax: 0, planar: true, tris,
+    volume: Math.abs(polyArea(raw)) * (c.z1 - c.z0), tol: tolPlanar, target: true,
+  };
 }
 
 // Konvexe Außenmäntel (exporters.js, Mantel-Pfad): die Außenwand einer kreisrunden Säule wird
@@ -634,11 +657,12 @@ function matchVariants(r, vs, ctx) {
 }
 
 async function checkBody(body, occt) {
-  // anFree: der AN-/v2-Lauf darf frei entrunden (v1/v2 schärfen dort Biegungen/Ecken) → für AN und
-  // v2-isoliert KEINE Varianten-Zuordnung, nur die universellen Pflichten (dicht, occt, strikt).
-  // AUS bleibt voll geprüft (Bogen-Flächen, Volumen).
-  const anFree = !!body.expect.anFree;
-  const out = { id: body.id, file: body.file, desc: body.desc, expect: body.expect.mode, anFree, problems: [], notes: [] };
+  // Körper mit `bends` (Blechprofil mit Biege-Bögen): der AN-Lauf muss die Biegungen RUND lassen
+  // (Soll-Variante „Rundung bleibt“, Bögen als Teil-Zylinder) — der Zusatz-Lauf AN+B
+  // (sharpenBends: true) muss sie SCHARF machen (Soll = Rohprofil). Der v2-isoliert-Lauf kennt
+  // keine Primitive (keine Biegungs-Erkennung) → dort frei.
+  const hasBends = !!body.bends;
+  const out = { id: body.id, file: body.file, desc: body.desc, expect: body.expect.mode, hasBends, problems: [], notes: [] };
   const tris = buildMesh(body);
   const man = checkManifold(tris);
   out.tris = tris.length;
@@ -658,9 +682,9 @@ async function checkBody(body, occt) {
   // v2 isoliert: Gruppen-Kopien ohne Primitive → kein Bohrungs-/v1-Pfad, nur defeatureBands
   const groupsIso = groups.map((g) => ({ ...g, primitive: undefined }));
 
-  const run = (defeature, gs) => {
+  const run = (defeature, gs, extra = {}) => {
     const t0 = performance.now();
-    const res = buildVolumeStepBrepV2({ normalGroups: gs, defeature });
+    const res = buildVolumeStepBrepV2({ normalGroups: gs, defeature, ...extra });
     const exportMs = performance.now() - t0;
     if (!res) return { exported: false, exportMs };
     const r = res.report;
@@ -670,6 +694,7 @@ async function checkBody(body, occt) {
       exported: true, exportMs, faces: r.faceCount, watertight: r.watertight,
       boundaryEdges: r.boundaryEdges, nonManifoldEdges: r.nonManifoldEdges, orientationDefects: r.orientationDefects,
       bores: r.boresConverted, fillets: r.filletsDefeatured ?? 0, bands: r.bandsDefeatured ?? 0, fallbackStage: r.fallbackStage,
+      corners: r.cornersDefeatured ?? 0, coneBands: r.coneBandsDefeatured ?? 0, bendsKept: r.bendsKept ?? 0,
       cyl: (res.step.match(/CYLINDRICAL_SURFACE\(/g) || []).length,
       cones: (res.step.match(/CONICAL_SURFACE\(/g) || []).length,
       // Bogen-Flächen des Exporters (Profil-Bögen → Teil-Zylinder/-Kegel): arcCylinders/arcCones
@@ -685,12 +710,17 @@ async function checkBody(body, occt) {
   };
   const off = run(false, groups);
   const on = run(true, groups);
+  // AN + Biegungen schärfen (Schalter „Blech-Biegungen schärfen“): die Biegungen werden wie bisher
+  // geschärft (Soll = Rohprofil). Nur für Körper mit Biegungen sinnvoll.
+  const onB = hasBends ? run(true, groups, { sharpenBends: true }) : null;
   const iso = run(true, groupsIso);
-  const strip = (r) => ({ ...r, otris: undefined, step: undefined });
+  const strip = (r) => (r ? { ...r, otris: undefined, step: undefined } : null);
   out.off = strip(off); out.on = strip(on); out.iso = strip(iso);
+  if (onB) out.onB = strip(onB);
 
   // ── Universelle Pflichten ──
-  for (const [tag, r] of [['AUS', off], ['AN', on], ['v2', iso]]) {
+  for (const [tag, r] of [['AUS', off], ['AN', on], ['AN+B', onB], ['v2', iso]]) {
+    if (!r) continue;
     if (!r.exported) { out.problems.push(`${tag}: Export lieferte null`); continue; }
     if (!r.watertight) out.problems.push(`${tag}: nicht wasserdicht (Rand ${r.boundaryEdges}, non-manifold ${r.nonManifoldEdges}, Orientierung ${r.orientationDefects})`);
     if (r.orientationDefects) out.problems.push(`${tag}: ${r.orientationDefects} Orientierungsfehler`);
@@ -700,14 +730,20 @@ async function checkBody(body, occt) {
   }
   const limit = Math.max(EXPORT_LIMIT_MS, 3 * (off.exportMs || 0));
   if (on.exported && on.exportMs > limit) out.problems.push(`AN: Export ${Math.round(on.exportMs)} ms > ${Math.round(limit)} ms`);
-  if (!anFree && body.expect.mode === 'skip' && (on.bands || iso.bands)) out.problems.push(`v2 hat ${Math.max(on.bands, iso.bands)} Band/Bänder entfernt, Soll ist Überspringen`);
+  // „Soll ist Überspringen“: im v2-isoliert-Lauf zählen die Bänder einer Blech-Biegung nicht — ohne
+  // Primitive gibt es keine Biegungs-Erkennung, der Lauf schärft sie (dort frei, s. u.).
+  const isoBands = hasBends ? 0 : iso.bands;
+  if (body.expect.mode === 'skip' && (on.bands || isoBands)) out.problems.push(`v2 hat ${Math.max(on.bands, isoBands)} Band/Bänder entfernt, Soll ist Überspringen`);
   // v1-Soll (Anzahl entfernter Kanten-Verrundungen): weniger = Rückfall/Fehlschlag, mehr = unerwartet
   if (body.expect.fillets !== undefined && on.exported && on.fillets !== body.expect.fillets) out.problems.push(`AN: v1 entfernt ${on.fillets} Verrundung(en), Soll ${body.expect.fillets} (fallbackStage ${on.fallbackStage})`);
   // Soll-Bohrungszahl: die Bohrung muss umgewandelt werden (Zylinder + Kegel) — sonst Orientierungs-
   // fehler (Mündungs-Kegel über Kreuz dem falschen Rand zugeordnet → alles facettiert).
   if (body.expect.bores !== undefined && on.exported && on.bores !== body.expect.bores) out.problems.push(`AN: ${on.bores} Bohrung(en) umgewandelt, Soll ${body.expect.bores} (fallbackStage ${on.fallbackStage})`);
-  // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert
-  if (iso.watertight && iso.bands > 0 && on.bands === 0 && on.bores === 0 && on.fillets === 0) {
+  // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert.
+  // Bei Körpern mit Biegungen darf das nicht gemeldet werden: der isolierte Lauf kennt keine
+  // Primitive (keine Biegungs-Erkennung) und schärft die Biegung deshalb — der AN-Lauf lässt sie
+  // per Default rund.
+  if (!hasBends && iso.watertight && iso.bands > 0 && on.bands === 0 && on.bores === 0 && on.fillets === 0) {
     out.problems.push(`Fallback verwirft v2: v2 allein entfernt ${iso.bands} Band/Bänder wasserdicht, volle Pipeline liefert alles facettiert (Ursache außerhalb defeatureBands: ein anderer Schritt öffnet die Hülle → globaler Fallback)`);
   }
 
@@ -735,14 +771,29 @@ async function checkBody(body, occt) {
   if (body.expect.arcsOff !== undefined && off.exported && (off.arcCyl + off.arcCones) < body.expect.arcsOff) {
     out.problems.push(`AUS: ${off.arcCyl + off.arcCones} Bogen-Flächen, Soll ≥ ${body.expect.arcsOff}`);
   }
+  // Biegungen bleiben rund (AN, Schalter AUS): die Profil-Bögen müssen auch im AN-Export als echte
+  // Teil-Zylinder/-Kegel dastehen (nicht geschärft sein).
+  if (hasBends && body.expect.arcsOff !== undefined && on.exported && (on.arcCyl + on.arcCones) < body.expect.arcsOff) {
+    out.problems.push(`AN: ${on.arcCyl + on.arcCones} Bogen-Flächen, Soll ≥ ${body.expect.arcsOff} (Biegungen müssen rund bleiben)`);
+  }
 
-  // ── AN und v2 isoliert je einer zulässigen Variante zuordnen ──
+  // ── AN, AN+B und v2 isoliert je einer zulässigen Variante zuordnen ──
   const planarVs = variantsFor(body, vMesh, heavy);
   const ctx = { heights, inv, heavy };
-  for (const [tag, r] of [['AN', on], ['v2', iso]]) {
-    if (!(r.exported && r.occt && r.otris.length)) continue;
-    if (anFree) { out[tag === 'AN' ? 'onMatch' : 'isoMatch'] = { match: null, tier: null, target: false }; continue; }
+  const MATCH_KEY = { 'AN': 'onMatch', 'AN+B': 'onBMatch', 'v2': 'isoMatch' };
+  for (const [tag, r] of [['AN', on], ['AN+B', onB], ['v2', iso]]) {
+    if (!r || !(r.exported && r.occt && r.otris.length)) continue;
+    if (tag === 'v2' && hasBends) {
+      // v2 isoliert: die Gruppen-Kopien tragen keine Primitive → keine Biegungs-Erkennung → der
+      // Lauf schärft die Biegungen (anders als der AN-Lauf). Frei, nur die Pflichten oben.
+      out.isoMatch = { match: null, tier: null, target: false };
+      out.isoFree = true;
+      out.notes.push('v2 isoliert: ohne Primitive keine Biegungs-Erkennung, frei');
+      continue;
+    }
     const vs = planarVs.slice();
+    // Soll-Variante der geschärften Biegung: das scharfe Rohprofil (bends.pts), Volumen = Fläche × Höhe
+    if (tag !== 'v2') { const bs = bendsSharpVariant(body); if (bs) vs.push(bs); }
     if (tag === 'AN' && body.boreChamfer) {
       vs.push(boreSharpVariant(body, body.boreChamfer, r.step, roundedPairs(body).length));
       for (const b of body.boreChamfer) vs.push(boreVariant(body, b, r.step, roundedPairs(body).filter((p) => p.c !== b.col).length));
@@ -757,7 +808,7 @@ async function checkBody(body, occt) {
     if (tag === 'AN' && body.holes) vs.push(holesVariant(body, r.step, roundedPairs(body).length));
     const m = matchVariants(r, vs, ctx);
     const res = { match: m.hit ? m.hit.label : null, tier: m.tier, target: m.hit ? m.hit.target : false, dV: m.dV, maxDist: m.maxDist };
-    out[tag === 'AN' ? 'onMatch' : 'isoMatch'] = res;
+    out[MATCH_KEY[tag]] = res;
     if (tag === 'AN') {
       const main = m.hit || vs.find((v) => v.target) || vs[0];
       out.vSoll = main.volume;
@@ -773,7 +824,6 @@ async function checkBody(body, occt) {
       if (!m.hit.target) out.notes.push(`${tag}: sicher, aber Ziel verfehlt: „${m.hit.label}” (bands=${r.bands}, fillets=${r.fillets})`);
     }
   }
-  if (anFree) out.notes.push('AN/v2: freie Entrundung (Bögen nur AUS geprüft)');
   return out;
 }
 
@@ -811,12 +861,13 @@ if (asJson) {
   const tierTxt = (m, free) => (free ? 'frei' : !m ? '-' : !m.match ? 'FALSCH' : m.tier === 'toleranz' ? '≤0.01' : m.tier === 'bogen' ? 'bogen' : 'exakt');
   // Bogen-Flächen (Teil-Zylinder + Teil-Kegel aus den Profil-Bögen) je Export
   const arcTxt = (r) => `${String(r.arcCyl ?? 0).padStart(2)}+${String(r.arcCones ?? 0).padStart(2)}`;
-  origLog('id     Soll  tris  | AN: bands fil bore cone  wt   faces(AN/AUS) | Bögen AN/AUS | v2 allein: bands wt  geom  |  V_soll      V_STEP(AN)    ΔV     | recog exp-AN exp-AUS ms | Ergebnis');
+  origLog('id     Soll  tris  | AN: bands fil bore cone  wt   faces(AN/AUS) | Bögen AN/AUS | AN+B: bands fil wt geom | v2 allein: bands wt  geom  |  V_soll      V_STEP(AN)    ΔV     | recog exp-AN exp-AUS ms | Ergebnis');
   for (const r of results) {
-    const on = r.on || {}, off = r.off || {}, iso = r.iso || {};
+    const on = r.on || {}, off = r.off || {}, iso = r.iso || {}, onB = r.onB || {};
     const verdict = r.problems.length ? 'VERLETZT' : r.notes.length ? 'OK*' : 'OK';
+    const bTxt = r.onB ? `${String(onB.bands ?? '-').padStart(5)} ${String(onB.fillets ?? '-').padStart(3)} ${String(onB.watertight).padEnd(5)} ${tierTxt(r.onBMatch, false).padEnd(6)}` : '    -   -    -    -   ';
     origLog(
-      `${r.id.padEnd(6)} ${String(r.expect || '').padEnd(5)} ${String(r.tris ?? '-').padStart(5)} |    ${String(on.bands ?? '-').padStart(5)} ${String(on.fillets ?? '-').padStart(3)} ${String(on.bores ?? '-').padStart(4)} ${String(on.cones ?? '-').padStart(4)}  ${String(on.watertight).padEnd(5)} ${String(on.faces ?? '-').padStart(5)}/${String(off.faces ?? '-').padEnd(6)} | ${arcTxt(on)}/${arcTxt(off)} |       ${String(iso.bands ?? '-').padStart(5)} ${String(iso.watertight).padEnd(5)} ${tierTxt(r.isoMatch, r.anFree).padEnd(6)} | ${f(r.vSoll, 3).padStart(11)} ${f(on.volume, 3).padStart(11)} ${f(on.volume - r.vSoll, 3).padStart(9)} | ${f(r.recogMs, 0).padStart(5)} ${f(on.exportMs, 0).padStart(6)} ${f(off.exportMs, 0).padStart(7)}    | ${verdict}${r.onMatch?.match ? ' – ' + r.onMatch.match + (r.onMatch.tier === 'toleranz' ? ' (≤0.01 mm)' : r.onMatch.tier === 'bogen' ? ' (Bögen exakt)' : '') : ''}`);
+      `${r.id.padEnd(6)} ${String(r.expect || '').padEnd(5)} ${String(r.tris ?? '-').padStart(5)} |    ${String(on.bands ?? '-').padStart(5)} ${String(on.fillets ?? '-').padStart(3)} ${String(on.bores ?? '-').padStart(4)} ${String(on.cones ?? '-').padStart(4)}  ${String(on.watertight).padEnd(5)} ${String(on.faces ?? '-').padStart(5)}/${String(off.faces ?? '-').padEnd(6)} | ${arcTxt(on)}/${arcTxt(off)} |${bTxt} |       ${String(iso.bands ?? '-').padStart(5)} ${String(iso.watertight).padEnd(5)} ${tierTxt(r.isoMatch, r.isoFree).padEnd(6)} | ${f(r.vSoll, 3).padStart(11)} ${f(on.volume, 3).padStart(11)} ${f(on.volume - r.vSoll, 3).padStart(9)} | ${f(r.recogMs, 0).padStart(5)} ${f(on.exportMs, 0).padStart(6)} ${f(off.exportMs, 0).padStart(7)}    | ${verdict}${r.onMatch?.match ? ' – ' + r.onMatch.match + (r.onMatch.tier === 'toleranz' ? ' (≤0.01 mm)' : r.onMatch.tier === 'bogen' ? ' (Bögen exakt)' : '') : ''}${r.onBMatch?.match ? ' | AN+B: ' + r.onBMatch.match : ''}`);
   }
   for (const r of results) {
     if (!r.sections || !(r.problems.length || r.id.startsWith('g'))) continue;
