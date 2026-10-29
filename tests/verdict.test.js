@@ -263,6 +263,41 @@ describe('verdict.js', () => {
     });
   });
 
+  describe('buildVerdict – am Lochrand/Mantel übernommene Rundungen', () => {
+    // Wascher mit verrundetem Lochrand: die Rundungsbänder gehen in der Bohrungs-/Mantel-
+    // Umwandlung auf (Chamfer-Zone) — der Export meldet das als `rimFilletsAbsorbed`.
+    const rimReport = (extra) => ({
+      watertight: true,
+      faceCount: 6,
+      edgeCount: 12,
+      bandsDefeatured: 0,
+      cornersDefeatured: 0,
+      filletsDefeatured: 0,
+      ...extra
+    });
+
+    test('(a) rimFilletsAbsorbed zählt als entfernt (Kachel: „6 entfernt“)', () => {
+      const v = buildVerdict(rimReport({ rimFilletsAbsorbed: 6 }), null, { defeature: true });
+      expect(v.roundsRemoved).toBe(6);
+      expect(v.filletsRemoved).toBe(6);
+      expect(v.converted.some((c) => c.includes('6 Randbänder (Rundung/Fase) am Loch/Mantel übernommen'))).toBe(true);
+    });
+
+    test('(b) ohne das Feld bleibt der Zähler 0', () => {
+      const v = buildVerdict(rimReport(), null);
+      expect(v.roundsRemoved).toBe(0);
+      expect(v.filletsRemoved).toBe(0);
+      expect(v.converted.some((c) => c.includes('Lochrand/Mantel'))).toBe(false);
+    });
+
+    test('(c) rawText und rawDetail bleiben mit und ohne das Feld gleich', () => {
+      const ohne = buildVerdict(rimReport(), null);
+      const mit = buildVerdict(rimReport({ rimFilletsAbsorbed: 6 }), null);
+      expect(mit.rawText).toBe(ohne.rawText);
+      expect(mit.rawDetail).toBe(ohne.rawDetail);
+    });
+  });
+
   describe('buildVerdict – überwiegend facettiert', () => {
     const analysisTri = (triangles) => ({ meta: { triangles } });
 
