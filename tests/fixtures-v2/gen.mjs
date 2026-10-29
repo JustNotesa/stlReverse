@@ -111,6 +111,15 @@ export const sharpenCorners = (pts, ranges) => {
 };
 
 export const polyArea = (pts) => { let s = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; s += p[0] * q[1] - q[0] * p[1]; } return s / 2; };
+// Halbring-Profil (C-Form): Außenbogen Ro, Innenbogen Ri (konzentrisch) über den Winkelbereich
+// [a0Deg, a1Deg] (CCW), geschlossen durch die beiden radialen Endkanten; seg Segmente je Bogen.
+// CCW (Material links) — der Bogen liegt links der Laufrichtung.
+export const halfRingProfile = (cx, cy, Ro, Ri, a0Deg, a1Deg, seg) => {
+  const a0 = a0Deg * PI / 180, a1 = a1Deg * PI / 180, pts = [];
+  for (let k = 0; k <= seg; k++) { const a = a0 + (a1 - a0) * k / seg; pts.push([cx + Ro * Math.cos(a), cy + Ro * Math.sin(a)]); }
+  for (let k = 0; k <= seg; k++) { const a = a1 + (a0 - a1) * k / seg; pts.push([cx + Ri * Math.cos(a), cy + Ri * Math.sin(a)]); }
+  return pts;
+};
 
 // ── Profil-Eckrundungen (echte Bögen im Profil) ─────────────────────────────
 // filletInfo: je Ecke der Bogen (Radius r, Mittelpunkt C, Öffnungswinkel phi = Drehwinkel der
@@ -360,10 +369,92 @@ function earClip(poly) {
   tris.push(idx.map((i) => poly[i]));
   return tris;
 }
+// ── Pinch: Ränder, die sich in EINER Ecke berühren ──────────────────────────
+// Zwei Löcher, die sich in einem Eckpunkt berühren (Pinch), lassen sich nicht über eine Brücke
+// verbinden: die Brücke wäre entartet (Länge 0) und das Ear-Clipping scheitert am Schlitz.
+// Stattdessen wird der Berührpunkt AUFSGESCHNITTEN: das Dreieck (v, A, B) — A/B sind die
+// Nachbarn von v auf den beiden Rändern — wird zum Loch (die beiden Löcher verschmelzen zu
+// einem simplen Ring: normale Brücke + Ear-Clipping) und NACH der Triangulierung als Dreieck
+// wieder eingesetzt. Die Ränder berühren sich danach wieder exakt in v — das Netz bleibt
+// manifold, der Export muss dort aufteilen (z1).
+const ptKey2 = (p) => `${Math.round(p[0] * 1e6)},${Math.round(p[1] * 1e6)}`;
+const samePt2 = (a, b) => ptKey2(a) === ptKey2(b);
+// Zwei Ränder mit gemeinsamem Eckpunkt finden (Berührung in einer Ecke)
+function findTouch(rings) {
+  const seen = new Map();                       // Punktschlüssel → erster Fund { i, k }
+  for (let i = 0; i < rings.length; i++) {
+    const r = rings[i];
+    for (let k = 0; k < r.length; k++) {
+      const key = ptKey2(r[k]);
+      const o = seen.get(key);
+      if (o && o.i !== i) return { i: o.i, j: i, vi: o.k, vj: k };
+      if (!o) seen.set(key, { i, k });
+    }
+  }
+  return null;
+}
+// Aufschneiden: die beiden berührenden Ränder zu EINEM Ring verschmelzen (Knoten v bleibt
+// erhalten). Das Aufschnitt-Dreieck (v, A, B) gehört danach zum Lochbereich und wird als
+// eigenes Dreieck zurückgegeben (es gehört zum Material, nicht zum Loch).
+function cutOpen(rings, touch, outer) {
+  const R1 = rings[touch.i], R2 = rings[touch.j];
+  const n1 = R1.length, n2 = R2.length;
+  const v = R1[touch.vi];
+  for (const da of [-1, 1]) for (const db of [-1, 1]) {
+    const A = R1[(touch.vi + da + n1) % n1], B = R2[(touch.vj + db + n2) % n2];
+    if (samePt2(A, v) || samePt2(B, v) || samePt2(A, B)) continue;
+    if (Math.abs(polyArea([v, A, B])) < 1e-12) continue;      // entartet (kollinear)
+    // Das Aufschnitt-Dreieck muss im Material liegen (nicht in/über einem Loch)
+    const c = [(v[0] + A[0] + B[0]) / 3, (v[1] + A[1] + B[1]) / 3];
+    if (!pointInPoly(c, outer)) continue;
+    if (rings.some((r) => pointInPoly(c, r))) continue;
+    let bad = false;
+    for (const r of rings) {
+      for (let k = 0; k < r.length && !bad; k++) {
+        const e1 = r[k], e2 = r[(k + 1) % r.length];
+        for (const [p, q] of [[v, A], [A, B], [B, v]]) {
+          if (samePt2(p, e1) || samePt2(p, e2) || samePt2(q, e1) || samePt2(q, e2)) continue;
+          if (segCross(p, q, e1, e2)) { bad = true; break; }
+        }
+      }
+      if (bad) break;
+    }
+    if (bad) continue;
+    // Verschmelzen: Ring1 von A über den Umweg zu v, dann Ring2 von v über den Umweg zu B —
+    // die Sehne (B→A) schließt den Ring (der Knoten v kommt nur einmal vor). Beide Ketten
+    // folgen der Wicklung des jeweiligen Rings (Löcher sind im Uhrzeigersinn).
+    const merged = [];
+    for (let k = 0; k < n1; k++) merged.push(R1[(touch.vi + da * (k + 1) + n1 * 2) % n1]);
+    for (let k = 1; k < n2; k++) merged.push(R2[(touch.vj - db * k + n2 * 2) % n2]);
+    // Der verschmolzene Ring muss DIESELBE Wicklung haben wie die beiden Lochränder (beide CW):
+    // sonst läuft ein Kettenstück gegen die Wicklung, der Ring wäre kein Loch mehr (die Brücke
+    // entartet, das Netz wird nicht manifold).
+    if (Math.sign(polyArea(merged)) !== Math.sign(polyArea(R1))) continue;
+    // Dreieck (v, A, B): es füllt den aufgeschnittenen Spalt wieder auf (die Kante A–B wird
+    // von beiden Seiten gegenteilig benutzt → das Netz bleibt manifold)
+    const tri = [v, A, B];
+    const out = rings.slice();
+    out[touch.i] = merged;
+    out.splice(touch.j, 1);
+    return { rings: out, tri };
+  }
+  return null;
+}
 export function triangulateWithHoles(outer, holes) {
   let poly = outer.slice();
+  let rings = holes.slice();
+  const notchTris = [];
+  // Berührende Ränder aufschneiden (Pinch) — danach sind alle Löcher einfach getrennt
+  for (let guard = 0; guard < 8; guard++) {
+    const touch = findTouch(rings);
+    if (!touch) break;
+    const cut = cutOpen(rings, touch, outer);
+    if (!cut) break;                          // Aufschneiden nicht möglich → normale Brücke
+    rings = cut.rings;
+    notchTris.push(cut.tri);
+  }
   const maxX = (h) => Math.max(...h.map((p) => p[0]));
-  const rest = holes.slice().sort((a, b) => maxX(b) - maxX(a));
+  const rest = rings.slice().sort((a, b) => maxX(b) - maxX(a));
   while (rest.length) {
     const h = rest.shift();
     let mi = 0; for (let i = 1; i < h.length; i++) if (h[i][0] > h[mi][0]) mi = i;
@@ -389,7 +480,7 @@ export function triangulateWithHoles(outer, holes) {
     const hr = h.slice(mi).concat(h.slice(0, mi));
     poly = poly.slice(0, bi + 1).concat(hr, [M, poly[bi]], poly.slice(bi + 1));
   }
-  return earClip(poly);
+  return earClip(poly).concat(notchTris);
 }
 
 // ── Körper bauen ────────────────────────────────────────────────────────────
@@ -1324,6 +1415,32 @@ export const BODIES = [
       { col: 2, R: 3, seg: 32, kind: 'tip', tipDeg: 118 },
       { col: 3, R: 2.5, seg: 32, kind: 'through' },
     ],
+  },
+  // ── PINCH: zwei Löcher EINER Deckfläche berühren sich in genau EINER Ecke ────
+  // Die Deckfläche z=3 der Platte hat zwei Löcher, die sich im Punkt (12; 18.5) berühren: der
+  // Fußabdruck des halbringenförmigen Zapfens (Außenbogen R3.5, Innenbogen R2.5 um (12;15),
+  // Winkel 90°…270°, 24 Seg. je Bogen) und das Rechteck-Taschenloch [12;18.5]–[14;20.5] (Tiefe 1,
+  // z 2…3). Ränder, die sich in einer Ecke berühren, kann occt nicht triangulieren → der Exporter
+  // darf dort KEINE Fläche mit berührenden Rändern emittieren (sonst fehlt die Deckfläche im STEP).
+  // Vorher wurde die ganze Deckfläche als Einzel-Dreiecke ausgegeben (Hunderte Flächen) — jetzt
+  // werden nur die Dreiecke um den Berührpunkt abgetrennt, der Rest bleibt EINE Fläche; dadurch
+  // bleiben auch die Bogen-Bänder des Zapfens bestätigt (Teil-Zylinder statt Facetten).
+  {
+    id: 'z1', extra: true, file: 'v2_x_boden_pinch',
+    desc: 'Platte 40×30×3 (Kanten scharf), oben ein halbringenförmiger Zapfen (Außenbogen R3.5, Innenbogen R2.5 um (12;15), Winkel 90°…270°, 24 Seg. je Bogen, Höhe 3) und eine Rechteck-Tasche 2×2 (Tiefe 1) bei [12;18.5]–[14;20.5] — beide Löcher berühren sich im Punkt (12;18.5;3): die Deckfläche darf nur getrennt an dieser Ecke ausgegeben werden (keine Fläche mit berührenden Rändern — occt trianguliert sie nicht)',
+    columns: [
+      { name: 'platte', profile: rectProfile(0, 0, 40, 30), z0: 0, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'zapfen', profile: halfRingProfile(12, 15, 3.5, 2.5, 90, 270, 24), z0: 3, z1: 6, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'tasche', profile: rectProfile(12, 18.5, 2, 2).reverse(), z0: 2, z1: 3, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+    ],
+    caps: [
+      // Das Loch des Zapfens muss wie ein Loch gewickelt sein (CW) — sein Profil ist CCW
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'bottom', rev: true }, { c: 2, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [] },
+      { up: true, outer: { c: 1, end: 'top' }, holes: [] },                            // Zapfen-Deckfläche (z=6)
+      { up: true, outer: { c: 2, end: 'bottom', rev: true }, holes: [] },              // Taschenboden (z=2)
+    ],
+    expect: { mode: 'skip', arcsOff: 2, arcsOn: 2, maxFaces: 20 },
   },
 ];
 

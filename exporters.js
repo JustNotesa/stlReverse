@@ -966,11 +966,140 @@ export function buildVolumeStepBrepV2(analysis) {
     return faces;
   };
 
+  // PINCH: Zwei Ränder EINER Fläche berühren sich in genau EINER Ecke (Loch an Loch, Loch am
+  // Außenrand). Solche Flächen sind gültige STEP-Topologie, occt (Panel 4, FreeCAD) trianguliert
+  // sie aber nicht (dino: eine 91-mm²-Fläche fehlte). Bisher wurde darum die GANZE Fläche als
+  // Einzeldreiecke ausgegeben (Kabelhalter-Boden: 2764 Dreiecke → 2764 Flächen) — damit verlor der
+  // Bogen-Pfad (profile-arcs.js) den Deckflächen-Rand und ALLE Profil-Bögen blieben facettiert.
+  // Jetzt: die Dreiecke um den Berührpunkt werden abgetrennt, der Rest bleibt EINE Fläche; die
+  // abgetrennten Keile werden nach Möglichkeit wieder mit dem Rest verschmolzen (s. d) — sonst
+  // zerfielen die Bögen (Kreisbögen) der angrenzenden Wände in Teilstücke.
+  // depth = Anzahl der Aufteilungen (ab 3 → Einzeldreiecke = garantiert gültige Ausgabe).
+  const splitAtPinches = (verts, tris, normal, opts = {}, depth = 0) => {
+    if (depth >= 3) return trianglesAsFaces(verts, tris, normal);        // Notfall (alte Ausgabe)
+    const { directed = false, minFace = MIN_FACE_AREA, minHole = MIN_HOLE_AREA } = opts;
+    // (a) Berühr-Ecken: Punkte, die in MEHREREN Rändern derselben Fläche vorkommen
+    const P = new Set();
+    const bEdges = boundaryEdgesOf(verts, tris);
+    const dLoops = bEdges.length >= 3 ? chainDirected(bEdges) : null;
+    const dFaces = dLoops && dLoops.length ? facesFromDirectedLoops(dLoops, normal, minFace, minHole) : null;
+    for (const fd of dFaces || []) {
+      const seen = new Map(), ls = [fd.outer, ...fd.inner];
+      for (let li = 0; li < ls.length; li++) for (const p of ls[li]) {
+        const k = vtxKey(p), o = seen.get(k);
+        if (o !== undefined && o !== li) P.add(k);
+        seen.set(k, li);
+      }
+    }
+    if (!P.size) return trianglesAsFaces(verts, tris, normal);
+    // (b) Stern um die Berühr-Ecken abtrennen, der Rest bleibt zusammen
+    const star = [], rest = [];
+    for (const t of tris) {
+      const a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+      (P.has(vtxKey(a)) || P.has(vtxKey(b)) || P.has(vtxKey(c)) ? star : rest).push(t);
+    }
+    // (c) kanten-zusammenhängende Komponenten (zwei Dreiecke hängen an einer gemeinsamen Kante)
+    const edgeComponents = (list) => {
+      const byEdge = new Map();
+      for (const t of list) {
+        const a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+        for (const [p, q] of [[a, b], [b, c], [c, a]]) { const k = edgeKeyFn(p, q); const l = byEdge.get(k); if (l) l.push(t); else byEdge.set(k, [t]); }
+      }
+      const done = new Set(), out = [];
+      for (const t of list) {
+        if (done.has(t)) continue;
+        const comp = [], queue = [t]; done.add(t);
+        while (queue.length) {
+          const cur = queue.pop(); comp.push(cur);
+          const a = verts[cur * 3], b = verts[cur * 3 + 1], c = verts[cur * 3 + 2];
+          for (const [p, q] of [[a, b], [b, c], [c, a]]) for (const nb of byEdge.get(edgeKeyFn(p, q)) || []) if (!done.has(nb)) { done.add(nb); queue.push(nb); }
+        }
+        out.push(comp);
+      }
+      return out;
+    };
+    const edgeSetOf = (list) => {
+      const s = new Set();
+      for (const t of list) {
+        const a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+        for (const [p, q] of [[a, b], [b, c], [c, a]]) s.add(edgeKeyFn(p, q));
+      }
+      return s;
+    };
+    // (d) Die Keile des Sterns zurück in den Rest schieben: das gelingt, wenn die verschmolzene
+    //     Fläche danach KEINE berührenden Ränder mehr hat (sonst wären es wieder berührende
+    //     Ränder). Zuerst die am stärksten gebundenen Keile: der Rest soll zusammenbleiben, ein
+    //     Spalt (ein Keil, der nur an EINER Kante hängt — das Material zwischen zwei Löchern)
+    //     wird abgetrennt. Sonst zerfielen die Bögen (Kreisbögen) der angrenzenden Wände in
+    //     Teilstücke, die der Bogen-Pfad (profile-arcs.js) nicht mehr bestätigen kann.
+    const wouldTouch = (set) => {                     // hätte der Satz wieder berührende Ränder?
+      const be = boundaryEdgesOf(verts, set);
+      if (be.length < 3) return false;
+      const loops = chainDirected(be);
+      // Keine gerichteten Ränder (Ränder schließen nicht) → der Satz ist unsauber → nicht
+      // verschmelzen (lieber zwei Flächen als eine mit berührenden Rändern).
+      if (!loops || !loops.length) return true;
+      const fs = facesFromDirectedLoops(loops, normal, minFace, minHole);
+      return !!fs && fs.some(loopsTouch);
+    };
+    const groups = edgeComponents(rest).map((c) => ({ bulk: c, wedges: [], edges: edgeSetOf(c) }));
+    const loose = [];
+    for (const w of edgeComponents(star)) {
+      const we = edgeSetOf(w);
+      let best = -1, bestN = 0;
+      groups.forEach((g, i) => { let n = 0; for (const k of we) if (g.edges.has(k)) n++; if (n > bestN) { bestN = n; best = i; } });
+      if (best < 0) loose.push(w); else groups[best].wedges.push({ tris: w, hang: bestN });
+    }
+    // (e) jede Gruppe (Rest + verschmolzene Keile) und jeder abgetrennte Keil wieder als Fläche
+    //     bauen (rekursiv — ein Rest-Pinch wird weiter getrennt)
+    //     Sicherheitsnetz: ein Rand, der sich selbst berührt (derselbe Punkt am Anfang und am
+    //     Ende) ist keine gültige Fläche (die Kettenspaltung an der Berühr-Ecke kann einen
+    //     offenen Rest-Rand ergeben) → dort die Einzeldreiecke (garantiert gültig).
+    const loopBroken = (fd) => {
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.length < 3) return true;
+        if (vtxKey(L[0]) === vtxKey(L[L.length - 1])) return true;
+      }
+      return false;
+    };
+    const buildGroup = (set) => {
+      const fs = facesFromTris(verts, set, normal, sub);
+      return fs.some(loopBroken) ? trianglesAsFaces(verts, set, normal) : fs;
+    };
+    const out = [];
+    const sub = { directed, minFace, minHole, keepSrc: true, pinchDepth: depth + 1 };
+    for (const g of groups) {
+      let bulk = g.bulk;
+      const sep = [];
+      for (const w of g.wedges.slice().sort((a, b) => b.hang - a.hang)) {
+        const merged = bulk.concat(w.tris);
+        if (wouldTouch(merged)) sep.push(w.tris); else bulk = merged;
+      }
+      for (const fd of buildGroup(bulk)) out.push(fd);
+      for (const w of sep) for (const fd of buildGroup(w)) out.push(fd);
+    }
+    for (const w of loose) for (const fd of buildGroup(w)) out.push(fd);
+    // (f) FALTEN: Kanten, die im Dreieckssatz ZWEIMAL vorkommen und im Netz non-manifold sind,
+    // werden nach dem Aufteilen zu Randkanten zwischen Teilflächen → eigene Kanten-Instanz.
+    const inner = new Map();
+    for (const t of tris) {
+      const a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
+      for (const [p, q] of [[a, b], [b, c], [c, a]]) { const e = edgeKeyFn(p, q); inner.set(e, (inner.get(e) || 0) + 1); }
+    }
+    const foldKeys = new Set();
+    for (const [e, c] of inner) if (c === 2 && meshEdgeValence(e) > 2) foldKeys.add(e.replace('|', '||'));   // = edgeCanonKey
+    if (foldKeys.size) {
+      const fold = { id: ++foldSeq, keys: foldKeys };
+      for (const fd of out) { if (fd.fold) for (const k of fd.fold.keys) fold.keys.add(k); fd.fold = fold; }
+    }
+    return out;
+  };
+
   // Flächen einer (kanten-zusammenhängenden) Dreiecksmenge. Jede Fläche merkt sich ihre Herkunft
   // (Dreiecke + Loop-Schnappschuss): enforcePlanarity zerlegt nur Flächen, deren Loops seither
   // unverändert sind. directed=true: immer gerichtet verketten (Teilflächen der Ebenheits-Zerlegung;
-  // die brauchen keine Herkunft: keepSrc=false).
-  const facesFromTris = (verts, tris, normal, { directed = false, minFace = MIN_FACE_AREA, minHole = MIN_HOLE_AREA, keepSrc = true } = {}) => {
+  // die brauchen keine Herkunft: keepSrc=false). pinchDepth = Anzahl der Pinch-Aufteilungen.
+  const facesFromTris = (verts, tris, normal, { directed = false, minFace = MIN_FACE_AREA, minHole = MIN_HOLE_AREA, keepSrc = true, pinchDepth = 0 } = {}) => {
     if (directed && tris.length === 1) {                      // Schnellweg: ein Dreieck = ein Loop
       const t = tris[0], a = verts[t * 3], b = verts[t * 3 + 1], c = verts[t * 3 + 2];
       if (vtxKey(a) === vtxKey(b) || vtxKey(b) === vtxKey(c) || vtxKey(a) === vtxKey(c)) return [];
@@ -984,13 +1113,16 @@ export function buildVolumeStepBrepV2(analysis) {
       if (loops && loops.length) faces = facesFromDirectedLoops(loops, normal, minFace, minHole);
       // Ränder, die sich in einer Ecke berühren, sind gültige STEP-Topologie — occt (Panel 4,
       // FreeCAD) trianguliert solche Flächen aber nicht (dino: eine 91-mm²-Fläche fehlte). Darum
-      // diese (seltenen) Dreiecksmengen als Einzeldreiecke ausgeben.
-      if (faces && faces.some(loopsTouch)) faces = trianglesAsFaces(verts, tris, normal);
+      // nur die Dreiecke um den Berührpunkt abtrennen (splitAtPinches) — der Rest der Fläche
+      // bleibt EINE Fläche (sonst verliert der Bogen-Pfad den Deckflächen-Rand).
+      if (faces && faces.some(loopsTouch)) faces = splitAtPinches(verts, tris, normal, { directed, minFace, minHole, keepSrc }, pinchDepth);
     }
     if (!faces || !faces.length) faces = facesFromUndirected(boundaryEdges, normal);
     if (keepSrc) {
       const single = faces.length === 1;
-      for (const fd of faces) fd.src = { verts, tris, single, outer: fd.outer.slice(), inner: fd.inner.map((L) => L.slice()) };
+      // Flächen aus splitAtPinches bringen ihre EIGENE Herkunft mit (pro Teilfläche) — nicht
+      // überschreiben (sonst bekämen alle Teilflächen den ganzen Dreieckssatz).
+      for (const fd of faces) if (!fd.src) fd.src = { verts, tris, single, outer: fd.outer.slice(), inner: fd.inner.map((L) => L.slice()) };
     }
     return faces;
   };
