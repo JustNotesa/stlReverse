@@ -300,4 +300,39 @@ test('f) Leistung: 50 000 Dreiecke, 20 000 Regionen < 1 s', () => {
   console.log(`   (50 000 Dreiecke / ${regions} Regionen: ${ms} ms, ${topo.chains.length} Ketten)`);
 });
 
+test('g) eine erzwungene Ecke am oberen Rand: Rand in 2 Ketten geteilt, keine geschlossen', () => {
+  const { mesh, label } = cylinderCase(24);
+  const base = buildTopology(mesh, label);
+  assert.deepEqual(checkTopology(base), []);
+  const forced = new Uint8Array(mesh.nV);
+  forced[5] = 1;                       // genau eine Ecke des oberen Randkreises
+  const topo = buildTopology(mesh, label, { forceVertex: forced });
+  assert.deepEqual(checkTopology(topo), []);
+  // keine Kette darf geschlossen sein (Start = Ende)
+  for (const c of topo.chains) {
+    assert.notEqual(c.mv[0], c.mv[c.mv.length - 1], `Kette ${c.id} ist geschlossen`);
+  }
+  // Ketten des oberen Randkreises (beide Enden auf z = +5); der Rand trägt
+  // zusätzlich die automatische Teilung an den Ecken 1 und 13
+  const top = topo.chains.filter((c) =>
+    mesh.P[3 * c.mv[0] + 2] > 0 && mesh.P[3 * c.mv[c.mv.length - 1] + 2] > 0);
+  // die erzwungene Ecke teilt den Rand in 2 Ketten
+  const ends = top.filter((c) => c.mv[0] === 5 || c.mv[c.mv.length - 1] === 5);
+  assert.equal(ends.length, 2, 'der erzwungene Randpunkt teilt den oberen Rand nicht in 2 Ketten');
+  assert.equal(top.filter((c) => c.mv.slice(1, -1).includes(5)).length, 0,
+    'Randpunkt 5 liegt noch im Inneren einer Kette');
+  // die erzwungene Ecke schneidet genau eine Kette zusätzlich
+  assert.equal(topo.chains.length, base.chains.length + 1);
+});
+
+test('PROBE', () => {
+  const { mesh, label } = cylinderCase(24);
+  const forced = new Uint8Array(mesh.nV);
+  forced[5] = 1;
+  const topo = buildTopology(mesh, label, { forceVertex: forced });
+  console.log('PROBE vertices: ' + topo.vertices.map((v) => v.mv).join(','));
+  console.log('PROBE chains: ' + JSON.stringify(topo.chains.map((c) => ({ L: c.L, R: c.R, n: c.mv.length, a: c.mv[0], b: c.mv[c.mv.length - 1] }))));
+  console.log('PROBE errs: ' + JSON.stringify(checkTopology(topo)));
+});
+
 if (failed) process.exit(1);

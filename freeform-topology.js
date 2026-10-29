@@ -162,6 +162,17 @@ export function buildTopology(mesh, label, opts = {}) {
   // Zwangs-Ecken zuletzt: sie zerschneiden vorhandene Ketten
   const fv = opts.forceVertex;
   if (fv) for (let v = 0; v < nV; v++) if (forced(fv, v)) isBrep[v] = 1;
+  // Loop mit nur einer B-Rep-Ecke ergäbe eine Kette mit Start = Ende;
+  // eine zweite Ecke in der Mitte teilt sie — global, damit wird auch
+  // die Zwillingsschleife dort geschnitten
+  for (let li = 0; li < loops.length; li++) {
+    const hs = loops[li]._h, n = hs.length;
+    if (n < 2) continue;
+    let cnt = 0, c = -1;
+    for (let i = 0; i < n; i++) if (isBrep[to[hs[i]]]) { cnt++; c = i; }
+    if (cnt !== 1) continue;
+    isBrep[to[hs[(c + Math.floor(n / 2)) % n]]] = 1;
+  }
 
   // ── Ketten: Schleifen an den B-Rep-Ecken schneiden
   const runs = [];                 // {loop, region, R, mv[], first}
@@ -287,6 +298,7 @@ export function checkTopology(topo) {
       if (vOfMesh[c.mv[0]] < 0) errs.push(`Kette ${c.id}: Start ${c.mv[0]} ist keine B-Rep-Ecke`);
       const last = c.mv[c.mv.length - 1];
       if (vOfMesh[last] < 0) errs.push(`Kette ${c.id}: Ende ${last} ist keine B-Rep-Ecke`);
+      if (c.mv[0] === last) errs.push(`Kette ${c.id}: geschlossen (Start = Ende = ${c.mv[0]})`);
     }
   }
 
