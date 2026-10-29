@@ -238,7 +238,7 @@ export function checkStepStrict(text, opts = {}) {
         // Extrusion einer (offenen) B-Spline (Gravur/Schrift, extrusion-plans.js): S(u,w) = C(u) + w·V.
         // Abstand = Abstand zur Mantellinie durch C(u*) (u* über 2000 Proben + Goldener Schnitt),
         // natürliche Normale C'(u*) × V; uw(p) liefert (u*, w) für das Volumen (Green im (u,w)-Raum).
-        const Vh = norm(V), N = 2000, us = [], cs = [];
+        const Vh = norm(V), N = 400, us = [], cs = [];
         for (let i = 0; i <= N; i++) { const u = pc.t0 + (pc.t1 - pc.t0) * i / N; us.push(u); cs.push(pc.at(u)); }
         const lineDist = (p, c) => { const w = sub(p, c); return len(sub(w, mul(Vh, dot(w, Vh)))); };
         const near = (p) => {
