@@ -191,6 +191,13 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Freiform Etappe 1 (2026-10-29, `wt/freiform1`)** — neue Module freeform-*.js: fit-basierte Segmentierung
+  (Ebene/Zylinder/Kegel/Kugel/Torus), Snap (tangentiale Verrundungen, Rollkugel, Eckkugeln), Topologie, Ecken per LM,
+  Kanten LINE/CIRCLE oder B-Spline exakt auf beiden Flächen, SPHERICAL_/TOROIDAL_SURFACE. Testkörper (Rundquader r1,
+  Platte mit Torus-Loch, Halbkugel auf Zylinder, je gedreht) exakt ohne Facetten. Schalter `analysis.fitSegmentation`
+  (true/'auto'), **Standard aus**: am Skoda-Haken scheitert der Weg noch (98 % Facetten, +8 s). Tests: tests/freeform/*.test.mjs
+  (noch nicht in npm test). Etappe 2: Rückfall-Streifen als B-Spline-Fläche statt Facetten, Rollkugel-Löser über
+  Verrundungsketten, Ecken mit ≥ 4 Flächen (~800 am Skoda); Kegel-Weg ungetestet.
 - [x] **NozzleBox (Printables, lokal `samples/`) 8893 → 3537 Flächen (2026-10-29, `wt/nozzlebox`)** — (1) Pinch: Ränder,
   die sich in einer Ecke berühren, zerlegten die ganze ebene Fläche in Einzeldreiecke (Ablageboden 2764 Flächen, dazu
   76 Halbring-Wände facettiert) → splitAtPinches teilt nur den Stern um den Berührpunkt ab; (2) Bohrung mit unsauberen
