@@ -1155,9 +1155,30 @@ function angDist(a, b) {
  * einem Ring-Stapel weiter (z. B. Bohrung mit Fase an beiden Enden).
  * → true: an dieser Ebene liegt eine Deckfläche an
  */
-function ringLevelHasDeck(ctx, chain, level) {
+function ringLevelHasDeck(ctx, chain, level, whole = false) {
   const { fds, frame, o, vkey, facInfo, index } = ctx;
   if (!index) return false;
+  // whole = true: nur wenn die GANZE Ebene an Deckflächen grenzt (jede Ring-Kante). Eine nur
+  // teilweise gedeckte Ebene (Öse: Steg über der D-Sehne, daneben die Wand darunter) ist keine
+  // Primitive-Wand zwischen zwei Deckflächen.
+  if (whole) {
+    const inC = new Set(chain.facets);
+    let any = false;
+    for (const fi of chain.facets) {
+      const info = facInfo.get(fi);
+      const runs = fds[fi] && info ? facetRuns(fds[fi], info, vkey) : null;
+      const run = runs ? (level === 'lo' ? runs.loRun : runs.hiRun) : null;
+      if (!run) return false;
+      for (let k = 0; k + 1 < run.length; k++) {
+        const ka = vkey(run[k]), kb = vkey(run[k + 1]);
+        if (ka === kb) continue;
+        any = true;
+        const deck = (index.get(edgeKeyOf(ka, kb)) || []).some((ow) => { if (inC.has(ow.fi)) return false; const ofd = fds[ow.fi]; if (!ofd || !ofd.normal) return false; const nn = norm(ofd.normal); return len(nn) > 0 && Math.abs(dot(nn, frame.d)) >= o.capCos; });
+        if (!deck) return false;
+      }
+    }
+    return any;
+  }
   const inChain = new Set(chain.facets);
   for (const fi of chain.facets) {
     const fd = fds[fi];
@@ -1828,6 +1849,7 @@ export function findArcBands(fds, opts) {
     for (const chain of ordered) {
       if (overBudget()) { stats.budgetHit = true; break axesLoop; }
       let work = chain;
+      let noConvex = false;
       if (chain.cyclic) {
         // Vollkreis? → in DREI Bänder teilen (Schnitt an den Mantellinien mit den
         // Polarwinkeln 0, 2π/3, 4π/3). Scheitert die Teilung, bleibt der Ring
@@ -1836,29 +1858,58 @@ export function findArcBands(fds, opts) {
         const whole = cached ? cached.whole : tryBand(ctx, chain, 0, chain.facets.length - 1);
         if (whole && !whole.insufficient) {
           const pl = planOf.get(chain);
-          if (pl) {
+          const retri = chain.facets.every((fi) => list[fi].rulingRetri && list[fi].rulingCuts);
+          let done = false;
+          if (retri) { /* Schnitte stehen fest (insertRulings) → unten */ } else if (pl) {
             // gemeinsamer Schnitt des Stapels: alle Ringe werden an DENSELBEN drei
             // Winkelstellen geschnitten → ihre Bögen passen aufeinander
             const cuts = pl.plan.cuts.map((c) => c.edges[pl.qi].k);
-            splitRingAt(ctx, chain, whole, bands, taken, stats, cuts, cutReg);
+            done = splitRingAt(ctx, chain, whole, bands, taken, stats, cuts, cutReg);
           } else {
-            splitRing(ctx, chain, whole, bands, taken, stats, cutReg);
+            done = splitRing(ctx, chain, whole, bands, taken, stats, cutReg);
           }
-          continue;
+          // Ausnahme: ein von insertRulings NEU triangulierter (vorher verdrehter) Ring. Seine
+          // Schnitte sitzen dort, wo die Nachbarn wechseln (D-Ecken einer Öse) — oft mehr als
+          // drei und paarweise eng, die Drei-Teile-Regel greift dann nicht. Dann wie ein offener
+          // Zug ab einer Mantellinie gierig teilen; schmale Reste zwischen eng benachbarten
+          // Schnitten bleiben facettiert. Die Primitive-Sperren gelten weiter: Wand zwischen
+          // zwei Deckflächen (beide Ebenen RINGSUM gedeckt — eine nur teilweise gedeckte Ebene
+          // wie der Steg einer D-Öse ist keine Bohrungs-Wand; deren Gruppen sperrt ohnehin
+          // blockedGroups, solange der Bohrungs-Pfad zuständig ist) und konvexe Außenwand.
+          if (done || !retri) continue;
+          if (ringLevelHasDeck(ctx, chain, 'lo', true) && ringLevelHasDeck(ctx, chain, 'hi', true)) continue;
+          const cutKeys0 = list[chain.facets[0]].rulingCuts;
+          const rk = ringCandidates(ctx, chain, whole).filter((cd) => cutKeys0.has(edgeKeyOf(cd.loKey, cd.hiKey)));
+          if (!rk.length) continue;
+          const mm = chain.facets.length;
+          work = cutCycle(chain, (rk[0].k - 1 + mm) % mm);
+          noConvex = true;
+        } else {
+          // sonst an der Seitenkante nach der breitesten lo-Kante aufschneiden
+          work = cutCycle(chain, widestFacet(ctx, chain));
         }
-        // sonst an der Seitenkante nach der breitesten lo-Kante aufschneiden
-        work = cutCycle(chain, widestFacet(ctx, chain));
       }
 
       // gierig teilen: größtes gültiges j ≥ i (gallopingend gesucht). Ein Band
       // gilt nur, wenn seine beiden END-Seitenkanten Mantellinien sind (LINE-Kanten
       // im STEP); die inneren Seitenkanten dürfen schräg sein (Dreiecksfächer).
       const m = work.facets.length;
+      // neu triangulierter Ring: jede Mantellinie ist ein Schnitt (Teile enden dort)
+      let rulAt = null;
+      if (noConvex) {
+        const w0 = tryBand(ctx, work, 0, m - 1);
+        rulAt = [];
+        // nur die von insertRulings ERZWUNGENEN Mantellinien (zufällige daneben würden schmale
+        // Reste abschneiden, die zu keinem Nachbar-Band passen)
+        const cutKeys = list[work.facets[0]].rulingCuts;
+        if (w0 && !w0.insufficient && cutKeys) for (let k = 1; k < m; k++) { const sd = work.sides[k]; if (sd && cutKeys.has(edgeKeyOf(vkey(sd[0]), vkey(sd[1])))) rulAt.push(k); }
+      }
+      const limit = (i) => { if (!rulAt) return m; for (const k of rulAt) if (k > i) return k; return m; };
       let i = 0;
       while (i < m) {
         if (!work.sides[i]) { i++; continue; }
         if (overBudget()) { stats.budgetHit = true; break axesLoop; }
-        const found = scanBandFrom(ctx, work, i, m);
+        const found = scanBandFrom(ctx, work, i, limit(i));
         if (found) {
           // VORAUSSCHAU: reicht das Band ab der NÄCHSTEN Facette weiter, dann gehört die
           // Facette i nicht zu diesem Band — sie blockiert es (breite ebene Profilseite
@@ -1866,12 +1917,12 @@ export function findArcBands(fds, opts) {
           // Facette i wird dann ohne Band übersprungen, damit die ersten Facetten des
           // echten Bogens nicht flach bleiben.
           if (i + 1 < m && work.sides[i + 1]) {
-            const nx = scanBandFrom(ctx, work, i + 1, m);
+            const nx = scanBandFrom(ctx, work, i + 1, limit(i + 1));
             if (nx && nx.j > found.j) { i = i + 1; continue; }
           }
           const { chk, j: bestJ } = found;
           const made = makeBand(ctx, work, i, bestJ, chk, bands.length);
-          if (made) {
+          if (made && !(noConvex && made.band.sense > 0)) {
             const band = made.band;
             setBandSrc(band, ctx, work, i, bestJ);
             bands.push(band);
@@ -2725,4 +2776,333 @@ export function expandArcLoop(L, arcEdges, geoms, vtxKey, n = 16) {
     for (let k = 1; k < N; k++) out.push(pts[k]);
   }
   return out;
+}
+
+// ── Mantellinien einfügen (verdrehte Ringe) ─────────────────────────────────
+/**
+ * VERDREHTE RINGE: Im STL liegen die Punkte des oberen Rings einer Wand oft bei anderen
+ * Polarwinkeln als die des unteren (Wand = Zickzack nicht-koplanarer Dreiecke). Dann ist
+ * KEINE Seitenkante eine Mantellinie — ein Band darf aber nur an einer Mantellinie enden
+ * (scanBandFrom: startOk/endOk) und ein Vollring nur dort geteilt werden (splitRing). Die
+ * ganze Wand bleibt facettiert, obwohl alle Punkte exakt auf dem Kreis liegen (Ösen-Loch
+ * der NozzleBox: ~300 Facetten je Loch).
+ *
+ * Abhilfe: an den nötigen SCHNITTWINKELN je Ring einen Punkt AUF DEM KREIS einfügen und
+ * die Wand des Streifens neu triangulieren (Reißverschluss zwischen unterem und oberem
+ * Punktzug), wobei an jedem Schnittwinkel die Kante P_lo(φ)–P_hi(φ) erzwungen wird — das
+ * ist eine Mantellinie. Alle Punkte liegen auf dem Zylinder/Kegel → die neuen Dreiecke
+ * sind eine ebenso gute Sehnen-Näherung wie die alten. Die Deckflächen bekommen die
+ * Punkte in ihren Loop; sie liegen in ihrer Ebene (gleiche Höhe t ⟂ Achse) → bleiben eben.
+ *
+ * Schnittwinkel je STAPEL (Streifen, die sich eine Ring-Ebene teilen — z. B. verdrehter
+ * Vollring über zwei offenen Streifen einer D-Bohrung):
+ *   (a) offenes Streifen-Ende ohne Mantellinie: der Winkel des weiter INNEN liegenden
+ *       End-Punkts (dort beginnt das Band, außen bleibt ein schmales Dreieck);
+ *   (b) Nachbarwechsel entlang eines Rings (Deckfläche ↔ anderer Streifen): ein Band darf
+ *       je Bogen nur EINEN Nachbarn haben (validateArcBands);
+ *   (c) Vollringe: Lücken > 130° werden halbiert (splitRing braucht ≥ 3 Schnitte).
+ * Vorbedingung je Stapel: jede Ring-Kante grenzt an genau EINE fremde Fläche, und die ist
+ * ein anderer Streifen des Stapels oder eine ebene Deckfläche ⟂ Achse (Loop ohne
+ * circleRim) — sonst bleibt der Stapel unverändert.
+ *
+ * Die Eingabe wird nicht verändert. Ohne Einfügung kommt die EINGABE-Liste zurück.
+ * → { fds, stats: { strips, stacks, inserted, skipped } }
+ */
+export function insertRulings(fds, opts) {
+  const o = { ...ARC_DEFAULTS, ...opts };
+  const vkey = vtxKeyOf(o);
+  const list = fds || [];
+  const stats = { strips: 0, stacks: 0, inserted: 0, skipped: 0 };
+  const t0 = nowMs();
+  const budgetMs = typeof o.budgetMs === 'number' ? o.budgetMs : Infinity;
+  const GAP = 130 * Math.PI / 180;
+  const MAX_INS = 2000;
+  const TWO_PI = 2 * Math.PI;
+  const wrapPi = (a) => { while (a > Math.PI) a -= TWO_PI; while (a <= -Math.PI) a += TWO_PI; return a; };
+  const wrap2 = (a) => { a %= TWO_PI; return a < 0 ? a + TWO_PI : a; };
+  const maxAxes = Number.isFinite(o.maxAxes) ? Math.max(0, o.maxAxes) : Infinity;
+  const axes = axisCandidates(list, o).slice(0, maxAxes);
+  const index = buildEdgeIndex(list, o);
+  const removed = new Set();          // ersetzte Streifen-Facetten
+  const touched = new Set();          // Deckflächen mit neuen Punkten
+  const added = [];                   // neue Dreiecke
+  const capIns = new Map();           // fi → Map li → Map edgeKey → { A, pts: [P…] }
+  const largestGap = (angs) => {
+    const a = angs.map(wrap2).sort((x, y) => x - y);
+    if (!a.length) return { gap: TWO_PI, from: 0 };
+    let best = { gap: a[0] + TWO_PI - a[a.length - 1], from: a[a.length - 1] };
+    for (let i = 0; i + 1 < a.length; i++) if (a[i + 1] - a[i] > best.gap) best = { gap: a[i + 1] - a[i], from: a[i] };
+    return best;
+  };
+  // stetiger Fortschritt entlang eines Punktzugs (Drehsinn s, ab Winkel a0): benachbarte
+  // Punkte liegen < π auseinander → monoton, ohne Sprung bei ±π
+  const progress = (angs, s, a0) => {
+    let last = null;
+    return angs.map((a) => { const raw = s * (a - a0); const g = last === null ? wrapPi(raw) : last + wrapPi(raw - last); last = g; return g; });
+  };
+
+  for (const d of axes) {
+    if (nowMs() - t0 >= budgetMs || stats.inserted >= MAX_INS) break;
+    const frame = makeFrame(d);
+    const { facets, chains } = buildChains(list, d, frame, index, removed, o);
+    const ctx = { fds: list, frame, o, vkey, facInfo: facets, index };
+    const pol = (p, c) => { const l = toLocal(frame, p); return Math.atan2(l[1] - c[1], l[0] - c[0]); };
+
+    // ── Streifen: Ketten mit gültigem Gesamt-Fit ──────────────────────────────
+    const strips = [];
+    for (const chain of chains) {
+      const m = chain.facets.length;
+      if (m < 3) continue;
+      if (chain.facets.some((fi) => touched.has(fi))) continue;
+      if (o.blockedGroups && o.blockedGroups.size && chain.facets.some((fi) => list[fi].group && o.blockedGroups.has(list[fi].group))) continue;
+      const whole = tryBand(ctx, chain, 0, m - 1);
+      if (!whole || whole.insufficient) continue;
+      const isRul = (sd) => sideIsRuling(frame, sd, whole.Klo.c, whole.Khi.c, whole.rMax, whole.tol);
+      let twisted;
+      if (chain.cyclic) {
+        const ang = chain.sides.slice(0, m).filter(isRul).map((sd) => pol(sd[0], whole.Klo.c));
+        twisted = ang.length < 3 || largestGap(ang).gap > GAP;
+      } else twisted = !whole.endsOk;
+      const lo2 = whole.loPts.map((p) => { const l = toLocal(frame, p); return [l[0], l[1]]; });
+      const s = chainAngleSign(lo2, whole.Klo.c, o.maxSegDeg * Math.PI / 180);
+      if (!s) continue;
+      strips.push({
+        chain, whole, twisted, s, isRul, own: new Set(chain.facets),
+        rings: [
+          { t: whole.tlo, c: whole.Klo.c, r: whole.Klo.r, pts: whole.loPts },
+          { t: whole.thi, c: whole.Khi.c, r: whole.Khi.r, pts: whole.hiPts },
+        ],
+      });
+    }
+    if (!strips.some((st) => st.twisted)) continue;
+
+    // ── Ring-Ebenen (gleiche Höhe, Mitte, Radius) und Stapel ─────────────────
+    const levels = [];
+    for (const st of strips) {
+      for (const rg of st.rings) {
+        let L = levels.find((l) => Math.abs(l.t - rg.t) <= o.levelTol && Math.hypot(l.c[0] - rg.c[0], l.c[1] - rg.c[1]) <= st.whole.tol && Math.abs(l.r - rg.r) <= st.whole.tol);
+        if (!L) { L = { t: rg.t, c: rg.c, r: rg.r, strips: [], cache: new Map() }; levels.push(L); }
+        rg.level = L; L.strips.push(st);
+      }
+    }
+    strips.forEach((st, i) => { st.id = i; });
+    const par = strips.map((_, i) => i);
+    const find = (i) => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+    for (const L of levels) for (let k = 1; k < L.strips.length; k++) par[find(L.strips[k].id)] = find(L.strips[0].id);
+    const stacks = new Map();
+    for (const st of strips) { const r = find(st.id); if (!stacks.has(r)) stacks.set(r, []); stacks.get(r).push(st); }
+    const facStrip = new Map();
+    for (const st of strips) for (const fi of st.chain.facets) facStrip.set(fi, st);
+
+    for (const stack of stacks.values()) {
+      if (!stack.some((st) => st.twisted)) continue;
+      if (nowMs() - t0 >= budgetMs || stats.inserted >= MAX_INS) break;
+      const inStack = new Set(stack);
+      // Vorbedingung + Nachbar-Schlüssel je Ring-Kante
+      let ok = true;
+      for (const st of stack) {
+        for (const rg of st.rings) {
+          const P = rg.pts, n = P.length, ne = st.chain.cyclic ? n : n - 1;
+          rg.keys = [];
+          for (let k = 0; k < ne; k++) {
+            const A = P[k], B = P[(k + 1) % n];
+            const ow = (index.get(edgeKeyOf(vkey(A), vkey(B))) || []).filter((e) => !st.own.has(e.fi));
+            if (ow.length !== 1) { ok = false; break; }
+            const e = ow[0], other = facStrip.get(e.fi);
+            if (other && inStack.has(other)) { rg.keys.push('S' + other.id); continue; }
+            const fd = list[e.fi];
+            const L = e.li === 0 ? fd.outer : (fd.inner || [])[e.li - 1];
+            const nn = fd.normal ? norm(fd.normal) : null;
+            if (!L || L.circleRim || hasArcEdges(fd) || removed.has(e.fi) || !nn || Math.abs(dot(nn, d)) < o.capCos) { ok = false; break; }
+            rg.keys.push('F' + e.fi + '/' + e.li);
+          }
+          if (!ok) break;
+        }
+        if (!ok) break;
+      }
+      if (!ok) { stats.skipped++; continue; }
+
+      // ── Schnittwinkel des Stapels (Winkel um die jeweilige Ring-Mitte) ──────
+      const tolAng = Math.max(...stack.map((st) => st.whole.tol / st.whole.rMax));
+      const cuts = [];
+      const addCut = (a) => { a = wrap2(a); if (!cuts.some((c) => angDist(c, a) <= tolAng)) cuts.push(a); };
+      for (const st of stack) {
+        const { whole, chain, s } = st;
+        if (!chain.cyclic) {                                   // (a) offene Enden
+          const m = chain.facets.length;
+          for (const [sd, start] of [[chain.sides[0], true], [chain.sides[m], false]]) {
+            if (!sd || st.isRul(sd)) continue;
+            const aL = pol(sd[0], whole.Klo.c), aH = pol(sd[1], whole.Khi.c);
+            const dp = wrapPi(s * (aH - aL));                  // > 0: hi-Punkt liegt weiter entlang s
+            addCut(start ? (dp > 0 ? aH : aL) : (dp > 0 ? aL : aH));
+          }
+        }
+        for (const rg of st.rings) {                           // (b) Nachbarwechsel
+          const K = rg.keys;
+          for (let k = 0; k + 1 < K.length; k++) if (K[k] !== K[k + 1]) addCut(pol(rg.pts[k + 1], rg.c));
+          if (chain.cyclic && K.length && K[K.length - 1] !== K[0]) addCut(pol(rg.pts[0], rg.c));
+        }
+      }
+      for (const st of stack) {                                // (c) Vollringe: Lücken ≤ 130°
+        if (!st.chain.cyclic) continue;
+        if (!cuts.length) addCut(pol(st.rings[0].pts[0], st.rings[0].c));
+        for (let g = largestGap(cuts); g.gap > GAP; g = largestGap(cuts)) addCut(g.from + g.gap / 2);
+      }
+      // (d) Sehne in der Deckfläche: verbindet eine GERADE Kante der Deckfläche zwei Schnittpunkte
+      //     (Steg über der D-Sehne einer Öse: Loop = Bogen + Sehne), hätte der Bogen dieselben
+      //     Endpunkte wie die Gerade — gleicher Kanten-Schlüssel, der Bogen überschriebe die Sehne.
+      //     Dann zusätzlich in der Bogenmitte schneiden (beide Seiten; die falsche schadet nicht).
+      const isCut = (a) => cuts.some((c) => angDist(c, wrap2(a)) <= tolAng);
+      for (const st of stack) {
+        for (const rg of st.rings) {
+          for (const key of new Set(rg.keys.filter((k) => k[0] === 'F'))) {
+            const [fi, li] = key.slice(1).split('/').map(Number);
+            const fd = list[fi], L = li === 0 ? fd.outer : fd.inner[li - 1];
+            const onRing = (p) => { const l = toLocal(frame, p); return Math.abs(l[2] - rg.t) <= o.levelTol && Math.abs(Math.hypot(l[0] - rg.c[0], l[1] - rg.c[1]) - rg.r) <= st.whole.tol; };
+            for (let k = 0; k < L.length; k++) {
+              const p = L[k], q = L[(k + 1) % L.length];
+              if (!onRing(p) || !onRing(q)) continue;
+              const ap = pol(p, rg.c), aq = pol(q, rg.c);
+              if (angDist(ap, aq) <= o.maxSegDeg * Math.PI / 180 || !isCut(ap) || !isCut(aq)) continue;
+              const mid = (ap + aq) / 2;
+              addCut(mid); addCut(mid + Math.PI);
+            }
+          }
+        }
+      }
+
+      const cutSides = new Set();                              // Seitenkanten der erzwungenen Mantellinien
+      // ── Punkte je Ebene + Winkel (geteilt zwischen den Streifen einer Ebene) ─
+      const pointAt = (L, phi) => {
+        const key = Math.round(wrap2(phi) * 1e9);
+        let P = L.cache.get(key);
+        if (!P) {
+          const u = L.c[0] + L.r * Math.cos(phi), v = L.c[1] + L.r * Math.sin(phi);
+          const { e1, e2 } = frame;
+          P = [u * e1[0] + v * e2[0] + L.t * d[0], u * e1[1] + v * e2[1] + L.t * d[1], u * e1[2] + v * e2[2] + L.t * d[2]];
+          L.cache.set(key, P);
+        }
+        return P;
+      };
+
+      for (const st of stack) {
+        const { chain, s } = st;
+        const cyc = chain.cyclic;
+        const a0 = pol(st.rings[0].pts[0], st.rings[0].c);
+        // Punktzüge mit Fortschritt; Vollring: geschlossen (erster Punkt am Ende wiederholt)
+        const runs = st.rings.map((rg) => {
+          const pts = cyc ? rg.pts.concat([rg.pts[0]]) : rg.pts.slice();
+          const g = progress(pts.map((p) => pol(p, rg.c)), s, a0);
+          return { rg, items: pts.map((p, q) => ({ p, g: g[q], ins: false })) };
+        });
+        const gMin = Math.min(runs[0].items[0].g, runs[1].items[0].g);
+        const gEnd = Math.max(runs[0].items[runs[0].items.length - 1].g, runs[1].items[runs[1].items.length - 1].g);
+        const forced = [];
+        for (const c of cuts) {
+          let gc = s * (c - a0);
+          gc = gMin + wrap2(gc - gMin);                         // Vertreter im Bereich [gMin, gMin + 2π)
+          if (!cyc && !(gc > gMin + tolAng && gc < gEnd - tolAng)) continue;
+          // Vollring: ein Schnitt VOR dem Naht-Beginn eines der beiden Züge gehört ans Ende (+2π)
+          if (cyc && gc < Math.max(runs[0].items[0].g, runs[1].items[0].g) - tolAng) gc += TWO_PI;
+          const pair = [];
+          for (const run of runs) {
+            const it = run.items;
+            const near = it.find((x) => Math.abs(x.g - gc) <= tolAng);
+            if (near) { pair.push(near); continue; }
+            let k = -1;
+            for (let q = 0; q + 1 < it.length; q++) if (it[q].g < gc && gc < it[q + 1].g) { k = q; break; }
+            if (k < 0) { pair.push(null); continue; }
+            pair.push({ p: pointAt(run.rg.level, c), g: gc, ins: true, A: it[k].p, B: it[k + 1].p, k });
+          }
+          if (pair[0] && pair[1]) forced.push(pair);
+        }
+        if ((cyc && forced.length < 3) || !forced.length) { stats.skipped++; continue; }
+
+        // Einfügen (je Zug nach Fortschritt), Deckflächen jenseits der Kante merken
+        for (let r = 0; r < 2; r++) {
+          const ins = forced.map((pr) => pr[r]).filter((x) => x.ins);
+          for (const x of ins) {
+            const it = runs[r].items;
+            let k = it.findIndex((y) => y.g > x.g);
+            if (k < 0) k = it.length;
+            it.splice(k, 0, x);
+            const key = edgeKeyOf(vkey(x.A), vkey(x.B));
+            for (const e of (index.get(key) || [])) {
+              if (st.own.has(e.fi) || facStrip.has(e.fi)) continue;
+              let byL = capIns.get(e.fi); if (!byL) { byL = new Map(); capIns.set(e.fi, byL); }
+              let byE = byL.get(e.li); if (!byE) { byE = new Map(); byL.set(e.li, byE); }
+              let rec = byE.get(key); if (!rec) { rec = { A: x.A, pts: [] }; byE.set(key, rec); }
+              if (!rec.pts.includes(x.p)) rec.pts.push(x.p);
+              touched.add(e.fi);
+            }
+          }
+        }
+        const lo = runs[0].items, hi = runs[1].items;
+        const pairs = [[0, 0]];
+        for (const [a, b] of forced.slice().sort((u, v) => u[0].g - v[0].g)) { pairs.push([lo.indexOf(a), hi.indexOf(b)]); cutSides.add(edgeKeyOf(vkey(a.p), vkey(b.p))); }
+        pairs.push([lo.length - 1, hi.length - 1]);
+        let monotone = true;
+        for (let q = 1; q < pairs.length; q++) if (!(pairs[q][0] >= pairs[q - 1][0] && pairs[q][1] >= pairs[q - 1][1])) monotone = false;
+        if (!monotone) { stats.skipped++; continue; }
+
+        // Reißverschluss zwischen den Paaren (Vollring: Start = Ende = Seitenkante 0, bleibt erhalten)
+        const tris = [];
+        for (let q = 0; q + 1 < pairs.length; q++) {
+          let [a, b] = pairs[q];
+          const [a1, b1] = pairs[q + 1];
+          while (a < a1 || b < b1) {
+            if (a < a1 && (b >= b1 || lo[a + 1].g <= hi[b + 1].g)) { tris.push([lo[a].p, lo[a + 1].p, hi[b].p]); a++; }
+            else { tris.push([lo[a].p, hi[b + 1].p, hi[b].p]); b++; }
+          }
+        }
+        // Ausrichtung wie die Original-Facetten (Normale zur bzw. weg von der Achse)
+        const f0 = list[chain.facets[0]];
+        const rg0 = st.rings[0];
+        const cen = (pts) => mul(pts.reduce((acc, p) => add(acc, p), [0, 0, 0]), 1 / pts.length);
+        const radial = (p) => { const l = toLocal(frame, p); return add(mul(frame.e1, l[0] - rg0.c[0]), mul(frame.e2, l[1] - rg0.c[1])); };
+        const refSign = Math.sign(dot(norm(f0.normal), radial(cen(f0.outer)))) || 1;
+        for (const [p, q, r] of tris) {
+          if (vkey(p) === vkey(q) || vkey(q) === vkey(r) || vkey(p) === vkey(r)) continue;
+          let T = [p, q, r];
+          let n = norm(cross(sub(q, p), sub(r, p)));
+          if (Math.sign(dot(n, radial(cen(T)))) !== refSign) { T = [p, r, q]; n = mul(n, -1); }
+          const nf = { ...f0, outer: T, inner: [], normal: n, untouched: false, splitPart: true, rulingRetri: true, rulingCuts: cutSides };
+          delete nf.src; delete nf.arcEdges;
+          if (f0.centroid) nf.centroid = cen(T);
+          added.push(nf);
+        }
+        for (const fi of chain.facets) removed.add(fi);
+        if (st.twisted) stats.strips++;
+        stats.inserted += forced.reduce((acc, pr) => acc + (pr[0].ins ? 1 : 0) + (pr[1].ins ? 1 : 0), 0);
+      }
+      stats.stacks++;
+    }
+  }
+  if (!removed.size) return { fds: list, stats };
+
+  // Deckflächen: neue Punkte zwischen A und B in den Loop (nach Abstand von A)
+  const out = [];
+  list.forEach((fd, fi) => {
+    if (removed.has(fi)) return;
+    const byL = capIns.get(fi);
+    if (!byL) { out.push(fd); return; }
+    const edit = (L, li) => {
+      const byE = byL.get(li);
+      if (!byE) return L;
+      const res = [];
+      for (let i = 0; i < L.length; i++) {
+        const a = L[i], b = L[(i + 1) % L.length];
+        res.push(a);
+        const rec = byE.get(edgeKeyOf(vkey(a), vkey(b)));
+        if (!rec) continue;
+        const pts = rec.pts.slice().sort((p, q) => len(sub(p, a)) - len(sub(q, a)));
+        for (const p of pts) res.push(p);
+      }
+      for (const k of Object.keys(L)) if (!/^\d+$/.test(k)) res[k] = L[k];
+      return res;
+    };
+    out.push({ ...fd, untouched: false, outer: edit(fd.outer, 0), inner: (fd.inner || []).map((L, j) => edit(L, j + 1)) });
+  });
+  for (const nf of added) out.push(nf);
+  return { fds: out, stats };
 }

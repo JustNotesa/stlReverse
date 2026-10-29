@@ -1534,9 +1534,10 @@ export const BODIES = [
       // Steg bei z = 5 (zwischen Sehne und Bogen): Material darunter, Loch darüber → Normale nach +Z
       { up: true, outer: { pts: EYELET.ledge.map(([x, y]) => [x, y, 5]) }, holes: [] },
     ],
-    // Soll: der Exporter darf an der verdrehten Wand nichts verlieren (wasserdicht, Volumen = Netz).
-    // Die verdrehte Wand bleibt bisher facettiert (0 Bogen-Flächen, 146 Flächen).
-    expect: { mode: 'skip' },
+    // Vorher blieb die verdrehte Wand facettiert (0 Bogen-Flächen, 146 Flächen). insertRulings
+    // (profile-arcs.js) setzt Punkte auf den Kreis und trianguliert die Wand neu → Mantellinien an
+    // den Schnittstellen (Steg-Ecken, Lücken ≤ 130°, Sehnen-Mitte) → 10 Teil-Zylinder, 18 Flächen.
+    expect: { mode: 'skip', arcsOff: 10, arcsOn: 10, maxFaces: 20 },
   },
   // ── PINCH: zwei Löcher EINER Deckfläche berühren sich in genau EINER Ecke ────
   // Die Deckfläche z=3 der Platte hat zwei Löcher, die sich im Punkt (12; 18.5) berühren: der
