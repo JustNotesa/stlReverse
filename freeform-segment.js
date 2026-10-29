@@ -284,11 +284,16 @@ function fitCylModel(mesh, tris) {
   let area = 0, mx = 0, my = 0, mz = 0;
   for (const f of tris) { const w = A[f]; area += w; mx += N[3 * f] * w; my += N[3 * f + 1] * w; mz += N[3 * f + 2] * w; }
   if (area <= 0) return null;
-  mx /= area; my /= area; mz /= area;
+  // Achse: kleinster Eigenvektor der UNGEZENTRIERTEN Normalen-Kovarianz. Alle
+  // Normalen einer Zylinderfläche stehen senkrecht auf der Achse → der Nullraum
+  // der Kovarianz ist die Achse. Ungezentriert ist das auch bei schmalen
+  // Flecken (zwei Streifen einer Verrundung) eindeutig; zentriert ist die
+  // Kovarianz dort in der Normalenebene vom Rang 1 — der kleinste Eigenvektor
+  // wäre dann beliebig und die Achse falsch.
   const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
   for (const f of tris) {
     const w = A[f];
-    const dx = N[3 * f] - mx, dy = N[3 * f + 1] - my, dz = N[3 * f + 2] - mz;
+    const dx = N[3 * f], dy = N[3 * f + 1], dz = N[3 * f + 2];
     C[0][0] += dx * dx * w; C[0][1] += dx * dy * w; C[0][2] += dx * dz * w;
     C[1][0] += dy * dx * w; C[1][1] += dy * dy * w; C[1][2] += dy * dz * w;
     C[2][0] += dz * dx * w; C[2][1] += dz * dy * w; C[2][2] += dz * dz * w;
@@ -711,13 +716,80 @@ export function fitModel(mesh, tris, type) {
 const TYPES = ['plane', 'cylinder', 'cone', 'sphere', 'torus'];
 const RANK = { plane: 0, cylinder: 1, cone: 2, sphere: 3, torus: 4 };
 
+// Vergleich zweier Modell-Kandidaten: Fläche zuerst, dann Restfehler, dann Rang.
+// Eine gekrümmte Fläche schlägt eine Ebene, wenn sie mindestens 80 % der Fläche
+// hat UND der Restfehler (RMS der Eckpunkte) ein Viertel des Ebenen-Rests ist
+// (Ebene auf gekrümmtem Fleck: Rest ≈ Sehnenfehler; gekrümmtes Modell: Rest ≈ 0).
+// Zwischen gekrümmten Typen gewinnt der einfachere Typ (RANG) nur, wenn sein
+// Restfehler nicht mehr als 4x schlechter ist.
+function betterCand(a, b) {
+  if (!b) return true;
+  const aC = a.type !== 'plane', bC = b.type !== 'plane';
+  if (aC !== bC) {
+    const cur = aC ? a : b;
+    const flat = aC ? b : a;
+    if (cur.area >= 0.8 * flat.area && cur.rms < 0.25 * flat.rms) return aC;
+    if (cur.area > flat.area * 1.05) return aC;
+    if (flat.area > cur.area * 1.05) return !aC;
+    return !aC; // Gleichstand: die einfachere (Ebene) gewinnt
+  }
+  if (a.type !== b.type) {
+    const lo = RANK[a.type] < RANK[b.type] ? a : b;
+    const hi = lo === a ? b : a;
+    if (lo.area > hi.area * 1.05) return lo === a;
+    if (hi.area > lo.area * 1.05) return hi === a;
+    // gleiche Fläche: der einfachere Typ gewinnt nur, wenn sein Rest nicht
+    // mehr als 4x schlechter ist
+    if (lo.rms > 4 * hi.rms + 1e-7) return hi === a;
+    return lo === a;
+  }
+  if (a.area > b.area * 1.05) return true;
+  if (a.area < b.area * 0.95) return false;
+  return a.rms < b.rms;
+}
+
+// Saat-Reihenfolge: Fläche absteigend; Flächen innerhalb relativer Toleranz
+// (1e-6 — größer als das Float-Rauschen einer starren Drehung) gelten als
+// gleich. Innerhalb einer solchen Gruppe entscheidet der drehungsunabhängige
+// Sekundärschlüssel "Anzahl Nachbarn mit Dihedral < 1°" (AUFSTEIGEND: Saaten
+// ohne tangentiale Nachbarn zuerst — deren Modell-Fit ist nicht verfälscht),
+// danach der Index. Damit ist die Reihenfolge für ein starre gedrehtes Netz
+// dieselbe.
+function seedOrder(mesh) {
+  const { A, adj, T } = mesh;
+  const key = new Int32Array(T);
+  for (let f = 0; f < T; f++) {
+    let c = 0;
+    for (const [, d] of adj[f]) if (d < 1) c++;
+    key[f] = c;
+  }
+  const byArea = Array.from({ length: T }, (_, i) => i).sort((a, b) => A[b] - A[a]);
+  const groups = [];
+  let cur = null;
+  for (const i of byArea) {
+    if (cur && Math.abs(A[cur[0]] - A[i]) <= 1e-6 * Math.max(A[cur[0]], A[i])) cur.push(i);
+    else { cur = [i]; groups.push(cur); }
+  }
+  const order = [];
+  for (const g of groups) {
+    g.sort((a, b) => (key[a] - key[b]) || (a - b));
+    for (const i of g) order.push(i);
+  }
+  return order;
+}
+
 export function segmentByFit(mesh, opts = {}) {
   const tol = opts.tol ?? 0.02;
   const angleDeg = opts.angleDeg ?? 12;
   const timeBudgetMs = opts.timeBudgetMs ?? 4000;
+  const trim = opts.trim !== false;
+  const trace = typeof opts.trace === 'function' ? opts.trace : null;
   if (!mesh || !mesh.T) return { label: new Int32Array(0), regions: [] };
   const { P, tri, T, N, A, adj } = mesh;
   const ncos = Math.cos(angleDeg * Math.PI / 180);
+  // Ebenen: Facetten einer echten Ebene liegen exakt darin (Normale ±0°) — mit dem allgemeinen
+  // Winkel (12°) schluckte eine Ebene ganze Verrundungs-Streifen (r 1, 11,25° je Streifen).
+  const ncosPlane = Math.cos((opts.planeAngleDeg ?? 3) * Math.PI / 180);
   const label = new Int32Array(T).fill(-1);
   const regions = [];
   const t0 = now();
@@ -734,7 +806,7 @@ export function segmentByFit(mesh, opts = {}) {
     const qz = (P[3 * i0 + 2] + P[3 * i1 + 2] + P[3 * i2 + 2]) / 3;
     m.normal(qx, qy, qz, nrmBuf);
     const c = nrmBuf[0] * N[3 * f] + nrmBuf[1] * N[3 * f + 1] + nrmBuf[2] * N[3 * f + 2];
-    return Math.abs(c) >= ncos;
+    return Math.abs(c) >= (m.type === 'plane' ? ncosPlane : ncos);
   };
 
   // Nachbarschaft um eine Keimmenge erweitern (Dihedral ≤ 20°)
@@ -751,18 +823,86 @@ export function segmentByFit(mesh, opts = {}) {
     return out;
   };
 
+  // Restfehler: flächengewichteter RMS-Abstand der Eckpunkte zum Modell
+  const modelRms = (m, mem) => {
+    let s2 = 0, sw = 0;
+    for (const f of mem) {
+      const w = A[f];
+      for (let k = 0; k < 3; k++) {
+        const i = tri[3 * f + k];
+        const d = m.dist(P[3 * i], P[3 * i + 1], P[3 * i + 2]);
+        s2 += w * d * d;
+        sw += w;
+      }
+    }
+    return sw > 0 ? Math.sqrt(s2 / sw) : 0;
+  };
+
+  // größte Vertexabweichung eines Dreiecks vom Modell
+  const maxDev = (m, f) => {
+    let d = 0;
+    for (let k = 0; k < 3; k++) {
+      const i = tri[3 * f + k];
+      const dd = m.dist(P[3 * i], P[3 * i + 1], P[3 * i + 2]);
+      if (dd > d) d = dd;
+    }
+    return d;
+  };
+
+  // Abstand des Dreiecksmittelpunkts vom Modell
+  const cenDev = (m, f) => {
+    const i0 = tri[3 * f], i1 = tri[3 * f + 1], i2 = tri[3 * f + 2];
+    return m.dist(
+      (P[3 * i0] + P[3 * i1] + P[3 * i2]) / 3,
+      (P[3 * i0 + 1] + P[3 * i1 + 1] + P[3 * i2 + 1]) / 3,
+      (P[3 * i0 + 2] + P[3 * i1 + 2] + P[3 * i2 + 2]) / 3);
+  };
+
   // Region wachsen lassen
   const grow = (seedSet, type) => {
-    let m = fitModelInternal(mesh, seedSet, type, tol);
+    let set = seedSet;
+    let m = fitModelInternal(mesh, set, type, tol);
     if (!m) return null;
-    for (const f of seedSet) if (!okTri(m, f)) return null;
-    const mem = seedSet.slice();
+    // Ausreißer abtrennen (greedy): das am weitesten abweichende Dreieck wird
+    // entfernt, wenn der Restfehler dadurch deutlich kleiner wird. Damit fällt
+    // eine tangential anliegende Nachbarfläche (Verrundung an der Ebene, Kugel
+    // am Zylinder) aus der Saat heraus und das Modell wird sauber nachgeführt.
+    for (let it = 0; trim && it < 4 && set.length > 3; it++) {
+      const dev = set.map((f) => maxDev(m, f));
+      const worst = dev.indexOf(Math.max(...dev));
+      if (worst === 0) break;                       // die Saat bleibt erhalten
+      const keep = set.filter((_, i) => i !== worst);
+      if (keep.length < 3) break;
+      const m2 = fitModelInternal(mesh, keep, type, tol);
+      if (!m2) break;
+      const rmsNow = modelRms(m, set);
+      const rms2 = modelRms(m2, keep);
+      if (!(rms2 < rmsNow * 0.7)) break;            // kein deutlicher Gewinn
+      set = keep;
+      m = m2;
+    }
+    for (const f of set) {
+      if (!okTri(m, f)) return null;
+    }
+    // Gekrümmtes Modell: auch der Dreiecksmittelpunkt muss auf der Fläche liegen
+    // (eine Kugel durch eine ebene Fläche trifft deren Ecken, aber nicht die
+    // Fläche) — sonst ist das Modell entartet.
+    if (type !== 'plane') {
+      for (const f of set) if (cenDev(m, f) > 2 * tol) return null;
+    }
+    const rmsSeed = modelRms(m, set);
+    // Wachsen: ein Nachbar darf den Restfehler der Region nicht verfälschen —
+    // tangential anliegende Flächen (Verrundung neben Ebene) passen zwar in die
+    // Toleranz, gehören aber nicht zur Fläche.
+    const lim = Math.max(4 * rmsSeed, 0.25 * tol);
+    const mem = set.slice();
     const inS = new Set(mem);
     let lastFit = mem.length;
     for (let qi = 0; qi < mem.length; qi++) {
       for (const [g, d] of adj[mem[qi]]) {
         if (inS.has(g) || label[g] >= 0 || d > 45) continue;
         if (!okTri(m, g)) continue;
+        if (maxDev(m, g) > lim) continue;
         inS.add(g); mem.push(g);
         if (mem.length >= 2 * lastFit && mem.length >= 8) {
           const m2 = fitModelInternal(mesh, mem, type, tol);
@@ -776,40 +916,79 @@ export function segmentByFit(mesh, opts = {}) {
     if (mf && mem.every((f) => okTri(mf, f))) m = mf;
     let area = 0;
     for (const f of mem) area += A[f];
-    return { type, model: m, mem, area };
+    return { type, model: m, mem, area, rms: modelRms(m, mem) };
   };
 
-  const order = Array.from({ length: T }, (_, i) => i).sort((a, b) => A[b] - A[a]);
-  for (const s of order) {
-    if (label[s] >= 0) continue;
-    if (now() - t0 >= timeBudgetMs) { timedOut = true; break; }
+  // Region eintragen
+  const addRegion = (r) => {
+    const id = regions.length;
+    for (const f of r.mem) label[f] = id;
+    regions.push({
+      id,
+      type: r.type,
+      surf: r.model ? r.model.surf : null,
+      tris: r.mem,
+      area: r.area,
+    });
+  };
+
+  // Modell-Suche zu einer Saat: Nachbarschaften 24/10/4, je alle Modelltypen.
+  // Es wird NICHT bei der ersten erfolgreichen Nachbarschaft abgebrochen — das
+  // beste Modell (Fläche, dann Restfehler, dann Rang) zählt.
+  const trySeed = (s) => {
     let best = null;
+    const cands = [];
     for (const n of [24, 10, 4]) {
       const hood = seedHood(s, n);
       for (const type of TYPES) {
         if (type === 'torus' && hood.length < 6) continue;
         const r = grow(hood, type);
         if (!r) continue;
-        if (!best || r.area > best.area * 1.05 ||
-          (r.area > best.area * 0.95 && RANK[r.type] < RANK[best.type])) best = r;
+        cands.push({ hood: n, type: r.type, len: r.mem.length, area: r.area, rms: r.rms });
+        if (betterCand(r, best)) best = r;
       }
-      if (best) break;
     }
-    if (!best) best = { type: 'facet', model: null, mem: [s], area: A[s] };
-    const id = regions.length;
-    for (const f of best.mem) label[f] = id;
-    regions.push({
-      id,
-      type: best.type,
-      surf: best.model ? best.model.surf : null,
-      tris: best.mem,
-      area: best.area,
-    });
-  }
+    if (trace) trace(s, cands, best);
+    return best;
+  };
+
+  // Pass 1: alle Saaten. Passt auf kein Modell, wird die Saat VERTAGT und nicht
+  // markiert — ihre Nachbarschaft streift sonst tangentiale Grenzen (z. B.
+  // Zylinder↔Kugel) und passt auf kein Modell.
+  // Pass 2: vertagte Saaten erneut, in gleicher Reihenfolge; die Nachbarschaft
+  // besteht jetzt nur noch aus unmarkierten Dreiecken — das Modell passt.
+  const order = seedOrder(mesh);
+  const deferred = [];
+  const run = (list, keep) => {
+    for (const s of list) {
+      if (label[s] >= 0) continue;
+      if (now() - t0 >= timeBudgetMs) { timedOut = true; return; }
+      const r = trySeed(s);
+      if (r) addRegion(r);
+      else if (keep) keep.push(s);
+    }
+  };
+  run(order, deferred);
+  if (!timedOut) run(deferred, null);
+
   // Zeitbudget überschritten: übrige Dreiecke einzeln als Facette
   if (timedOut) {
     for (let f = 0; f < T; f++) {
       if (label[f] >= 0) continue;
+      const id = regions.length;
+      label[f] = id;
+      regions.push({ id, type: 'facet', surf: null, tris: [f], area: A[f] });
+    }
+    return { label, regions };
+  }
+
+  // Rückfall: jedes übrige Dreieck wird zur Ebene aus sich selbst (passt immer);
+  // Facette nur, wenn selbst das entartete Dreieck scheitert.
+  for (let f = 0; f < T; f++) {
+    if (label[f] >= 0) continue;
+    const r = grow([f], 'plane');
+    if (r) addRegion(r);
+    else {
       const id = regions.length;
       label[f] = id;
       regions.push({ id, type: 'facet', surf: null, tris: [f], area: A[f] });
