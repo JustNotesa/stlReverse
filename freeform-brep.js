@@ -580,13 +580,18 @@ function runRound(mesh, seg, state, round, opts, log) {
   // Nachbarfläche keine Ebene ist — die beiden übrigen Ketten bleiben
   // Geraden. Die zusammengelegte Ecke wird auf ALLE anliegenden Flächen
   // projiziert, damit sie auf ihnen liegt (Randprüfung des STEP-Prüfers).
+  // Rückgabe des Schalters: true → Kette selbst wählen; Zahl 0/1/2 → die
+  // Kante zwischen ps[k] und ps[k+1] des Dreiecks fest vorgeben (Fächer aus
+  // benachbarten Schliffen gezielt bauen).
   if (typeof opts.testMergeFacetVertices === 'function') {
     for (const wr of regions) {
       if (wr.kind !== 'facet') continue;
       for (const t of wr.tris) {
         const c = [tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]];
         const ps = c.map((mv) => (topo.vOfMesh[mv] >= 0 ? X[topo.vOfMesh[mv]] : ptOf(mesh, mv)));
-        if (!opts.testMergeFacetVertices(ps[0], ps[1], ps[2])) continue;
+        const want = opts.testMergeFacetVertices(ps[0], ps[1], ps[2]);
+        if (want === undefined || want === null || want === false) continue;
+        const forced = typeof want === 'number' && want >= 0 && want <= 2;
         // Ketten des Dreiecks (Endpunkte je Eckenpaar)
         const chainsOf = new Map();
         for (const ch of topo.chains) {
@@ -599,6 +604,10 @@ function runRound(mesh, seg, state, round, opts, log) {
           const a0 = c[k], b0 = c[(k + 1) % 3];
           const ch = chainsOf.get(`${Math.min(a0, b0)}|${Math.max(a0, b0)}`);
           if (!ch) continue;
+          if (forced) {
+            if (k === want) pick = [a0, b0];
+            continue;
+          }
           const o = regions[ch.L === wr.id ? ch.R : ch.L];
           const ebene = !o || o.kind === 'facet' || o.type === 'plane';
           // die Kette neben einer Rundfläche zuerst zusammenlegen (die beiden
@@ -776,6 +785,22 @@ function runRound(mesh, seg, state, round, opts, log) {
   const facesByType = { plane: 0, cylinder: 0, cone: 0, sphere: 0, torus: 0, facet: 0 };
   const merged = new Map();                   // entfallene Kante → { keep, flip }
   const dropped = new Set();                  // entfallene Kanten
+  // Kanten-Union-Find: eine entfallene Kante zeigt auf ihren Vertreter;
+  // resolveEdge liefert (Vertreter, Richtungswechsel gegenüber der Ursprungskante)
+  const resolveEdge = (i) => {
+    let flip = false;
+    let cur = i;
+    const seen = new Set();
+    while (merged.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      const m = merged.get(cur);
+      if (m.flip) flip = !flip;
+      cur = m.keep;
+    }
+    return { edge: cur, flip };
+  };
+  // Flächen sammeln: je Region ihre Schleifen (Uses der Kanten)
+  const cand = [];
   for (const wr of regions) {
     const loopIdx = topo.regionLoops.get(wr.id) || [];
     const loops = [];
@@ -806,37 +831,66 @@ function runRound(mesh, seg, state, round, opts, log) {
       sameSense = true;
       kind = 'facet';
     }
-    // Schliff: die Fläche hat genau zwei Geraden zwischen denselben Ecken —
-    // ihr Rand läuft doppelt über dieselbe Strecke, sie hat keinen Inhalt.
-    // Sie entfällt; ihre beiden geometrisch gleichen Kanten werden zu einer
-    // verschmolzen (die Nachbarflächen teilen sie sich danach).
-    const sl = sliverOf(loops, edges, dropped);
-    if (sl) {
-      merged.set(sl.drop, { keep: sl.keep, flip: sl.flip });
-      dropped.add(sl.drop);
-      if (log) log.push(`Runde ${round}: Fläche ${wr.id} (${kind}) ist ein Schliff `
-        + `(zwei gleiche Geraden ${sl.keep}/${sl.drop}) — entfernt, Kanten verschmolzen`);
-      continue;
-    }
-    // Entartete Fläche: eine Schleife ohne Flächeninhalt darf nicht ausgegeben werden
-    const degen = degenerateLoop(loops, edges, vertices, surf, sameSense);
-    if (degen) {
-      const cands = wr.kind === 'facet'
-        ? analyticTouching(mesh, wr, wLabel, regions, incident)
-        : analyticNeighbours(topo, regions, wr, degen.chains);
-      // Kein analytischer Nachbar direkt? → Umgebung (2 Ringe, sonst 3) suchen;
-      // erst wenn dort auch nichts ist, aufgeben
-      const seed = new Set(chainMeshVertices(mesh, topo, degen.chains));
-      for (const mv of regionVertices(mesh, wr)) seed.add(mv);
-      const c = fail('degenerate', cands, `Fläche ${wr.id} (${kind}): ${degen.why}`,
-        seed, pickSmallestAnalytic);
-      if (!c) {
-        if (log) log.push(`Runde ${round}: entartete Fläche ${wr.id} ohne analytischen Nachbarn `
-          + `im ${NEIGH_RING_MAX}-Ring → Abbruch`);
-        return { hard: true };
+    cand.push({ wr, kind, surf, sameSense, loops, dead: false });
+  }
+  // ── Schliffe: eine Schleife aus genau zwei Geraden zwischen denselben
+  // Ecken läuft doppelt über dieselbe Strecke — sie hat keinen Inhalt und
+  // entfällt; ihre beiden geometrisch gleichen Kanten werden zu einer
+  // verschmolzen (die Nachbarflächen teilen sie sich danach). Das
+  // Verschmelzen kann neue Schliffe erzeugen → bis zum Fixpunkt laufen.
+  // Reihenfolge: Regionen (deterministisch), Schleifen in Randreihenfolge.
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const cf of cand) {
+      if (cf.dead) continue;
+      for (let li = 0; li < cf.loops.length; li++) {
+        const sl = sliverOf(cf.loops[li], edges, resolveEdge);
+        if (!sl) continue;
+        if (sl.merge) {
+          merged.set(sl.drop, { keep: sl.keep, flip: sl.flip });
+          dropped.add(sl.drop);
+        }
+        cf.loops.splice(li, 1);               // die Schliff-Schleife entfällt
+        if (!cf.loops.length) cf.dead = true; // die ganze Fläche entfällt
+        if (log) {
+          log.push(`Runde ${round}: Fläche ${cf.wr.id} (${cf.kind}) ist ein Schliff `
+            + `(${sl.merge ? `zwei gleiche Geraden ${sl.keep}/${sl.drop}`
+              : `beide Geraden dieselbe Kante ${sl.keep}`}) — `
+            + `${cf.dead ? 'entfernt' : 'Schleife entfernt'}, Kanten verschmolzen`);
+        }
+        changed = true;
+        break;                                 // Kanten haben sich geändert → neu prüfen
       }
-      continue;
     }
+  }
+  // ── Entartete Flächen: eine Schleife ohne Flächeninhalt darf nicht
+  // ausgegeben werden (erst nach dem Schliff-Pass: der hat alle Schliffe
+  // entfernt, damit bleibt kein Schliff für die Fehlersuche übrig)
+  for (const cf of cand) {
+    if (cf.dead) continue;
+    const degen = degenerateLoop(cf.loops, edges, vertices, cf.surf, cf.sameSense);
+    if (!degen) continue;
+    const wr = cf.wr;
+    cf.dead = true;
+    const cands = wr.kind === 'facet'
+      ? analyticTouching(mesh, wr, wLabel, regions, incident)
+      : analyticNeighbours(topo, regions, wr, degen.chains);
+    // Kein analytischer Nachbar direkt? → Umgebung (2 Ringe, sonst 3) suchen;
+    // erst wenn dort auch nichts ist, aufgeben
+    const seed = new Set(chainMeshVertices(mesh, topo, degen.chains));
+    for (const mv of regionVertices(mesh, wr)) seed.add(mv);
+    const c = fail('degenerate', cands, `Fläche ${wr.id} (${cf.kind}): ${degen.why}`,
+      seed, pickSmallestAnalytic);
+    if (!c) {
+      if (log) log.push(`Runde ${round}: entartete Fläche ${wr.id} ohne analytischen Nachbarn `
+        + `im ${NEIGH_RING_MAX}-Ring → Abbruch`);
+      return { hard: true };
+    }
+  }
+  // Flächen ausgeben (Außenrand bestimmen)
+  for (const cf of cand) {
+    if (cf.dead) continue;
+    const { surf, sameSense, kind, loops } = cf;
     // Außenrand: bei Ebenen der größte projizierte Flächeninhalt, bei gekrümmten
     // Flächen nur bei genau einem Rand
     if (surf.type === 'plane') {
@@ -857,18 +911,6 @@ function runRound(mesh, seg, state, round, opts, log) {
   // Schliffe: die Verwendungen der verschmolzenen Kante umleiten (Richtung
   // bleibt relativ zur Eckenreihenfolge) und die entfallene Kante streichen
   if (merged.size) {
-    const resolve = (i) => {
-      let flip = false;
-      let cur = i;
-      const seen = new Set();
-      while (merged.has(cur) && !seen.has(cur)) {
-        seen.add(cur);
-        const m = merged.get(cur);
-        if (m.flip) flip = !flip;
-        cur = m.keep;
-      }
-      return { edge: cur, flip };
-    };
     const live = [];
     const idx = new Map();
     for (let i = 0; i < edges.length; i++) {
@@ -881,11 +923,12 @@ function runRound(mesh, seg, state, round, opts, log) {
         for (const u of lp.uses) {
           // jede Kantenummer wird neu vergeben (die entfallenen Kanten
           // verschieben alle folgenden), die verschmolzenen Kanten werden
-          // auf ihre behaltene umgeleitet (Richtung relativ zur Eckenreihenfolge)
-          const r = resolve(u.edge);
-          const flip = r.edge === u.edge ? false : r.flip;
+          // auf ihren Vertreter umgeleitet (Richtung relativ zur
+          // Eckenreihenfolge: die Vertreterecken entscheiden über den
+          // Richtungswechsel)
+          const r = resolveEdge(u.edge);
           u.edge = idx.get(r.edge);
-          u.fwd = u.fwd !== flip;
+          u.fwd = u.fwd !== r.flip;
         }
       }
     }
@@ -1209,26 +1252,40 @@ function degenerateLoop(loops, edges, vertices, surf, sameSense) {
   return null;
 }
 
-// Schliff: eine Fläche mit genau zwei Geraden zwischen denselben Ecken.
-// Der Rand läuft doppelt über dieselbe Strecke — die Fläche hat keinen
+// Schliff: eine Schleife aus genau zwei Geraden zwischen denselben Ecken.
+// Der Rand läuft doppelt über dieselbe Strecke — die Schleife hat keinen
 // Inhalt und entfällt; die beiden geometrisch gleichen Kanten (beide Geraden
 // zwischen demselben Eckenpaar) werden zu einer verschmolzen.
-function sliverOf(loops, edges, dropped) {
-  if (loops.length !== 1) return null;
-  const uses = loops[0].uses;
-  if (uses.length !== 2) return null;
-  const i1 = uses[0].edge, i2 = uses[1].edge;
-  if (i1 === i2) return null;
-  const e1 = edges[i1], e2 = edges[i2];
+//
+// Beide Kanten werden zuerst auf ihren VERTRETER geführt (Union-Find der
+// Kanten): eine Kante, die schon von einem früheren Schliff verschluckt
+// wurde, zeigt auf die Kante, die sie ersetzt. Beide Verwendungen können
+// also auf dieselbe Kante zeigen — dann entfällt die Schleife, ohne dass
+// etwas zu verschmelzen ist.
+//
+// Eckenvergleich: die Kanten tragen als v0/v1 die VERTRETERecken (Union-Find
+// der Netzecken nach dem Zusammenfallen der Kanten) — nicht die rohen
+// Netzecken-Ids. Zwei zusammenfallende Ecken sind so dieselbe Ecke.
+function sliverOf(lp, edges, resolveEdge) {
+  const uses = lp && lp.uses;
+  if (!uses || uses.length !== 2) return null;
+  const r1 = resolveEdge(uses[0].edge), r2 = resolveEdge(uses[1].edge);
+  const e1 = edges[r1.edge], e2 = edges[r2.edge];
   if (!e1 || !e2 || !e1.curve || !e2.curve) return null;
   if (e1.curve.type !== 'line' || e2.curve.type !== 'line') return null;
   if (e1.v0 === e1.v1 || e2.v0 === e2.v1) return null;
   const key = (e) => (e.v0 < e.v1 ? `${e.v0}|${e.v1}` : `${e.v1}|${e.v0}`);
-  if (key(e1) !== key(e2)) return null;
-  const keep = Math.min(i1, i2);
-  const drop = Math.max(i1, i2);
-  if (dropped.has(keep)) return null;     // die behaltene Kante entfällt bereits
-  return { keep, drop, flip: edges[keep].v0 !== edges[drop].v0 };
+  if (key(e1) !== key(e2)) return null;      // nicht dieselbe Strecke
+  if (r1.edge === r2.edge) {
+    // beide Verwendungen zeigen auf dieselbe Kante → nichts zu verschmelzen
+    return { keep: r1.edge, drop: r1.edge, flip: false, merge: false };
+  }
+  const keep = Math.min(r1.edge, r2.edge);
+  const drop = Math.max(r1.edge, r2.edge);
+  // Richtungswechsel: laufen die beiden Kanten gleichsinnig (Startecken
+  // gleich) oder gegensinnig (Startecke der einen = Endecke der anderen)?
+  const flip = edges[keep].v0 === edges[drop].v1;
+  return { keep, drop, flip, merge: true };
 }
 
 // Analytische Regionen, die eine Fläche berühren
