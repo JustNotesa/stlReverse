@@ -97,6 +97,10 @@
 // nichts ist, wird abgebrochen (kein stilles Scheitern an einer einzelnen Fläche).
 //
 // Optionen: opts.maxRounds (Standard 12), opts.debug.log (Rundenbilanz),
+//   opts.timeBudgetMs (Standard 6000 ms — Abbruch, wenn überschritten),
+//   opts.maxFacetShare (Standard 0.25 — Anteil der zu Facetten demotierten
+//   Dreiecke, ab dem der Versuch aussichtslos ist: das Ergebnis könnte den
+//   bisherigen Weg nie schlagen),
 //   opts.testForceChainFail / opts.testForceVertexFail (Testschalter, je einmal).
 // ─────────────────────────────────────────────────────────────────────────────
 import { trianglesFromGroups, indexMesh, segmentByFit } from './freeform-segment.js';
@@ -110,6 +114,9 @@ import { writeFreeformStep } from './freeform-step.js';
 
 // ---- Grenzwerte (Etappe 1) ----
 const ROUNDS_MAX = 12;           // höchstens 12 Runden (Standard; opts.maxRounds)
+const TIME_BUDGET_MS = 6000;     // Zeitbudget je Versuch (ms; opts.timeBudgetMs)
+const FACET_SHARE_MAX = 0.25;    // Anteil der zu Facetten demotierten Dreiecke (opts.maxFacetShare)
+const CHECK_EVERY = 200;         // Zeitprüfung alle CHECK_EVERY Netzecken bzw. Ketten
 const NEIGH_RING = 2;            // Ringe um einen Fehler: analytische Regionen suchen
 const NEIGH_RING_MAX = 3;        // erst danach aufgeben (kein Abbruch, solange etwas da ist)
 const STRIP_ROUNDS_MAX = 3;      // 3 Runden mit Streifen → Region ganz zur Fassade
@@ -122,6 +129,33 @@ const VERT_TOL = 1e-9;           // Rest der Eckprojektion (mm) — Ecken liegen
 
 const now = () => (globalThis.performance && globalThis.performance.now)
   ? globalThis.performance.now() : Date.now();
+
+// Zeitbudget überschritten? (jetzt − Start des Versuchs ≥ Budget)
+function budgetExceeded(state) {
+  return now() - state.t0 >= state.budgetMs;
+}
+
+// Zu viele Dreiecke zu Facetten demotiert → das Ergebnis kann den bisherigen
+// Weg nie schlagen (jedes Facett ist eine eigene Fläche) → sinnlos weiterlaufen
+function hopeless(state, mesh) {
+  return state.stripTris.size > state.shareMax * mesh.T;
+}
+
+// Protokollzeile: Zeitbudget überschritten
+function logBudget(log, state) {
+  if (log) {
+    log.push(`Zeitbudget überschritten (${Math.round(now() - state.t0)} ms `
+      + `> ${state.budgetMs} ms) → Abbruch`);
+  }
+}
+
+// Protokollzeile: hoffnungslos (zu viele Facetten)
+function logHopeless(log, state, mesh) {
+  if (!log) return;
+  const anteil = mesh.T > 0 ? (100 * state.stripTris.size) / mesh.T : 0;
+  log.push(`Hoffnungslos: ${state.stripTris.size} von ${mesh.T} Dreiecken zu Facetten `
+    + `demotiert (${anteil.toFixed(0)} % > ${(100 * state.shareMax).toFixed(0)} %) → Abbruch`);
+}
 
 function deepCopy(o) {
   if (Array.isArray(o)) return o.map(deepCopy);
@@ -281,7 +315,8 @@ function isCylSphere(A, B) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Freiform-B-Rep bauen: normalGroups → { step, report, brep } | null
 //
-// opts: { tol (Segmentier-Toleranz, default 0.02), debug: { log: [] } }
+// opts: { tol (Segmentier-Toleranz, default 0.02), debug: { log: [] },
+//         timeBudgetMs (Standard 6000), maxFacetShare (Standard 0.25) }
 // ─────────────────────────────────────────────────────────────────────────────
 export function buildFreeformBrep(normalGroups, opts = {}) {
   const o = opts || {};
@@ -297,6 +332,9 @@ export function buildFreeformBrep(normalGroups, opts = {}) {
 
 function buildInner(normalGroups, opts, log) {
   const t0 = now();
+  // Zeitbudget und Facetten-Anteil (Grenzen gegen endlose Versuche)
+  const budgetMs = Number.isFinite(opts.timeBudgetMs) ? Math.max(0, opts.timeBudgetMs) : TIME_BUDGET_MS;
+  const shareMax = Number.isFinite(opts.maxFacetShare) ? Math.max(0, opts.maxFacetShare) : FACET_SHARE_MAX;
   // 1) Netz: nur EINE dichte, mannigfaltige Schale
   const mesh = indexMesh(trianglesFromGroups(normalGroups));
   if (!mesh || !mesh.manifold || mesh.components !== 1) {
@@ -322,10 +360,16 @@ function buildInner(normalGroups, opts, log) {
     testForceVertexUsed: false,  // Testschalter (Ecke): wirkt nur einmal
     segById: new Map(seg.regions.map((r) => [r.id, r])),
     adj: buildVertexAdjacency(mesh),   // Nachbarschaft im Netz (Umgebungssuche)
+    t0,                                 // Startzeit des Versuchs (Zeitbudget)
+    budgetMs,                           // Zeitbudget in ms
+    shareMax,                           // Anteil der zu Facetten demotierten Dreiecke
   };
   const maxRounds = Number.isFinite(opts.maxRounds) && opts.maxRounds > 0
     ? Math.floor(opts.maxRounds) : ROUNDS_MAX;
   for (let round = 0; round < maxRounds; round++) {
+    // vor jeder Runde: Zeitbudget und Hoffnungslosigkeit prüfen
+    if (budgetExceeded(state)) { logBudget(log, state); return null; }
+    if (hopeless(state, mesh)) { logHopeless(log, state, mesh); return null; }
     const res = runRound(mesh, seg, state, round, opts, log);
     if (res.hard) return null;
     if (res.failures.length) {
@@ -343,7 +387,8 @@ function buildInner(normalGroups, opts, log) {
       }
       continue;
     }
-    // Erfolg → STEP
+    // Erfolg → STEP (aber nur, wenn das Ergebnis den bisherigen Weg schlagen kann)
+    if (hopeless(state, mesh)) { logHopeless(log, state, mesh); return null; }
     const { step } = writeFreeformStep(res.brep);
     const ms = Math.round((now() - t0) * 10) / 10;
     const report = {
@@ -526,6 +571,11 @@ function runRound(mesh, seg, state, round, opts, log) {
   const X = new Array(nv);
   let worstRes = 0;
   for (let vi = 0; vi < nv; vi++) {
+    // Zeitbudget (alle CHECK_EVERY Ecken prüfen)
+    if (vi % CHECK_EVERY === 0 && budgetExceeded(state)) {
+      logBudget(log, state);
+      return { hard: true };
+    }
     const mv = topo.vertices[vi].mv;
     const p = ptOf(mesh, mv);
     const ids = incident.get(mv) || new Set();
@@ -736,7 +786,13 @@ function runRound(mesh, seg, state, round, opts, log) {
     const fs = facetSurf.get(wr.id);
     return fs ? fs.surf : null;
   };
-  for (const ch of topo.chains) {
+  for (let ci = 0; ci < topo.chains.length; ci++) {
+    const ch = topo.chains[ci];
+    // Zeitbudget (alle CHECK_EVERY Ketten prüfen)
+    if (ci % CHECK_EVERY === 0 && budgetExceeded(state)) {
+      logBudget(log, state);
+      return { hard: true };
+    }
     if (collapsed.has(ch.id)) continue;
     const A2 = surfOfRegion(ch.L), B2 = surfOfRegion(ch.R);
     const vi0 = topo.vOfMesh[ch.mv[0]], vi1 = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
@@ -1370,7 +1426,9 @@ export function chooseFreeform(analysis, legacy) {
   // 'auto': nur der bisherige Weg, solange er nicht auffällig viele Flächen liefert
   if (mode === 'auto' && !(legacy && legacy.report
     && legacy.report.faceCount >= 5000 && legacy.report.faceCount >= 0.1 * T)) return legacy;
-  const ff = buildFreeformBrep(groups, {});
+  // Zeitbudget: 'auto' darf nicht lange blockieren (der bisherige Weg steht
+  // schon), 'true' (ausdrücklich gewünscht) darf länger rechnen
+  const ff = buildFreeformBrep(groups, { timeBudgetMs: mode === 'auto' ? 6000 : 30000 });
   if (!ff) {
     if (legacy?.report) legacy.report.freeform = { used: false, tried: true };
     return legacy;

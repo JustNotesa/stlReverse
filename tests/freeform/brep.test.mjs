@@ -336,7 +336,56 @@ test('schliff-faecher', () => {
   }
 });
 
+// ── Zeitbudget und Hoffnungslosigkeit ─────────────────────────────────────
+// Der Freiform-Versuch darf den Export nicht blockieren: ein Zeitbudget bricht
+// den Versuch ab, und sobald zu viele Dreiecke zu Facetten demotiert wurden,
+// kann das Ergebnis den bisherigen Weg nicht mehr schlagen → Abbruch.
+// Erwartet:
+//   • timeBudgetMs: 0                        → null (Protokoll: Zeitbudget)
+//   • maxFacetShare: 0 + erzwungene Ketten-Fehlstelle → null (Hoffnungslos)
+//   • normaler Aufruf                         → unverändert (exakt dieselben
+//     Flächen-/Kantenarten, gültige STEP-Datei)
+// ─────────────────────────────────────────────────────────────────────────────
+test('zeitbudget-hoffnungslos', () => {
+  const file = 'ff_rundquader_r1.stl';
+  const buf = readFileSync(join('tests/freeform/stl', file));
+  const groups = pipeline(buf);
+
+  // 1) Zeitbudget 0 → der Versuch bricht sofort ab
+  const dbg1 = { log: [] };
+  const r1 = buildFreeformBrep(groups, { timeBudgetMs: 0, debug: dbg1 });
+  assert.equal(r1, null, 'Zeitbudget 0 lieferte trotzdem ein Ergebnis');
+  assert.ok(dbg1.log.some((s) => s.includes('Zeitbudget überschritten')),
+    `kein Protokolleintrag zum Zeitbudget: ${dbg1.log.slice(-3).join(' | ')}`);
+
+  // 2) Hoffnungslosigkeit: die erzwungene Ketten-Fehlstelle demotiert Dreiecke
+  //    zu Facetten — bei maxFacetShare 0 kann das Ergebnis nichts mehr schlagen
+  const dbg2 = { log: [] };
+  const r2 = buildFreeformBrep(groups, { maxFacetShare: 0, testForceChainFail: true, debug: dbg2 });
+  assert.equal(r2, null, 'maxFacetShare 0 lieferte trotzdem ein Ergebnis');
+  assert.ok(dbg2.log.some((s) => s.includes('Hoffnungslos')),
+    `kein Protokolleintrag zur Hoffnungslosigkeit: ${dbg2.log.slice(-3).join(' | ')}`);
+
+  // 3) normaler Aufruf: unverändert
+  const dbg3 = { log: [] };
+  const r3 = buildFreeformBrep(groups, { debug: dbg3 });
+  assert.ok(r3, 'Freiform-Bau lieferte null');
+  const ff = r3.report && r3.report.freeform;
+  assert.ok(ff && ff.used, 'Freiform-Pfad nicht benutzt');
+  assert.deepEqual(typesOf(ff.faces, FACE_TYPES), STRICT[file].faces, 'Flächenarten weichen ab');
+  assert.deepEqual(typesOf(ff.edges, EDGE_TYPES), STRICT[file].edges, 'Kantenarten weichen ab');
+  assert.ok(!dbg3.log.some((s) => s.includes('Zeitbudget überschritten')),
+    'Zeitbudget im normalen Aufruf ausgelöst');
+  assert.ok(!dbg3.log.some((s) => s.includes('Hoffnungslos')),
+    'normaler Aufruf als hoffnungslos abgebrochen');
+  const { violations } = checkStepStrict(r3.step);
+  assert.equal(violations.length, 0,
+    `STEP-Verstöße: ${violations.slice(0, 3).map((v) => `${v.kind}: ${v.msg}`).join(' | ')}`);
+  console.log(`     zeitbudget-hoffnungslos: normal ${JSON.stringify(typesOf(ff.faces, FACE_TYPES))}`
+    + ` · Runden ${ff.rounds} · Streifen ${ff.stripTris}`);
+});
+
 console.log(failed ? `FAIL ${failed} Fall(e)`
   : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler`
-    + ' + Schliff + Schliff-Fächer');
+    + ' + Schliff + Schliff-Fächer + Zeitbudget/Hoffnungslosigkeit');
 process.exit(failed ? 1 : 0);
