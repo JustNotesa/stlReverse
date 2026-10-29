@@ -191,6 +191,11 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **NozzleBox (Printables, lokal `samples/`) 8893 → 3537 Flächen (2026-10-29, `wt/nozzlebox`)** — (1) Pinch: Ränder,
+  die sich in einer Ecke berühren, zerlegten die ganze ebene Fläche in Einzeldreiecke (Ablageboden 2764 Flächen, dazu
+  76 Halbring-Wände facettiert) → splitAtPinches teilt nur den Stern um den Berührpunkt ab; (2) Bohrung mit unsauberen
+  Rändern (D-Loch, boreFailWhy 'rims') darf in den Bogen-Pfad. Härtetest z1/z2, expect.maxFaces. Golden: dino 3897 → 3861.
+  Rest: Schrift-Gravur (~2100 Flächen, braucht B-Spline-Extrusion), ~500 Ösen-Facetten, Scharnier-Mantel (63).
 - [x] **Release 0.2.2 (2026-10-28)** — erstmals per CLI signiert (`.dev/amo-sign.sh`, web-ext sign unlisted, Schlüssel aus ClaudeFirefox/AMO-Konto.env), GitHub-Release v0.2.2 mit signierter xpi, updates.json ergänzt.
 - [x] **Splitter-Flächen auf Profil-Bögen (2026-10-28, `wt/splitter`)** — findArcBands nahm breite Ebene + erste
   Bogen-Facetten als Schein-Band (Fit-Radius ~200 mm, Toleranz > Pfeilhöhe) → 0,05-mm-Streifen quer über Wand und Fase.
