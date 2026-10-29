@@ -503,6 +503,12 @@ function setStepWatertightStatus(report) {
     if (n(report.mantleConesConverted)) done.push(`${report.mantleConesConverted} ${report.mantleConesConverted === 1 ? 'Kegelmantel' : 'Kegelmäntel'} als echter Kegel`);
     if (n(report.mantleChamfersConverted)) done.push(`${report.mantleChamfersConverted} ${report.mantleChamfersConverted === 1 ? 'Fase/Spitze' : 'Fasen/Spitzen'} am Außenmantel als echter Kegel`);
     if (n(report.tubesConverted)) done.push(`${report.tubesConverted} gebogene${report.tubesConverted === 1 ? 'r Kanal' : ' Kanäle'} als exakte Fläche (${report.tubePieces} Stück)`);
+    // Freiform-Pfad (fit-basierte Segmentierung): eigene analytische Flächen statt Facetten
+    if (report.freeform?.used) {
+      const ff = report.freeform.faces || {};
+      const analytisch = n(ff.plane) + n(ff.cylinder) + n(ff.cone) + n(ff.sphere) + n(ff.torus);
+      done.push(`Freiform: ${analytisch} analytische Flächen (Kugeln ${n(ff.sphere)}, Tori ${n(ff.torus)}), ${n(ff.facet)} Facetten`);
+    }
     // Warum blieb ein Kanal facettiert? Nur wenn der Rückfall nicht schon alles facettiert hat.
     if (!report.fallbackStage) {
       const tubeNote = tubeRejectNote(lastAnalysis?.tubeStats?.rejected);
