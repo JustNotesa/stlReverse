@@ -151,7 +151,7 @@ function loopOf(fd, li) {
  *
  * → null (in Ordnung) | String (Grund für das Scheitern des Bandes)
  */
-function guardCorner(corner2, c2, e2, t2, samples2) {
+export function guardCorner(corner2, c2, e2, t2, samples2) {
   const lc = Math.hypot(c2[0], c2[1]);
   const le = Math.hypot(e2[0], e2[1]);
   if (!(lc > 1e-9) || !(le > 1e-9)) return null;             // entartet → überspringen
