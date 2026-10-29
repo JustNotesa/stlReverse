@@ -1,6 +1,6 @@
 import {
   formatNumber, clamp, heightToColor,
-  formatBytes, describeDetailLevel,
+  formatBytes, formatBytesDe, describeDetailLevel,
   computePointBounds, computePrismBounds,
   dedupePolygonPoints, polygonSignedArea2d,
   normalizeVector, defaultBounds, rectangleFromBounds
@@ -46,6 +46,32 @@ describe('utils.js', () => {
     });
     test('handles non-finite', () => {
       expect(formatBytes(NaN)).toBe('0 B');
+    });
+  });
+
+  describe('formatBytesDe', () => {
+    test('deutsche Schreibweise: Dezimalkomma statt Punkt', () => {
+      expect(formatBytesDe(5376)).toBe('5,25 KB');
+      expect(formatBytesDe(1024)).toBe('1,00 KB');
+      expect(formatBytesDe(1048576)).toBe('1,00 MB');
+      expect(formatBytesDe(1572864)).toBe('1,50 MB');
+    });
+    test('ganze Bytes ohne Nachkommastellen', () => {
+      expect(formatBytesDe(5)).toBe('5 B');
+      expect(formatBytesDe(500)).toBe('500 B');
+      expect(formatBytesDe(1023)).toBe('1023 B');
+    });
+    test('0 und ungültige Werte ergeben 0 B', () => {
+      expect(formatBytesDe(0)).toBe('0 B');
+      expect(formatBytesDe(-5)).toBe('0 B');
+      expect(formatBytesDe(NaN)).toBe('0 B');
+      expect(formatBytesDe(undefined)).toBe('0 B');
+      expect(formatBytesDe(Infinity)).toBe('0 B');
+    });
+    test('gleiche Einheiten/Nachkommastellen wie formatBytes', () => {
+      expect(formatBytesDe(1024)).toBe(formatBytes(1024).replace('.', ','));
+      expect(formatBytesDe(1048576)).toBe(formatBytes(1048576).replace('.', ','));
+      expect(formatBytesDe(1024).replace(',', '')).toBe(formatBytes(1024).replace('.', ''));
     });
   });
 

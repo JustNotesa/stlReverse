@@ -228,4 +228,89 @@ describe('verdict.js', () => {
       expect(buildVerdict(reportA, null).defeature).toBe(true);
     });
   });
+
+  describe('buildVerdict – Rundungen (entfernt vs. erhalten)', () => {
+    test('roundsRemoved zählt Bänder, Profilecken und Kanten-Verrundungen', () => {
+      const v = buildVerdict({
+        watertight: true, faceCount: 6, edgeCount: 12,
+        bandsDefeatured: 2, cornersDefeatured: 1, filletsDefeatured: 3
+      }, null);
+      expect(v.roundsRemoved).toBe(6);
+      expect(v.filletsRemoved).toBe(6);
+    });
+
+    test('coneBandsDefeatured ist in bandsDefeatured enthalten und wird nicht doppelt gezählt', () => {
+      const v = buildVerdict({
+        watertight: true, faceCount: 6, edgeCount: 12,
+        bandsDefeatured: 4, coneBandsDefeatured: 2, cornersDefeatured: 1, filletsDefeatured: 1
+      }, null);
+      expect(v.roundsRemoved).toBe(6);
+      expect(v.filletsRemoved).toBe(6);
+    });
+
+    test('roundsKept zählt erhaltene Teil-Zylinder und -Kegel', () => {
+      const v = buildVerdict({
+        watertight: true, faceCount: 6, edgeCount: 12, arcCylinders: 2, arcCones: 1
+      }, null);
+      expect(v.roundsKept).toBe(3);
+      expect(v.roundsRemoved).toBe(0);
+    });
+
+    test('ohne Rundungen sind beide Zähler 0', () => {
+      const v = buildVerdict(reportB, null);
+      expect(v.roundsRemoved).toBe(0);
+      expect(v.roundsKept).toBe(0);
+    });
+  });
+
+  describe('buildVerdict – überwiegend facettiert', () => {
+    const analysisTri = (triangles) => ({ meta: { triangles } });
+
+    test('Dino-ähnlich (3861 Flächen aus 3938 Dreiecken) → true, mit Hinweis', () => {
+      const v = buildVerdict({ watertight: true, faceCount: 3861, edgeCount: 7722 }, analysisTri(3938));
+      expect(v.mostlyFaceted).toBe(true);
+      const eintrag = v.faceted.find((f) => f.text.includes('3861 von 3938 Dreiecken blieben einzelne Flächen'));
+      expect(eintrag).toBeTruthy();
+      expect(eintrag.tip).toBeTruthy();
+      expect(eintrag.text).toContain('organische Form, keine erkennbare Geometrie');
+    });
+
+    test('Washer (6 Flächen aus 2160 Dreiecken) → false', () => {
+      const v = buildVerdict({ watertight: true, faceCount: 6, edgeCount: 12 }, analysisTri(2160));
+      expect(v.mostlyFaceted).toBe(false);
+      expect(v.faceted.some((f) => f.text.includes('Dreiecken blieben einzelne Flächen'))).toBe(false);
+    });
+
+    test('Würfel (6 Flächen aus 12 Dreiecken) → false (zu wenige Flächen)', () => {
+      const v = buildVerdict({ watertight: true, faceCount: 6, edgeCount: 12 }, analysisTri(12));
+      expect(v.mostlyFaceted).toBe(false);
+    });
+
+    test('ohne Dreieckzahl ist kein Facetten-Urteil möglich', () => {
+      const v = buildVerdict({ watertight: true, faceCount: 3861, edgeCount: 7722 }, null);
+      expect(v.mostlyFaceted).toBe(false);
+      expect(v.triangles).toBeNull();
+    });
+
+    test('nicht wasserdicht → kein Facetten-Urteil', () => {
+      const v = buildVerdict({ watertight: false, faceCount: 3861, edgeCount: 7722, solids: 0 }, analysisTri(3938));
+      expect(v.mostlyFaceted).toBe(false);
+    });
+
+    test('Freiform: mehr Facetten als die Hälfte der Flächen → true, Text nennt ff.facet', () => {
+      const v = buildVerdict({
+        watertight: true, faceCount: 12, edgeCount: 24,
+        freeform: { used: true, faces: { plane: 2, cylinder: 1, facet: 9 } }
+      }, analysisTri(30));
+      expect(v.mostlyFaceted).toBe(true);
+      const eintrag = v.faceted.find((f) => f.text.includes('9 von 12 Flächen bleiben einzelne Facetten'));
+      expect(eintrag).toBeTruthy();
+      expect(eintrag.tip).toContain('Freiform-Erkennung');
+    });
+
+    test('Freiform mit wenigen Facetten → false', () => {
+      const v = buildVerdict(reportE, analysisTri(40));
+      expect(v.mostlyFaceted).toBe(false);
+    });
+  });
 });

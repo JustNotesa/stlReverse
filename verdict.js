@@ -9,12 +9,13 @@
  * (popup.js) bisher in `#step-watertight-status` geschrieben hat.
  */
 
-import { formatBytes } from './utils.js';
+import { formatBytesDe } from './utils.js';
 
 // Tipps der „Facettiert geblieben“-Box
 const TIP_SWEEP = 'im CAD als Sweep (Profil entlang einer Bahn) nachbauen';
 const TIP_FALLBACK = 'Kleinste Detailgröße gröber stellen oder „Verrundungen entfernen“ ausschalten';
 const TIP_TRIANGLES = '„STEP aus Dreiecken“ ist immer geschlossen, aber nur facettiert';
+const TIP_ORGANIC = 'Kleinste Detailgröße gröber stellen oder Freiform-Erkennung ausprobieren; im CAD bleibt das Teil schwer bearbeitbar';
 
 // ── Reiner Teil ───────────────────────────────────────────────────────────────
 
@@ -140,6 +141,28 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
   // ── Zustand ─────────────────────────────────────────────────────────────────
   const state = watertight ? 'ok' : (solids > 0 ? 'partial' : 'open');
 
+  // ── Rundungen: weg (scharf gemacht) vs. erhalten (echte Teil-Zylinder/-Kegel) ──
+  // `coneBandsDefeatured` steckt schon in `bandsDefeatured` — nicht doppelt zählen.
+  const roundsRemoved = finite(report.bandsDefeatured) + finite(report.cornersDefeatured) + finite(report.filletsDefeatured);
+  const roundsKept = finite(report.arcCylinders) + finite(report.arcCones);
+
+  // ── Überwiegend facettiert? ─────────────────────────────────────────────────
+  // Heißt: der Körper ist geschlossen, aber seine Flächen sind (fast) nur Dreiecke —
+  // im CAD dann schwer zu bearbeiten. Zwei Heuristiken:
+  //   1) viele Flächen im Verhältnis zu den Dreiecken (≥ 100 Flächen, ≥ 50 % Quote)
+  //   2) Freiform-Pfad: mehr als die Hälfte der Flächen sind gebliebene Facetten
+  const faces = finite(faceCount);
+  const triangles = analysis?.meta?.triangles;
+  const triCount = Number.isFinite(triangles) ? triangles : null;
+  const ffUsed = !!report.freeform?.used;
+  const ffFaces = ffUsed ? (report.freeform.faces || {}) : null;
+  const ffFacet = ffFaces ? finite(ffFaces.facet) : 0;
+  const mostlyFaceted = (
+    state === 'ok' && triCount != null && faces >= 100 && faces / triCount >= 0.5
+  ) || (
+    ffUsed && ffFacet > faces / 2
+  );
+
   // ── Einteilung: was umgewandelt wurde / was facettiert blieb / Hinweise ─────
   const converted = [];
   if (finite(report.boresConverted)) converted.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
@@ -165,6 +188,20 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
   if (finite(report.droppedShells)) info.push(`${report.droppedShells} hauchdünne Schale${report.droppedShells === 1 ? '' : 'n'} (Finne/Mini-Tasche) verworfen`);
 
   const faceted = [];
+  if (mostlyFaceted) {
+    // Organische Form: der Körper ist zu, besteht aber aus lauter Einzel-Flächen.
+    if (ffUsed && ffFacet > 0) {
+      faceted.push({
+        text: `${ffFacet} von ${faces} Flächen bleiben einzelne Facetten (organische Form, keine erkennbare Geometrie)`,
+        tip: TIP_ORGANIC
+      });
+    } else if (triCount != null) {
+      faceted.push({
+        text: `${faces} von ${triCount} Dreiecken blieben einzelne Flächen (organische Form, keine erkennbare Geometrie)`,
+        tip: TIP_ORGANIC
+      });
+    }
+  }
   if (!report.fallbackStage) {
     const tubeNote = tubeRejectNote(analysis?.tubeStats?.rejected);
     if (tubeNote) faceted.push({ text: tubeNote, tip: TIP_SWEEP });
@@ -190,12 +227,15 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
     boundaryEdges,
     nonManifoldEdges,
     orientationDefects,
-    triangles: analysis?.meta?.triangles ?? null,
+    triangles: triangles ?? null,
     size: bbox ? { w: bbox.width, d: bbox.depth, h: bbox.height } : null,
     converted,
     faceted,
     info,
-    filletsRemoved: finite(report.bandsDefeatured) + finite(report.cornersDefeatured) + finite(report.filletsDefeatured),
+    filletsRemoved: roundsRemoved,
+    roundsRemoved,
+    roundsKept,
+    mostlyFaceted,
     defeature: !!defeature,
     freeformUsed: !!report.freeform?.used,
     rawText,
@@ -229,11 +269,15 @@ function setKpi(doc, id, text, tone = '') {
   li.dataset.tone = tone;
 }
 
-function fillChips(doc, id, items) {
+function fillChips(doc, id, items, headId) {
+  const list = Array.isArray(items) ? items : [];
+  // Überschrift nur zeigen, wenn darunter wirklich etwas steht
+  const head = headId ? $(doc, headId) : null;
+  if (head) head.hidden = list.length === 0;
   const ul = $(doc, id);
   if (!ul) return;
   ul.textContent = '';
-  for (const text of items || []) {
+  for (const text of list) {
     const li = doc.createElement('li');
     li.textContent = text;
     ul.appendChild(li);
@@ -251,7 +295,11 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
     return;
   }
 
-  if (doc.body) doc.body.dataset.verdict = v.state;
+  if (doc.body) {
+    doc.body.dataset.verdict = v.state;
+    // Qualitäts-Marker: 'faceted' = geschlossen, aber überwiegend Facetten
+    doc.body.dataset.quality = v.mostlyFaceted ? 'faceted' : '';
+  }
 
   const icon = $(doc, 'verdict-icon');
   if (icon) icon.textContent = v.state === 'ok' ? '✓' : v.state === 'partial' ? '!' : '✕';
@@ -259,7 +307,7 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
   const title = $(doc, 'verdict-title');
   if (title) {
     title.textContent = v.state === 'ok'
-      ? 'Wasserdicht – bereit fürs CAD'
+      ? (v.mostlyFaceted ? 'Wasserdicht – aber überwiegend facettiert' : 'Wasserdicht – bereit fürs CAD')
       : v.state === 'partial'
         ? 'Teilweise offen – trotzdem nutzbar'
         : 'Nicht wasserdicht – nur Flächenmodell';
@@ -274,7 +322,11 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
       abbr.setAttribute('title', 'ein Körper mit Innen und Außen, kein reines Flächenmodell');
       abbr.textContent = 'Volumenkörper';
       sub.append(abbr);
-      sub.append(` aus ${fmtInt(v.faceCount)} echten CAD-Flächen.`);
+      if (v.mostlyFaceted) {
+        sub.append(', aber die Flächen sind überwiegend kleine Facetten (Dreiecks-Flächen) – im CAD schwer zu bearbeiten.');
+      } else {
+        sub.append(` aus ${fmtInt(v.faceCount)} echten CAD-Flächen.`);
+      }
     } else if (v.state === 'partial') {
       const solids = finite(v.solids);
       const opens = finite(v.openShells);
@@ -304,13 +356,30 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
     setKpi(doc, 'kpi-watertight', 'Nein', 'err');
   }
   setKpi(doc, 'kpi-size', v.size ? `${fmtDim(v.size.w)} × ${fmtDim(v.size.d)} × ${fmtDim(v.size.h)}` : '–');
-  if (!v.defeature) setKpi(doc, 'kpi-fillets', 'aus');
-  else if (!v.filletsRemoved) setKpi(doc, 'kpi-fillets', 'keine gefunden');
-  else setKpi(doc, 'kpi-fillets', `${v.filletsRemoved} entfernt`);
+  // Verrundungen ehrlich zählen: weg (scharf gemacht) und erhalten (bleiben rund)
+  const roundsRemoved = finite(v.roundsRemoved ?? v.filletsRemoved);
+  const roundsKept = finite(v.roundsKept);
+  let filletsText;
+  if (!v.defeature) {
+    filletsText = roundsKept > 0 ? `aus – ${roundsKept} bleiben rund` : 'aus';
+  } else if (roundsRemoved > 0) {
+    filletsText = `${roundsRemoved} entfernt` + (roundsKept > 0 ? `, ${roundsKept} bleiben rund` : '');
+  } else {
+    filletsText = roundsKept > 0 ? `${roundsKept} bleiben rund` : 'keine gezählt';
+  }
+  setKpi(doc, 'kpi-fillets', filletsText);
+  const filletsLi = $(doc, 'kpi-fillets');
+  if (filletsLi) {
+    if (filletsText === 'keine gezählt') {
+      filletsLi.setAttribute('title', 'Rundungen an Lochrändern und Mänteln werden beim Schärfen nicht einzeln gezählt.');
+    } else {
+      filletsLi.removeAttribute('title');
+    }
+  }
 
-  // Chips
-  fillChips(doc, 'verdict-converted', v.converted);
-  fillChips(doc, 'verdict-info', v.info);
+  // Chips (mit Überschriften, die nur bei Inhalt erscheinen)
+  fillChips(doc, 'verdict-converted', v.converted, 'verdict-converted-head');
+  fillChips(doc, 'verdict-info', v.info, 'verdict-info-head');
 
   // „Facettiert geblieben“
   const facetedBox = $(doc, 'verdict-faceted');
@@ -359,7 +428,7 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
 
   // Datei-Hinweis
   const hint = $(doc, 'export-file-hint');
-  if (hint) hint.textContent = res?.step ? `${fileBase}-volume.step · ca. ${formatBytes(res.step.length)}` : '';
+  if (hint) hint.textContent = res?.step ? `${fileBase}-volume.step · ca. ${formatBytesDe(res.step.length)}` : '';
 
   // Rohtext (Expertenansicht) — wortgleich zu heute
   const raw = $(doc, 'step-watertight-status');
@@ -377,7 +446,10 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
 
 /** Leert die Verdikt-Karte (Skelett / Ausgangszustand). */
 export function clearVerdict(doc = document) {
-  if (doc.body) doc.body.dataset.verdict = '';
+  if (doc.body) {
+    doc.body.dataset.verdict = '';
+    doc.body.dataset.quality = '';
+  }
   const icon = $(doc, 'verdict-icon');
   if (icon) icon.textContent = '';
   const title = $(doc, 'verdict-title');
@@ -393,8 +465,8 @@ export function clearVerdict(doc = document) {
     for (const li of items) li.dataset.tone = '';
   }
 
-  fillChips(doc, 'verdict-converted', []);
-  fillChips(doc, 'verdict-info', []);
+  fillChips(doc, 'verdict-converted', [], 'verdict-converted-head');
+  fillChips(doc, 'verdict-info', [], 'verdict-info-head');
 
   const facetedBox = $(doc, 'verdict-faceted');
   if (facetedBox) {

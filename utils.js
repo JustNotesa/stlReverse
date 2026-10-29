@@ -67,6 +67,24 @@ export function formatBytes(bytes) {
   return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
+/**
+ * Wie `formatBytes`, aber in deutscher Schreibweise: Dezimalkomma statt Punkt
+ * („5,25 KB“) und ganze Bytes ohne Nachkommastellen („5 B“ statt „5,00 B“).
+ */
+export function formatBytesDe(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  if (unitIndex === 0) return `${Math.round(value)} ${units[0]}`;
+  const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision).replace('.', ',')} ${units[unitIndex]}`;
+}
+
 export function describeDetailLevel(value) {
   if (value >= 90) return 'maximale Konturen';
   if (value >= 75) return 'feine Konturen';
