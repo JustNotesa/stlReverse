@@ -37,6 +37,63 @@ let featuresRenderer = null, featuresScene = null, featuresCamera = null,
 let brepRenderer = null, brepScene = null, brepCamera = null, brepControls = null,
     brepMeshGroup = null, brepResizeObs = null, brepAnimId = null;
 
+// ── Ansichts-Kopplung (STL ↔ STEP) ──────────────────────────────────────────
+// Registry der gekoppelten Viewer: name → { camera, controls, listener }.
+// 'stl' = Original-Mesh (Panel 1), 'step' = STEP-Modell (Panel 4).
+const syncViewers = { stl: null, step: null };
+let viewSyncEnabled = true;   // Schalter „Ansichten koppeln"
+let syncBusy = false;         // Re-entrancy-Schutz: das 'change'-Event der Ziel-Kamera
+                              // darf nicht zurück in die Quelle zurückspringen.
+
+export function registerSyncViewer(name, camera, controls) {
+  if (!camera || !controls) return;
+  // Vorherige Registrierung desselben Namens entfernen (Re-Init leakt sonst Listener).
+  const prev = syncViewers[name];
+  if (prev && prev.listener && prev.controls) {
+    prev.controls.removeEventListener('change', prev.listener);
+  }
+  const listener = () => {
+    if (!viewSyncEnabled) return;
+    syncViewsFrom(name);
+  };
+  controls.addEventListener('change', listener);
+  syncViewers[name] = { camera, controls, listener };
+}
+
+/**
+ * Kopplung ein-/ausschalten. Beim Einschalten wird sofort der STL-Stand übernommen.
+ * @param {boolean} on
+ */
+export function setViewSync(on) {
+  viewSyncEnabled = !!on;
+  if (viewSyncEnabled) syncViewsFrom('stl');
+}
+
+/**
+ * Kamera + Zielpunkt von einem Viewer auf den anderen übertragen.
+ * Inaktiv bei ausgeschalteter Kopplung oder im Modus „Nur STEP" (data-view="step").
+ * @param {'stl'|'step'} src Quell-Viewer
+ */
+export function syncViewsFrom(src) {
+  if (!viewSyncEnabled) return;
+  const panel = document.getElementById('compare-panel');
+  if (panel && panel.dataset && panel.dataset.view === 'step') return;
+  const from = syncViewers[src];
+  const to = syncViewers[src === 'stl' ? 'step' : 'stl'];
+  if (!from || !to) return;
+  if (syncBusy) return;
+  syncBusy = true;
+  try {
+    to.camera.position.copy(from.camera.position);
+    to.controls.target.copy(from.controls.target);
+    to.camera.zoom = from.camera.zoom;
+    to.camera.updateProjectionMatrix();
+    to.controls.update();
+  } finally {
+    syncBusy = false;
+  }
+}
+
 // ── Public helpers (also used by step-viewer.js) ────────────────────────────
 
 export function createThreeJsViewer(container, accentColor) {
@@ -134,6 +191,8 @@ export function initPipelineViewers() {
       const s = createThreeJsViewer(stlContainer, 0x1be0a0);
       stlRenderer = s.renderer; stlScene = s.scene; stlCamera = s.camera;
       stlControls = s.controls; stlResizeObs = s.resizeObserver; stlAnimId = s.animFrameId;
+      // Ansichts-Kopplung: STL ist die Quelle, das STEP-Modell folgt.
+      registerSyncViewer('stl', s.camera, s.controls);
     } catch (e) { console.warn('STL viewer init failed:', e.message); }
   }
 
@@ -247,6 +306,9 @@ export function updateStlViewer(triangles, bbox) {
     stlControls.target.set(0, 0, 0);
     stlControls.update();
   }
+
+  // Gekoppelte Ansicht (STEP-Panel) auf den neuen STL-Stand bringen.
+  syncViewsFrom('stl');
 }
 
 // ── Viewer 2: Erkannte Features ─────────────────────────────────────────────
