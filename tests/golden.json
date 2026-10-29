@@ -402,7 +402,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 2306,
+      "faces": 1038,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -410,8 +410,8 @@
       "cornersDefeatured": 0,
       "tubesConverted": 2,
       "tubePieces": 27,
-      "cylindrical": 4,
-      "conical": 48,
+      "cylindrical": 12,
+      "conical": 144,
       "occt": true
     }
   },
@@ -562,7 +562,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 219,
+      "faces": 12,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -570,8 +570,8 @@
       "cornersDefeatured": 0,
       "tubesConverted": 0,
       "tubePieces": 0,
-      "cylindrical": 1,
-      "conical": 0,
+      "cylindrical": 4,
+      "conical": 6,
       "occt": true
     }
   },
@@ -594,7 +594,7 @@
     },
     "defeatureOff": {
       "exported": true,
-      "faces": 867,
+      "faces": 39,
       "watertight": true,
       "boresConverted": 0,
       "filletsDefeatured": 0,
@@ -603,7 +603,7 @@
       "tubesConverted": 0,
       "tubePieces": 0,
       "cylindrical": 1,
-      "conical": 0,
+      "conical": 36,
       "occt": true
     }
   },

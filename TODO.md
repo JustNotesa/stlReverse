@@ -191,6 +191,13 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Kleinteile NozzleBox (2026-10-29, `wt/kleinteile`)** — (1) Ösen: Lochringe im STL gegeneinander verdreht
+  (keine Mantellinie) → `insertRulings` (profile-arcs.js) setzt Punkte exakt auf den Kreis an Schnittwinkeln und
+  trianguliert die Wand neu; Gravur-Ablauf läuft ohne/mit Mantellinien, weniger Flächen gewinnt. (2) Scharnier-Knöchel:
+  `axisCandidates` übersprang Flächen mit circleRim → nur deren Kreis-Loops ignorieren. Härtetests z3/z4.
+  NozzleBox 1621 → 1049 (AUS 1625 → 1053). Golden (AUS): washer_chamfered 219 → 12, washer_filleted 867 → 39,
+  eBike 2306 → 1038. Risiko: Ecken-Abweichung NozzleBox bis 5,5e-6 mm (CST rechnet 1e-6) → CST-Test offen.
+  Offen: Kabelhalter-Hakenspitze (gleiche Ursache, noch nicht erfasst), Unit-Tests insertRulings.
 - [x] **Gravur als Extrusion (2026-10-29, `wt/gravur`)** — Schrift-/Logo-Wände zwischen zwei parallelen Ebenen
   (extrusion-bands.js) → SURFACE_OF_LINEAR_EXTRUSION über kubischer B-Spline durch die Netzpunkte (spline-fit.js,
   extrusion-plans.js); Deck-/Bodenfläche teilen dieselben Spline-Kanten; Prüfung/Anwenden über validateArcBands/applyArcBands.
@@ -210,7 +217,7 @@ Kreis-Kanten teilen.
   die sich in einer Ecke berühren, zerlegten die ganze ebene Fläche in Einzeldreiecke (Ablageboden 2764 Flächen, dazu
   76 Halbring-Wände facettiert) → splitAtPinches teilt nur den Stern um den Berührpunkt ab; (2) Bohrung mit unsauberen
   Rändern (D-Loch, boreFailWhy 'rims') darf in den Bogen-Pfad. Härtetest z1/z2, expect.maxFaces. Golden: dino 3897 → 3861.
-  Rest: Schrift-Gravur (→ erledigt, siehe Gravur), ~500 Ösen-Facetten, Scharnier-Mantel (63).
+  Rest: Schrift-Gravur (→ erledigt, siehe Gravur), Ösen + Scharnier → erledigt, siehe Kleinteile.
 - [x] **Release 0.2.2 (2026-10-28)** — erstmals per CLI signiert (`.dev/amo-sign.sh`, web-ext sign unlisted, Schlüssel aus ClaudeFirefox/AMO-Konto.env), GitHub-Release v0.2.2 mit signierter xpi, updates.json ergänzt.
 - [x] **Splitter-Flächen auf Profil-Bögen (2026-10-28, `wt/splitter`)** — findArcBands nahm breite Ebene + erste
   Bogen-Facetten als Schein-Band (Fit-Radius ~200 mm, Toleranz > Pfeilhöhe) → 0,05-mm-Streifen quer über Wand und Fase.
