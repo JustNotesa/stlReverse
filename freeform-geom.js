@@ -244,6 +244,28 @@ export function projectMulti(surfs, x0, opts = {}) {
 
 // ── Analytische Schnittkurven ───────────────────────────────────────────────
 
+// Toleranzen der Strukturprüfungen (Endprüfung: 16 Stützpunkte, VERIFY_TOL absolut):
+// STL-Daten sind float32 — bei 10–30 mm Kantenlänge liegt das Rauschen bei
+// ~1e-6 mm. An tangentialen Berührungen (Kugel↔Zylinder, Torus↔Ebene) ist die
+// Lage einer projizierten Ecke axial nur quadratisch genau (Rest ~1e-13 mm →
+// ~3e-7 mm). Die Strukturprüfungen müssen das auffangen, das eigentliche
+// Kriterium bleibt die Endprüfung (die eine falsche Kurve zurückweist).
+const TOL_REL = 1e-6;      // relativ zur Modellgröße (Radius/Kantenlänge)
+const VERIFY_TOL = 1e-7;   // Endprüfung: Abstand der Stützpunkte von beiden Flächen (mm)
+
+// charakteristische Größe eines Flächenpaares (Radius, Kettenlänge)
+function geomScale(A, B, p, q) {
+  let s = 1;
+  const d = len(sub(q, p));
+  if (Number.isFinite(d)) s = Math.max(s, d);
+  for (const x of [A, B]) {
+    if (!x) continue;
+    if (Number.isFinite(x.R)) s = Math.max(s, x.R);
+    if (Number.isFinite(x.Rm)) s = Math.max(s, x.Rm);
+  }
+  return s;
+}
+
 // Drehachse einer Fläche (Richtung + Punkt auf der Achse)
 function axisOf(s) {
   switch (s.type) {
@@ -256,14 +278,18 @@ function axisOf(s) {
   }
 }
 
-// Gemeinsame Drehachse zweier Flächen (null, wenn keine)
-function commonAxis(A, B) {
+// Gemeinsame Drehachse zweier Flächen (null, wenn keine).
+// Die Toleranzen sind relativ zur Modellgröße: nach dem Snap sind die Achsen
+// exakt parallel, ohne Snap (echtes Teil) weichen sie um den Fit-Rest ab.
+function commonAxis(A, B, scale = 1) {
   if (A.type === 'plane' && B.type === 'plane') return null; // zwei Ebenen: Linie
   const ax = axisOf(A);
   const bx = axisOf(B);
+  const angTol = TOL_REL;                        // Winkel (sin) für "parallel"
+  const posTol = TOL_REL * Math.max(1, scale);   // Abstand der Achsen (mm)
   let dir = null;
   if (ax.dir && bx.dir) {
-    if (len(cross(ax.dir, bx.dir)) > 1e-9) return null; // nicht parallel
+    if (len(cross(ax.dir, bx.dir)) > angTol) return null; // nicht parallel
     dir = ax.dir;
   } else if (ax.dir) {
     dir = ax.dir;
@@ -280,7 +306,7 @@ function commonAxis(A, B) {
   if (ax.point && bx.point) {
     const v = sub(bx.point, ax.point);
     const off = len(sub(v, mul(dir, dot(v, dir))));
-    if (off > 1e-7) return null; // Punkte nicht auf einer Achse
+    if (off > posTol) return null; // Punkte nicht auf einer Achse
     O = ax.point;
   } else if (ax.point) {
     O = ax.point;
@@ -304,8 +330,11 @@ function angleAround(x, a, centre, pt) {
 export function sampleCurve(curve, p, q) {
   const out = [];
   if (curve.type === 'line') {
-    const d = sub(q, p);
-    for (let i = 0; i < 16; i++) out.push(add(p, mul(d, i / 15)));
+    // die Gerade hat ihre eigene Richtung (bei Zylindern die Achse) — die
+    // Stützpunkte folgen der KURVE, nicht der Sehne p→q
+    const d = curve.d ? curve.d : sub(q, p);
+    const L = len(sub(q, p));
+    for (let i = 0; i < 16; i++) out.push(add(p, mul(d, (L * i) / 15)));
     return out;
   }
   // Kreis: Theta der Endpunkte in der (eventuell gespiegelten) Achse
@@ -324,14 +353,18 @@ export function sampleCurve(curve, p, q) {
 // Prüfung: alle Stützpunkte müssen auf beiden Flächen liegen
 function curveOnSurfaces(A, B, curve, p, q) {
   for (const e of sampleCurve(curve, p, q)) {
-    if (Math.abs(sdist(A, e)) > 1e-7) return false;
-    if (Math.abs(sdist(B, e)) > 1e-7) return false;
+    if (Math.abs(sdist(A, e)) > VERIFY_TOL) return false;
+    if (Math.abs(sdist(B, e)) > VERIFY_TOL) return false;
   }
   return true;
 }
 
 // Analytische Schnittkurve A∩B zwischen p und q; m = Punkt nahe der Bogenmitte
 export function analyticCurve(A, B, p, q, m) {
+  // Modellgröße des Paares → Toleranzen relativ dazu (STL-Rauschen float32:
+  // ~1e-6 mm bei 10–30 mm; an Tangentialpunkten axial nur quadratisch genau)
+  const scale = geomScale(A, B, p, q);
+  const posTol = TOL_REL * scale;
   // R1: zwei Ebenen → Gerade
   if (A.type === 'plane' && B.type === 'plane') {
     const d = sub(q, p);
@@ -340,14 +373,15 @@ export function analyticCurve(A, B, p, q, m) {
     return curveOnSurfaces(A, B, curve, p, q) ? curve : null;
   }
   // R2: gemeinsame Drehachse → Kreis
-  const ax = commonAxis(A, B);
+  const ax = commonAxis(A, B, scale);
   if (ax) {
     const centre = add(ax.O, mul(ax.dir, dot(ax.dir, sub(p, ax.O))));
     const R = len(sub(p, centre));
     if (R > 1e-9) {
-      const onCircle = Math.abs(dot(ax.dir, sub(q, p))) < 1e-7
-        && Math.abs(len(sub(q, centre)) - R) < 1e-7;
-      if (onCircle) {
+      // p und q auf demselben Kreis: gleiche axiale Lage und gleicher Radius
+      const d1 = Math.abs(dot(ax.dir, sub(q, p)));
+      const d2 = Math.abs(len(sub(q, centre)) - R);
+      if (d1 < posTol && d2 < posTol) {
         const x = norm(sub(p, centre));
         let a = ax.dir;
         if (len(sub(p, q)) > 1e-9 && m) {
@@ -360,20 +394,35 @@ export function analyticCurve(A, B, p, q, m) {
       }
     }
   }
-  // R3: Gerade auf Zylindern
+  // R3: Gerade auf Zylindern (tangentiale Berührung). Die RICHTUNG kommt aus
+  // der Fläche (Zylinderachse), nicht aus den Ecken: bei Tangentialpunkten
+  // liegt eine projizierte Ecke axial nur ~1e-6 mm genau auf der Achse, die
+  // Kante selbst ist dagegen exakt.
   const cylA = A.type === 'cylinder' ? A : null;
   const cylB = B.type === 'cylinder' ? B : null;
   if (cylA || cylB) {
     const cyl = cylA || cylB;
     const other = cylA ? B : A;
     const d = sub(q, p);
-    if (len(d) > 1e-9 && len(cross(norm(d), cyl.a)) < 1e-9) {
-      let ok = false;
-      if (other.type === 'plane') ok = Math.abs(dot(other.n, cyl.a)) < 1e-9;
-      else if (other.type === 'cylinder') ok = len(cross(other.a, cyl.a)) < 1e-9;
-      if (ok) {
-        const curve = { type: 'line', p: [p[0], p[1], p[2]], d: norm(d) };
-        return curveOnSurfaces(A, B, curve, p, q) ? curve : null;
+    const L = len(d);
+    if (L > 1e-9) {
+      let dir = null;
+      if (other.type === 'plane') {
+        // Ebene ⊥ Achse → Schnitt ist eine Gerade parallel zur Achse. Der
+        // Winkel muss so klein sein, dass die Gerade über die Kettenlänge
+        // innerhalb der Endprüfung (VERIFY_TOL) bleibt.
+        if (Math.abs(dot(other.n, cyl.a)) * L < VERIFY_TOL) dir = cyl.a;
+      } else if (other.type === 'cylinder') {
+        if (len(cross(other.a, cyl.a)) * L < VERIFY_TOL) dir = cyl.a;
+      }
+      if (dir) {
+        const dd = dot(dir, d) < 0 ? mul(dir, -1) : dir;   // Richtung v0 → v1
+        const w = sub(q, p);
+        const off = len(sub(w, mul(dd, dot(w, dd))));      // q quer zur Achse
+        if (off < posTol) {
+          const curve = { type: 'line', p: [p[0], p[1], p[2]], d: dd };
+          return curveOnSurfaces(A, B, curve, p, q) ? curve : null;
+        }
       }
     }
   }
@@ -523,9 +572,10 @@ export function evalBspline(c, u) {
 // Stufe schon als gut genug gilt (wenn noch eine feinere Stufe folgt)
 const FIT_RESERVE = 0.25;
 
-// Stützpunkt anhängen, wenn er nicht zu dicht am Vorgänger liegt
+// Stützpunkt anhängen, wenn er nicht zu dicht am Vorgänger liegt (mindestens
+// 1e-6 mm Abstand — sonst entstehen winzige Knotenintervalle im B-Spline)
 function pushPoint(pts, p) {
-  if (pts.length && len(sub(pts[pts.length - 1], p)) < 1e-7) return;
+  if (pts.length && len(sub(pts[pts.length - 1], p)) < 1e-6) return;
   pts.push(p);
 }
 

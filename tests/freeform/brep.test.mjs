@@ -76,11 +76,24 @@ const typesOf = (f, keys) => {
   return o;
 };
 
-// Soll-Flächenarten der beiden geraden Körper (strikt)
+// Soll-Flächen- und Kantenarten ALLER sechs Körper (strikt): die gedrehten
+// Körper müssen dieselben Zahlen liefern wie die geraden (die Achsen der
+// gedrehten Flächen stehen nur nicht mehr senkrecht im Koordinatensystem).
 const STRICT = {
-  'ff_platte_loch_torus.stl': { plane: 6, cylinder: 1, cone: 0, sphere: 0, torus: 1, facet: 0 },
-  'ff_halbkugel_zylinder.stl': { plane: 1, cylinder: 1, cone: 0, sphere: 1, torus: 0, facet: 0 },
+  'ff_rundquader_r1.stl': {
+    faces: { plane: 6, cylinder: 12, cone: 0, sphere: 8, torus: 0, facet: 0 },
+    edges: { line: 24, circle: 24, bspline: 0 },
+  },
+  'ff_platte_loch_torus.stl': {
+    faces: { plane: 6, cylinder: 1, cone: 0, sphere: 0, torus: 1, facet: 0 },
+    edges: { line: 12, circle: 6, bspline: 0 },
+  },
+  'ff_halbkugel_zylinder.stl': {
+    faces: { plane: 1, cylinder: 1, cone: 0, sphere: 1, torus: 0, facet: 0 },
+    edges: { line: 0, circle: 4, bspline: 0 },
+  },
 };
+for (const k of Object.keys(STRICT)) STRICT[`${k.replace('.stl', '')}_gedreht.stl`] = STRICT[k];
 
 // ── Fälle: je Körper ein Fall ────────────────────────────────────────────────
 for (const body of describeBodies()) {
@@ -117,19 +130,13 @@ function check(body, groups, dbg) {
   console.log(`     ${body.file}: Flächen ${JSON.stringify(faces)} · Kanten ${JSON.stringify(edges)}`
     + ` · Runden ${ff.rounds} · demotet ${ff.demoted} · Streifen ${ff.stripTris} · ${ff.ms} ms`);
 
-  // Flächenzahl je Typ: bei den geraden Körpern strikt, sonst nur melden
+  // Flächen- und Kantenarten: strikt für alle sechs Körper
   const want = STRICT[body.file];
-  if (want) {
-    assert.deepEqual(faces, want,
-      `Flächenarten weichen ab: ${JSON.stringify(faces)} statt ${JSON.stringify(want)}`);
-  } else {
-    const w = typesOf(body.faces, FACE_TYPES);
-    const diff = FACE_TYPES.filter((k) => (faces[k] || 0) !== (w[k] || 0));
-    if (diff.length) {
-      console.log(`     MISMATCH ${body.file}: Flächen ${diff.map((k) => `${k} ${faces[k] || 0} statt ${w[k] || 0}`).join(', ')}`
-        + ` (erwartet ${JSON.stringify(w)})`);
-    }
-  }
+  assert.ok(want, `keine Soll-Werte für ${body.file}`);
+  assert.deepEqual(faces, want.faces,
+    `Flächenarten weichen ab: ${JSON.stringify(faces)} statt ${JSON.stringify(want.faces)}`);
+  assert.deepEqual(edges, want.edges,
+    `Kantenarten weichen ab: ${JSON.stringify(edges)} statt ${JSON.stringify(want.edges)}`);
 
   // strikte CAD-Importer
   const { violations, stats } = checkStepStrict(res.step);
@@ -208,6 +215,41 @@ test('streifen-demotion', () => {
   }
 });
 
+// ── Schliff: zwei Ecken eines Facetten-Dreiecks fallen zusammen ─────────────
+// Erwartung: die Fläche (ihr Rand läuft doppelt über dieselbe Strecke, sie hat
+// keinen Inhalt) entfällt, ihre beiden geometrisch gleichen Geraden werden zu
+// EINER Kante verschmolzen — die Nachbarflächen teilen sie sich danach —
+// und die STEP-Datei bleibt strikt gültig.
+test('schliff', () => {
+  const file = 'ff_halbkugel_zylinder.stl';
+  const buf = readFileSync(join('tests/freeform/stl', file));
+  const groups = pipeline(buf);
+  let getroffen = 0;
+  const dbg = { log: [] };
+  const res = buildFreeformBrep(groups, {
+    // eine Kette Zylinder↔Kugel scheitern lassen → die Kugel wird gestreift
+    // und zu Facetten (kleine Dreiecke auf der Kugel)
+    testForceChainFail: true,
+    // im ersten Facetten-Dreieck zwei Ecken zusammenlegen
+    testMergeFacetVertices: () => { getroffen++; return getroffen === 1; },
+    debug: dbg,
+  });
+  assert.ok(res, 'Freiform-Bau lieferte null');
+  const ff = res.report && res.report.freeform;
+  assert.ok(ff && ff.used, 'Freiform-Pfad nicht benutzt');
+  const schliff = dbg.log.filter((s) => s.includes('Schliff'));
+  console.log(`     schliff: Flächen ${JSON.stringify(typesOf(ff.faces, FACE_TYPES))}`
+    + ` · Kanten ${JSON.stringify(typesOf(ff.edges, EDGE_TYPES))}`
+    + ` · Schliffe ${schliff.length}${schliff.length ? ` — ${schliff[0]}` : ''}`);
+  assert.ok(getroffen >= 1, 'Facetten-Dreieck nicht erreicht');
+  assert.ok(schliff.length >= 1, 'kein Schliff erkannt');
+  const { violations } = checkStepStrict(res.step);
+  if (violations.length) {
+    throw new Error(`${violations.length} Verstöße: `
+      + violations.slice(0, 3).map((v) => `${v.kind}: ${v.msg}`).join(' | '));
+  }
+});
+
 console.log(failed ? `FAIL ${failed} Fall(e)`
-  : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler`);
+  : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler + Schliff`);
 process.exit(failed ? 1 : 0);

@@ -487,6 +487,7 @@ function runRound(mesh, seg, state, round, opts, log) {
     snap = null;
   }
   const surfs = (snap && snap.surfs && typeof snap.surfs.get === 'function') ? snap.surfs : null;
+  if (log && snap && snap.log) for (const s of snap.log) log.push(`Snap: ${s}`);
   for (const wr of regions) {
     if (wr.kind !== 'analytic') continue;
     let s = surfs ? surfs.get(wr.id) : null;
@@ -573,6 +574,59 @@ function runRound(mesh, seg, state, round, opts, log) {
   for (let i = 0; i < nv; i++) parent[i] = i;
   const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
   const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+  // Testschalter: in einem Facetten-Dreieck zwei Ecken zusammenlegen
+  // (Schliff-Vorfall). Die Kette zwischen ihnen fällt dadurch weg, die
+  // Fläche bekommt zwei gleiche Geraden. Gewählt wird die Kette, deren
+  // Nachbarfläche keine Ebene ist — die beiden übrigen Ketten bleiben
+  // Geraden. Die zusammengelegte Ecke wird auf ALLE anliegenden Flächen
+  // projiziert, damit sie auf ihnen liegt (Randprüfung des STEP-Prüfers).
+  if (typeof opts.testMergeFacetVertices === 'function') {
+    for (const wr of regions) {
+      if (wr.kind !== 'facet') continue;
+      for (const t of wr.tris) {
+        const c = [tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]];
+        const ps = c.map((mv) => (topo.vOfMesh[mv] >= 0 ? X[topo.vOfMesh[mv]] : ptOf(mesh, mv)));
+        if (!opts.testMergeFacetVertices(ps[0], ps[1], ps[2])) continue;
+        // Ketten des Dreiecks (Endpunkte je Eckenpaar)
+        const chainsOf = new Map();
+        for (const ch of topo.chains) {
+          if (ch.L !== wr.id && ch.R !== wr.id) continue;
+          const a0 = ch.mv[0], b0 = ch.mv[ch.mv.length - 1];
+          chainsOf.set(`${Math.min(a0, b0)}|${Math.max(a0, b0)}`, ch);
+        }
+        let pick = null, pickAny = null, pickLen = Infinity;
+        for (let k = 0; k < 3; k++) {
+          const a0 = c[k], b0 = c[(k + 1) % 3];
+          const ch = chainsOf.get(`${Math.min(a0, b0)}|${Math.max(a0, b0)}`);
+          if (!ch) continue;
+          const o = regions[ch.L === wr.id ? ch.R : ch.L];
+          const ebene = !o || o.kind === 'facet' || o.type === 'plane';
+          // die Kette neben einer Rundfläche zuerst zusammenlegen (die beiden
+          // übrigen Ketten bleiben dann Geraden), sonst das kürzeste Paar
+          const d = len(sub(ps[k], ps[(k + 1) % 3]));
+          if (d < pickLen) { pickLen = d; pickAny = [a0, b0]; }
+          if (!ebene) { pick = [a0, b0]; break; }
+        }
+        if (!pick) pick = pickAny;
+        if (!pick) continue;
+        const ia = topo.vOfMesh[pick[0]], ib = topo.vOfMesh[pick[1]];
+        if (ia < 0 || ib < 0) continue;
+        union(ia, ib);
+        const rep = find(ia);
+        const S = [];
+        for (const mv of pick) {
+          for (const id of (incident.get(mv) || [])) {
+            const w = regions[id];
+            if (w.kind === 'analytic' && w.surf) S.push(w.surf);
+          }
+        }
+        if (S.length) {
+          const r = projectMulti(S, X[rep]);
+          if (r.ok || (Number.isFinite(r.res) && r.res <= VERT_TOL)) X[rep] = r.x;
+        }
+      }
+    }
+  }
   const collapsed = new Set();
   for (const ch of topo.chains) {
     const a = topo.vOfMesh[ch.mv[0]], b = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
@@ -619,7 +673,32 @@ function runRound(mesh, seg, state, round, opts, log) {
     const nrm = nl > 0 ? mul(nv2, 1 / nl) : [0, 0, 0];
     const agree = dot(nrm, [N[3 * t], N[3 * t + 1], N[3 * t + 2]]);
     const eLen = Math.max(len(sub(pb, pa)), len(sub(pc, pb)), len(sub(pa, pc)));
-    if (!(nl > 1e-9 * eLen * eLen) || agree < 0.5) {
+    const entartet = !(nl > 1e-9 * eLen * eLen);
+    // zwei Ecken auf demselben Punkt → Schliff: die Ebene entartet, die
+    // Fläche hat keinen Inhalt und entfällt später (ihre beiden Kanten
+    // werden verschmolzen). Statt des Fehlers: Ebene aus der Netznormale.
+    const zusammen = len(sub(pa, pb)) < COLLAPSE_EPS || len(sub(pb, pc)) < COLLAPSE_EPS
+      || len(sub(pc, pa)) < COLLAPSE_EPS;
+    if (entartet && zusammen) {
+      // Ebene durch die beiden verschiedenen Ecken, Richtung wie im Netz
+      const ps = [pa, pb, pc];
+      let A = null, B = null;
+      for (let i = 0; i < 3 && !A; i++) {
+        for (let j = i + 1; j < 3; j++) {
+          if (len(sub(ps[i], ps[j])) < COLLAPSE_EPS) continue;
+          A = ps[i]; B = ps[j]; break;
+        }
+      }
+      if (A && B) {
+        const nm = [N[3 * t], N[3 * t + 1], N[3 * t + 2]];
+        let nn = norm(cross(sub(B, A), nm));
+        if (dot(nn, nm) < 0) nn = mul(nn, -1);
+        facetSurf.set(wr.id, { surf: { type: 'plane', o: A.slice(), n: nn }, sameSense: true });
+        wr.sliver = true;
+        continue;
+      }
+    }
+    if (entartet || agree < 0.5) {
       // Ursache: die Ecken wurden auf analytische Flächen verschoben — schuld sind
       // die Regionen, die diese Eckbedingungen besitzen (kleinste davon wird gestreift)
       const owners = analyticAtVertices(mesh, wr, incident, regions);
@@ -639,7 +718,7 @@ function runRound(mesh, seg, state, round, opts, log) {
   }
 
   // ── h) Kanten: Schnittkurve zwischen den beiden anliegenden Flächen
-  const edges = [];
+  let edges = [];
   const edgeOf = new Map();                   // Kette → Kantenindex
   const surfOfRegion = (id) => {
     const wr = regions[id];
@@ -695,6 +774,8 @@ function runRound(mesh, seg, state, round, opts, log) {
   // ── i) Flächen (mit Platzierungshinweisen für den STEP-Schreiber)
   const faces = [];
   const facesByType = { plane: 0, cylinder: 0, cone: 0, sphere: 0, torus: 0, facet: 0 };
+  const merged = new Map();                   // entfallene Kante → { keep, flip }
+  const dropped = new Set();                  // entfallene Kanten
   for (const wr of regions) {
     const loopIdx = topo.regionLoops.get(wr.id) || [];
     const loops = [];
@@ -724,6 +805,18 @@ function runRound(mesh, seg, state, round, opts, log) {
       surf = fs.surf;
       sameSense = true;
       kind = 'facet';
+    }
+    // Schliff: die Fläche hat genau zwei Geraden zwischen denselben Ecken —
+    // ihr Rand läuft doppelt über dieselbe Strecke, sie hat keinen Inhalt.
+    // Sie entfällt; ihre beiden geometrisch gleichen Kanten werden zu einer
+    // verschmolzen (die Nachbarflächen teilen sie sich danach).
+    const sl = sliverOf(loops, edges, dropped);
+    if (sl) {
+      merged.set(sl.drop, { keep: sl.keep, flip: sl.flip });
+      dropped.add(sl.drop);
+      if (log) log.push(`Runde ${round}: Fläche ${wr.id} (${kind}) ist ein Schliff `
+        + `(zwei gleiche Geraden ${sl.keep}/${sl.drop}) — entfernt, Kanten verschmolzen`);
+      continue;
     }
     // Entartete Fläche: eine Schleife ohne Flächeninhalt darf nicht ausgegeben werden
     const degen = degenerateLoop(loops, edges, vertices, surf, sameSense);
@@ -760,6 +853,45 @@ function runRound(mesh, seg, state, round, opts, log) {
     for (const lp of loops) delete lp.chains;
     faces.push({ surf, sameSense, loops, kind });
     facesByType[kind === 'facet' ? 'facet' : surf.type] = (facesByType[kind === 'facet' ? 'facet' : surf.type] || 0) + 1;
+  }
+  // Schliffe: die Verwendungen der verschmolzenen Kante umleiten (Richtung
+  // bleibt relativ zur Eckenreihenfolge) und die entfallene Kante streichen
+  if (merged.size) {
+    const resolve = (i) => {
+      let flip = false;
+      let cur = i;
+      const seen = new Set();
+      while (merged.has(cur) && !seen.has(cur)) {
+        seen.add(cur);
+        const m = merged.get(cur);
+        if (m.flip) flip = !flip;
+        cur = m.keep;
+      }
+      return { edge: cur, flip };
+    };
+    const live = [];
+    const idx = new Map();
+    for (let i = 0; i < edges.length; i++) {
+      if (dropped.has(i)) continue;
+      idx.set(i, live.length);
+      live.push(edges[i]);
+    }
+    for (const f of faces) {
+      for (const lp of f.loops) {
+        for (const u of lp.uses) {
+          // jede Kantenummer wird neu vergeben (die entfallenen Kanten
+          // verschieben alle folgenden), die verschmolzenen Kanten werden
+          // auf ihre behaltene umgeleitet (Richtung relativ zur Eckenreihenfolge)
+          const r = resolve(u.edge);
+          const flip = r.edge === u.edge ? false : r.flip;
+          u.edge = idx.get(r.edge);
+          u.fwd = u.fwd !== flip;
+        }
+      }
+    }
+    edges = live;
+    if (log) log.push(`Runde ${round}: ${dropped.size} Kante(n) verschmolzen, `
+      + `${edges.length} Kanten bleiben`);
   }
   const edgesByType = { line: 0, circle: 0, bspline: 0 };
   for (const e of edges) {
@@ -1077,6 +1209,28 @@ function degenerateLoop(loops, edges, vertices, surf, sameSense) {
   return null;
 }
 
+// Schliff: eine Fläche mit genau zwei Geraden zwischen denselben Ecken.
+// Der Rand läuft doppelt über dieselbe Strecke — die Fläche hat keinen
+// Inhalt und entfällt; die beiden geometrisch gleichen Kanten (beide Geraden
+// zwischen demselben Eckenpaar) werden zu einer verschmolzen.
+function sliverOf(loops, edges, dropped) {
+  if (loops.length !== 1) return null;
+  const uses = loops[0].uses;
+  if (uses.length !== 2) return null;
+  const i1 = uses[0].edge, i2 = uses[1].edge;
+  if (i1 === i2) return null;
+  const e1 = edges[i1], e2 = edges[i2];
+  if (!e1 || !e2 || !e1.curve || !e2.curve) return null;
+  if (e1.curve.type !== 'line' || e2.curve.type !== 'line') return null;
+  if (e1.v0 === e1.v1 || e2.v0 === e2.v1) return null;
+  const key = (e) => (e.v0 < e.v1 ? `${e.v0}|${e.v1}` : `${e.v1}|${e.v0}`);
+  if (key(e1) !== key(e2)) return null;
+  const keep = Math.min(i1, i2);
+  const drop = Math.max(i1, i2);
+  if (dropped.has(keep)) return null;     // die behaltene Kante entfällt bereits
+  return { keep, drop, flip: edges[keep].v0 !== edges[drop].v0 };
+}
+
 // Analytische Regionen, die eine Fläche berühren
 function analyticNeighbours(topo, regions, wr, chainIds) {
   const out = new Set();
@@ -1127,7 +1281,11 @@ function placementHint(wr, surf, mesh) {
       if (cnt) surf.h0 = sum / cnt;
     }
   } else if (surf.type === 'sphere') {
-    // mittlere Auswärtsnormale der Region → Achse ⟂ dazu, x = −m
+    // Achse = mittlere Auswärtsnormale der Region: ein Pol der
+    // Kugel-Parametrisierung liegt IN der Fläche, der andere gegenüber —
+    // die Naht der Parametrisierung liegt damit nicht auf dem Rand
+    // (sonst Selbstschnitt an der Tangentialkante Kugel/Zylinder).
+    // x = feste Einheitsrichtung ⟂ Achse (deterministisch).
     let mx = 0, my = 0, mz = 0;
     for (const t of wr.tris) {
       const w = A[t];
@@ -1135,12 +1293,10 @@ function placementHint(wr, surf, mesh) {
     }
     const m = norm([mx, my, mz]);
     if (len(m) > 1e-9) {
+      surf.axis = m;
       const helper = Math.abs(m[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
-      const ax = norm(cross(m, helper));
-      surf.axis = ax;
-      const proj = sub(m, mul(ax, dot(m, ax)));
-      const pj = norm(proj);
-      surf.x = len(pj) > 1e-9 ? mul(pj, -1) : mul(m, -1);
+      const x = sub(helper, mul(m, dot(helper, m)));
+      surf.x = len(x) > 1e-9 ? norm(x) : norm(cross(m, [0, 0, 1]));
     }
   }
 }
