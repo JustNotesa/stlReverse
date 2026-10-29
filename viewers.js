@@ -1,11 +1,12 @@
 import * as THREE from './libs/three.module.js';
+import { FEATURE_COLORS } from './feature-colors.js?v=1';
 
 // Farbton für normale (nicht erkannte) Regionen in Panel 2/3: Rot/Orange/Pink sind für erkannte
 // Bohrungen, Verrundungen bzw. Außenmäntel reserviert. Der Regenbogen läuft deshalb nur über
 // Gelbgrün → Blau → Violett (61°…299°). Vorher bekam die größte Region (Index 0) Farbton 0 = Rot
 // und sah aus wie eine erkannte Bohrung (z.B. Zylinder-Deckel).
 const regionHue = (idx, n) => 0.17 + 0.66 * (idx / Math.max(1, n));
-const MANTLE_COLOR = 0xff2d92;
+const MANTLE_COLOR = FEATURE_COLORS.mantle;
 // Voller Zylinder als konvexer Außenmantel (Welle, Zapfen, Scheiben-Außenwand) statt Bohrung: die
 // Erkennung nennt jeden vollen Zylinder kind 'bore'; wie in exporters.js (radialScore) entscheidet
 // die Richtung der Wand-Normalen — von der Achse weg = Mantel.
@@ -299,9 +300,9 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
       // Verrundungen orange (statt Regenbogen-HSL). Kanäle zuerst: ihre Streifen tragen oft
       // zusätzlich ein Zylinder-Tag.
       const col = group.tube
-        ? new THREE.Color(0xaf52de)
+        ? new THREE.Color(FEATURE_COLORS.tube)
         : group.primitive?.type === 'cylinder'
-        ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff9500 : isConvexMantle(group) ? MANTLE_COLOR : 0xff3b30)
+        ? new THREE.Color(group.primitive.kind === 'fillet' ? FEATURE_COLORS.fillet : isConvexMantle(group) ? MANTLE_COLOR : FEATURE_COLORS.bore)
         : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.75, 0.55);
       for (let i = 0; i < triCount; i++) {
         const v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
@@ -336,7 +337,7 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
     baseGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     baseGeo.computeVertexNormals();
     const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({
-      color: 0x607080, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide
+      color: FEATURE_COLORS.plane, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide
     }));
     baseMesh.position.set(-centerX, -centerZ, -centerY);
     featuresMeshGroup.add(baseMesh);
@@ -478,9 +479,9 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     const triCount = Math.floor(verts.length / 3);
     const isCyl = !!group.tube || group.primitive?.type === 'cylinder';
     const col = group.tube
-      ? new THREE.Color(0xaf52de)                                                 // Kanal: violett
+      ? new THREE.Color(FEATURE_COLORS.tube)                                      // Kanal: violett
       : isCyl
-      ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : isConvexMantle(group) ? MANTLE_COLOR : 0xff1744) // Rot / Orange / Pink
+      ? new THREE.Color(group.primitive.kind === 'fillet' ? FEATURE_COLORS.fillet : isConvexMantle(group) ? MANTLE_COLOR : FEATURE_COLORS.bore) // Rot / Orange / Pink
       : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.30, 0.72);
     const a = isCyl ? 0.96 : 0.26; // erkannte Features fast deckend, Rest stark durchscheinend
     for (let i = 0; i < triCount; i++) {
@@ -536,7 +537,7 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
       if (tubePrimIds.has(p.id)) continue;
       const cylGeo = new THREE.CylinderGeometry(p.radius, p.radius, p.height, 32, 1, true);
       const cyl = new THREE.Mesh(cylGeo, new THREE.MeshStandardMaterial({
-        color: mantlePrimIds.has(p.id) ? MANTLE_COLOR : 0xff1744, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
+        color: mantlePrimIds.has(p.id) ? MANTLE_COLOR : FEATURE_COLORS.bore, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
         transparent: true, opacity: 0.45
       }));
       const mid = [
