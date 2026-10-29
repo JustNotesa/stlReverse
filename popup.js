@@ -56,6 +56,26 @@ const _defeatureOn = () => document.getElementById('defeature-toggle')?.checked 
 const _sharpenBendsOn = () => document.getElementById('sharpen-bends-toggle')?.checked === true;
 const withDefeature = (a) => (a ? { ...a, defeature: _defeatureOn(), sharpenBends: _sharpenBendsOn() } : a);
 
+// Memo für den V2-Volumen-STEP: buildVolumeStepBrepV2 ist eine reine Funktion
+// (gleiche Analyse + gleiche Schalter → gleiches Ergebnis), rechnet aber synchron
+// auf dem Haupt-Thread — bei großen Teilen (NozzleBox ~5 s) friert die UI dabei ein.
+// Deshalb das LETZTE Ergebnis samt Schlüssel merken (Analyse-Objekt, Defeaturing-Flag,
+// Schärfen-Flag) und bei gleicher Eingabe direkt zurückgeben. Nur EIN Eintrag:
+// STEP-Strings können mehrere MB groß sein.
+let _volumeMemo = null;
+function buildVolumeCached(analysis) {
+  const defeature = _defeatureOn();
+  const sharpenBends = _sharpenBendsOn();
+  const memo = _volumeMemo;
+  if (memo && memo.analysis === analysis && memo.defeature === defeature && memo.sharpenBends === sharpenBends) {
+    return memo.result;
+  }
+  // Wirft der Exporter, wird nichts gemerkt — die Ausnahme läuft unverändert in den Aufrufer.
+  const result = buildVolumeStepBrepV2(withDefeature(analysis));
+  _volumeMemo = { analysis, defeature, sharpenBends, result };
+  return result;
+}
+
 const WORKER_TIMEOUT_MS = 60000;
 
 // Kleinste Detailgröße (mesh-clean.js im Worker): Kanten darunter werden vor der Analyse
@@ -179,6 +199,8 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
       workerBuffer, fileName, normalizedDetail, handleWorkerProgress, { reanalyzeOnly }
     );
     lastAnalysis = analysis;
+    // Neue Analyse → altes Memo (STEP-String) freigeben; es gehört zu der vorigen Datei.
+    _volumeMemo = null;
 
     paramOutput.value = JSON.stringify(analysis.parametric, null, 2);
     setPreviewData(analysis.previewPoints, analysis.boundingBox);
@@ -207,7 +229,7 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
     // Wasserdichtigkeits-Verdikt sofort anzeigen (rein geometrisch, ohne occt-Parsing).
     // „Rendern" visualisiert es danach zusätzlich im 3D-Viewer.
     try {
-      const v2 = buildVolumeStepBrepV2(withDefeature(analysis));
+      const v2 = buildVolumeCached(analysis);
       setStepWatertightStatus(v2 ? v2.report : null);
     } catch (e) { console.warn('Wasserdichtigkeits-Check fehlgeschlagen:', e.message); }
 
@@ -345,7 +367,7 @@ downloadStepSolBtn.addEventListener('click', () => {
     return;
   }
   try {
-    const res = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
+    const res = buildVolumeCached(lastAnalysis);
     if (!res?.step) {
       setStatus('STEP-Volumen fehlgeschlagen: zu wenig Flächen erkannt.', 'error');
       return;
@@ -406,7 +428,7 @@ document.getElementById('step-render-button')?.addEventListener('click', () => {
     // Panel 4 prüft den V2-Boundary-Loop-STEP — genau das, was exportiert wird.
     // (Der Triangle-STEP wäre per Konstruktion immer geschlossen und damit als
     //  Dichtheitsprüfung wertlos.)
-    const res = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
+    const res = buildVolumeCached(lastAnalysis);
     if (!res?.step) {
       setStatus('Panel 4 Render fehlgeschlagen: zu wenig Flächen.', 'error');
       return;
@@ -431,7 +453,7 @@ document.getElementById('min-detail-select')?.addEventListener('change', () => {
 document.getElementById('defeature-toggle')?.addEventListener('change', () => {
   if (!lastAnalysis) return;
   try {
-    const v2 = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
+    const v2 = buildVolumeCached(lastAnalysis);
     setStepWatertightStatus(v2 ? v2.report : null);
   } catch (e) { console.warn('Defeaturing-Toggle: Verdikt-Update fehlgeschlagen:', e.message); }
 });
@@ -440,7 +462,7 @@ document.getElementById('defeature-toggle')?.addEventListener('change', () => {
 document.getElementById('sharpen-bends-toggle')?.addEventListener('change', () => {
   if (!lastAnalysis) return;
   try {
-    const v2 = buildVolumeStepBrepV2(withDefeature(lastAnalysis));
+    const v2 = buildVolumeCached(lastAnalysis);
     setStepWatertightStatus(v2 ? v2.report : null);
   } catch (e) { console.warn('Biegungen-Schärfen-Toggle: Verdikt-Update fehlgeschlagen:', e.message); }
 });
