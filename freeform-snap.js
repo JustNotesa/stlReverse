@@ -39,11 +39,18 @@
 //   2 Zylinder exakt an seine tangentialen Ebenen legen
 //   3 Torus koaxial zum Zylinder, Mitte exakt in der tangentialen Ebene
 //   4 Kugel auf die Achse(n) ihrer tangentialen Zylinder setzen
+//   4b generisches Rollkugel-Snapping (der allgemeine Fall):
+//      eine Verrundung vom Radius r ist eine Kugel, deren Mittelpunkt auf der
+//      SPINE läuft = offset(S1, s1·r) ∩ offset(S2, s2·r) (die Versatzflächen
+//      der Stützen, s = Seite). Zylinder/Torus mit genau 2 Stützen → die
+//      SPINE ist exakt (Gerade → Zylinder, Kreis → Torus); Kugel (Eckkugel)
+//      mit ≥ 3 Nachbarn → Mittelpunkt exakt auf allen Versatzflächen
 //   5 jede Änderung prüfen (Restfehler ≤ 2·tol), sonst zurücknehmen
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
   sdist, normalAt, add, sub, mul, dot, cross, len, norm,
+  projectMulti, analyticCurve,
 } from './freeform-geom.js';
 
 const DEG = Math.PI / 180;
@@ -182,6 +189,267 @@ function contactTangent(mesh, vertsA, vertsB, sA, sB, tol, tanRad) {
   for (const v of first) if (test(v)) return true;
   for (const v of second) if (test(v)) return true;
   return false;
+}
+
+// ── Rollkugel: Spine, Versatzflächen, Nachbarschaft ──────────────────────
+// Eine Verrundung vom Radius r ist eine Kugel, deren Mittelpunkt auf der
+// SPINE läuft: dem Schnitt der VERSATZflächen der Stützen
+// (offset(S, s·r), s = Seite der Stütze). Die Versatzflächen bleiben im
+// Modell: Ebene o + s·r·n, Kugel R + s·r, Zylinder R + s·r, Torus (klein)
+// r + s·r. Radius 0 ist erlaubt (Zylinder → Achse, Torus → Rohrkreis).
+// Kegel: im Modell gibt es keinen exakten Versatz → nicht verwendbar.
+
+// Einheitsrichtung senkrecht zu a
+function perpUnit(a) {
+  const t = Math.abs(a[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  return norm(sub(t, mul(a, dot(t, a))));
+}
+
+// Normale mit Sicherheitsnetz: bei Radius 0 (Zylinderachse, Torusröhrenkreis)
+// ist die natürliche Normale an der Fläche nicht eindeutig (beim Torus even
+// null). freeform-geom.js bleibt unberührt, deshalb der Ersatz hier.
+function safeNormal(S, p) {
+  const n = normalAt(S, p);
+  if (len(n) > 1e-12) return n;
+  if (S.type === 'torus') {
+    const w = sub(p, S.c);
+    const rad = sub(w, mul(S.a, dot(w, S.a)));
+    if (len(rad) > 1e-12) return norm(rad);
+    return perpUnit(S.a);
+  }
+  if (S.type === 'cylinder') return perpUnit(S.a);
+  return [0, 0, 0];
+}
+
+// Versatzfläche einer Stütze (s = +1/−1: Seite der Stütze)
+function offsetOf(S, r, s) {
+  switch (S.type) {
+    case 'plane': return { type: 'plane', o: add(S.o, mul(S.n, s * r)), n: Array.from(S.n) };
+    case 'sphere': return { type: 'sphere', c: Array.from(S.c), R: S.R + s * r };
+    case 'cylinder': return { type: 'cylinder', o: Array.from(S.o), a: Array.from(S.a), R: S.R + s * r };
+    case 'torus': return { type: 'torus', c: Array.from(S.c), a: Array.from(S.a), Rm: S.Rm, r: S.r + s * r };
+    default: return null;
+  }
+}
+
+// Versatz mit gültigem Radius (≥ 0)
+function offsetValid(O) {
+  if (O.type === 'sphere' || O.type === 'cylinder') return O.R >= 0;
+  if (O.type === 'torus') return O.r >= 0;
+  return true;
+}
+
+// Versatzfläche zur Stütze S; der Punkt p (auf der SPINE) bestimmt die Seite
+function offsetFor(S, r, p) {
+  const s0 = Math.sign(sdist(S, p)) || 1;
+  const a = offsetOf(S, r, s0);
+  if (a && offsetValid(a)) return a;
+  const b = offsetOf(S, r, -s0);
+  if (b && offsetValid(b)) return b;
+  return null;
+}
+
+// Determinante von drei Vektoren
+function det3(a, b, c) {
+  return a[0] * (b[1] * c[2] - b[2] * c[1])
+    - a[1] * (b[0] * c[2] - b[2] * c[0])
+    + a[2] * (b[0] * c[1] - b[1] * c[0]);
+}
+
+// Abstand eines Punktes zur Achse (o, a)
+function axisDistOf(o, a, p) {
+  return len(sub(p, add(o, mul(a, dot(sub(p, o), a)))));
+}
+
+// Sind A und B nach den Spezialregeln 2–4 EXAKT tangential? Nur solche Paare
+// gelten als "bereits erfasst" — sonst würde eine Verrundung, die an einer
+// Stütze hängt, die die Spezialregeln nicht kennen, fälschlich übersprungen.
+function pairExact(A, B, eps = 1e-7) {
+  if (A.type === 'sphere') {
+    if (B.type === 'plane') return Math.abs(Math.abs(sdist(B, A.c)) - A.R) <= eps;
+    if (B.type === 'cylinder') {
+      return axisDistOf(B.o, B.a, A.c) <= eps && Math.abs(A.R - B.R) <= eps;
+    }
+    return false;
+  }
+  if (B.type === 'sphere') return pairExact(B, A, eps);
+  if (A.type === 'torus') {
+    if (B.type === 'plane') {
+      return Math.abs(Math.abs(dot(A.a, B.n)) - 1) <= eps
+        && Math.abs(Math.abs(sdist(B, A.c)) - A.r) <= eps;
+    }
+    if (B.type === 'cylinder') {
+      return axisDistOf(B.o, B.a, A.c) <= eps
+        && Math.abs(Math.abs(A.Rm - B.R) - A.r) <= eps;
+    }
+    return false;
+  }
+  if (B.type === 'torus') return pairExact(B, A, eps);
+  if (A.type === 'cylinder') {
+    if (B.type === 'plane') {
+      return Math.abs(dot(A.a, B.n)) <= eps
+        && Math.abs(Math.abs(sdist(B, A.o)) - A.R) <= eps;
+    }
+    return false;
+  }
+  return false;
+}
+
+// Stütze einer Verrundung? Nachbarn, die selbst eine Verrundung von etwa
+// demselben Radius sind (|R_s − r| ≤ 10 % von r), sind Nachbarverrundungen
+// und keine Stützen.
+function isSupport(S, r) {
+  if (S.type !== 'plane' && S.type !== 'sphere' && S.type !== 'cylinder' && S.type !== 'torus') {
+    return false;
+  }
+  const rs = radiusOf(S);
+  if (rs === null) return true; // Ebene: immer Stütze
+  return Math.abs(rs - r) > 0.1 * r;
+}
+
+// Vier Indizes: erster, zwei mittlere, letzter (bei weniger Punkten: alle)
+function pickIdx(n) {
+  if (n <= 4) return Array.from({ length: n }, (_, i) => i);
+  return [0, Math.floor(n / 3), Math.floor(2 * n / 3), n - 1];
+}
+
+// Vier Punkte auf der SPINE der Verrundung: beim Zylinder die Projektionen der
+// Netzpunkte der Region auf die Achse (nach Achsenparameter sortiert), beim
+// Torus die Rohrkreispunkte (nach Winkel um die Achse sortiert). Sie sind die
+// Startwerte der Projektion auf die Versatzflächen und bestimmen die Lage
+// der Schnittkurve.
+function spineSamples(mesh, region, F) {
+  if (!region) return null;
+  const verts = [...regionVerts(mesh, region)];
+  if (verts.length < 2) return null;
+  const P = mesh.P;
+  const pts = verts.map((v) => [P[3 * v], P[3 * v + 1], P[3 * v + 2]]);
+  const out = [];
+  if (F.type === 'cylinder') {
+    const ts = pts.map((p) => dot(sub(p, F.o), F.a));
+    const order = ts.map((_, i) => i).sort((i, j) => ts[i] - ts[j]);
+    for (const i of pickIdx(order.length)) out.push(add(F.o, mul(F.a, ts[order[i]])));
+  } else {
+    const e1 = perpUnit(F.a);
+    const e2 = norm(cross(e1, F.a));
+    const ang = pts.map((p) => {
+      const w = sub(p, F.c);
+      const rad = sub(w, mul(F.a, dot(w, F.a)));
+      return Math.atan2(dot(cross(e1, rad), F.a), dot(e1, rad));
+    });
+    const order = ang.map((_, i) => i).sort((i, j) => ang[i] - ang[j]);
+    for (const i of pickIdx(order.length)) {
+      const th = ang[order[i]];
+      const u = add(mul(e1, Math.cos(th)), mul(e2, Math.sin(th)));
+      out.push(add(F.c, mul(u, F.Rm)));
+    }
+  }
+  return out;
+}
+
+// Bestimmen die drei Versatzflächen den Punkt vollständig? (drei unabhängige,
+// nicht entartete Normale — bei Radius 0 ist die Normale undefiniert)
+function determines(set, x) {
+  const rows = [];
+  for (const O of set) {
+    if (O.type === 'cylinder' && O.R === 0) return false; // Achse: entartet
+    if (O.type === 'torus' && O.r === 0) return false;     // Rohrkreis: entartet
+    rows.push(safeNormal(O, x));
+  }
+  return Math.abs(det3(rows[0], rows[1], rows[2])) > 1e-6;
+}
+
+/**
+ * Rollkugel-Snapping einer Verrundung: die Fläche exakt tangential an ihre
+ * Stützen legen (allgemeiner Fall, siehe Schritt 4b).
+ *
+ * @param {object} F        Verrundung (Zylinder, Torus oder Kugel)
+ * @param {Array}  supports Stützen/Nachbarn (Ebenen, Kugeln, Zylinder, Tori)
+ * @param {object} [opts]   { samples: 4 Spine-Punkte } (Zylinder/Torus),
+ *                           { centre: Startpunkt } (Kugel)
+ * @returns {object|null}   neue Fläche oder null (nichts Passendes gefunden)
+ */
+export function snapRollingBall(F, supports, opts = {}) {
+  if (!F || !supports || !supports.length) return null;
+  const r = radiusOf(F);
+  if (r === null || !(r > 0)) return null;
+  if (F.type === 'sphere') return snapCornerBall(F, supports, opts);
+  if (F.type !== 'cylinder' && F.type !== 'torus') return null;
+  if (supports.length !== 2) return null;
+  return snapEdgeFillet(F, supports, opts);
+}
+
+// Verrundung (Zylinder/Torus) mit genau zwei Stützen: die SPINE ist der
+// Schnitt der beiden Versatzflächen — Gerade → Zylinder, Kreis → Torus.
+function snapEdgeFillet(F, supports, opts) {
+  const r = radiusOf(F);
+  const samples = opts.samples;
+  if (!samples || samples.length < 4) return null;
+  const offs = [];
+  for (const S of supports) {
+    const off = offsetFor(S, r, samples[0]);
+    if (!off) return null;
+    offs.push(off);
+  }
+  // Spine-Punkte auf die Versatzflächen projizieren (exakt)
+  const pts = [];
+  for (const q of samples) {
+    const pr = projectMulti(offs, q);
+    if (!pr.ok) return null;
+    pts.push(pr.x);
+  }
+  const c = analyticCurve(offs[0], offs[1], pts[0], pts[3], pts[1]);
+  if (!c) return null;
+  if (c.type === 'line') {
+    if (len(sub(pts[3], pts[0])) <= 1e-9) return null;
+    let a = norm(c.d);
+    if (dot(a, F.a) < 0) a = mul(a, -1); // Vorzeichen wie vorher
+    return { type: 'cylinder', o: pts[0], a, R: r };
+  }
+  if (c.type === 'circle') {
+    if (!(c.R > r)) return null;
+    let a = c.a;
+    if (dot(a, F.a) < 0) a = mul(a, -1);
+    return { type: 'torus', c: c.c, a, Rm: c.R, r };
+  }
+  return null;
+}
+
+// Eckkugel: der Mittelpunkt liegt exakt auf den Versatzflächen aller
+// Nachbarn (bei anderen Verrundungen vom gleichen Radius: auf deren SPINE,
+// also Radius 0). Reicht die Gesamtlösung nicht, werden alle 3er-Teilmengen
+// probiert (bevorzugt solche, die den Punkt vollständig bestimmen).
+function snapCornerBall(F, supports, opts) {
+  const r = F.R;
+  const seed = opts.centre || F.c;
+  const offs = [];
+  for (const S of supports) {
+    const off = offsetFor(S, r, seed);
+    if (!off) continue; // Nachbar ohne exakten Versatz (z. B. Kegel)
+    offs.push(off);
+  }
+  if (offs.length < 3) return null;
+  const all = projectMulti(offs, seed);
+  if (all.ok && all.res <= 1e-10) return { type: 'sphere', c: all.x, R: r };
+  let best = null; // bestimmt den Punkt vollständig
+  let loose = null; // Notlösung
+  const n = offs.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      for (let k = j + 1; k < n; k++) {
+        const set = [offs[i], offs[j], offs[k]];
+        const pr = projectMulti(set, seed);
+        if (!pr.ok) continue;
+        const cand = { x: pr.x, d: len(sub(pr.x, seed)) };
+        if (determines(set, pr.x)) {
+          if (!best || cand.d < best.d) best = cand;
+        } else if (!loose || cand.d < loose.d) loose = cand;
+      }
+    }
+  }
+  const pick = best || loose;
+  if (!pick) return null;
+  return { type: 'sphere', c: pick.x, R: r };
 }
 
 // ── Hauptroutine ─────────────────────────────────────────────────────────────
@@ -534,7 +802,7 @@ export function snapSurfaces({ mesh, regions, chains }, opts = {}) {
     // keine Zylinder: tangentiale Ebenen
     const pls = cands.filter((p) => surfs.get(p.id) && surfs.get(p.id).type === 'plane');
     if (!pls.length) continue;
-    if (pls.length <= 3) {
+    if (pls.length === 3) {
       const rows = [];
       const rhs = [];
       for (const p of pls) {
@@ -555,6 +823,83 @@ export function snapSurfaces({ mesh, regions, chains }, opts = {}) {
       }
       log.push(`Region ${id} (sphere): an ${pls.length} Ebene(n) (nacheinander) gesetzt`);
     }
+  }
+
+  // ── Schritt 4b/4c: generisches Rollkugel-Snapping ─────────────────────
+  // Die Spezialregeln 2–4 kennen nur wenige Fälle exakt (Ebene/Zylinder,
+  // Torus/Zylinder, Kugel/Zylinder). Auf echten Spritzguss-Teilen sind die
+  // Verrundungen aber Tori und Eckkugeln zwischen Ebenen, gekrümmten Wänden
+  // und leicht geneigten Flächen — dafür gilt der Rollkugel-Grundsatz:
+  //   eine Verrundung vom Radius r ist eine Kugel, deren Mittelpunkt auf der
+  //   SPINE läuft = offset(S1, s1·r) ∩ offset(S2, s2·r).
+  // Fall B (Zylinder/Torus mit genau 2 Stützen): die SPINE ist exakt die
+  //   Schnittkurve der beiden Versatzflächen (Gerade → Zylinder, Kreis →
+  //   Torus). Fall C (Kugel = Eckkugel mit ≥ 3 Nachbarn): der Mittelpunkt
+  //   liegt exakt auf allen Versatzflächen.
+  // Bereits von den Spezialregeln erfasste Paare (exakt tangential) werden
+  // nicht noch einmal bearbeitet.
+  const neighbourSurfs = (id) => {
+    const out = [];
+    for (const p of partners(id)) {
+      const S = surfs.get(p.id);
+      if (!S) continue;
+      if (S.type !== 'plane' && S.type !== 'sphere'
+        && S.type !== 'cylinder' && S.type !== 'torus') continue;
+      out.push(S);
+    }
+    return out;
+  };
+  const allExact = (F, nb) => {
+    for (const S of nb) if (!pairExact(F, S)) return false;
+    return true;
+  };
+  // Änderung übernehmen? (wie Schritt 5: der Restfehler der Region entscheidet)
+  const okChange = (id, neu) => {
+    const region = regById.get(id);
+    if (!region || !region.tris) return true;
+    const err = maxResidual(mesh, region, neu);
+    if (err > 2 * tol) {
+      log.push(`Region ${id} (${neu.type}): Rollkugel zurückgenommen `
+        + `(Restfehler ${err.toFixed(4)} > ${(2 * tol).toFixed(4)})`);
+      return false;
+    }
+    return true;
+  };
+
+  // Fall B: Zylinder/Torus mit genau zwei Stützen
+  for (const id of ids) {
+    const F = surfs.get(id);
+    if (!F || (F.type !== 'cylinder' && F.type !== 'torus')) continue;
+    const nb = neighbourSurfs(id);
+    if (nb.length < 2) continue;
+    if (allExact(F, nb)) continue; // von den Spezialregeln erfasst
+    const r = radiusOf(F);
+    const sup = nb.filter((S) => isSupport(S, r));
+    if (sup.length !== 2) continue;
+    const samples = spineSamples(mesh, regById.get(id), F);
+    if (!samples) continue;
+    const neu = snapRollingBall(F, sup, { samples });
+    if (!neu) continue;
+    if (!okChange(id, neu)) continue;
+    surfs.set(id, neu);
+    log.push(`Region ${id} (${F.type}): Rollkugel an 2 Stützen exakt tangential `
+      + `(R = ${r.toFixed(6)})`);
+  }
+
+  // Fall C: Eckkugel (Kugel) mit mindestens drei tangentialen Nachbarn
+  // (nach Fall B, damit die Eckkugel den geschnappten Verrundungen folgt)
+  for (const id of ids) {
+    const F = surfs.get(id);
+    if (!F || F.type !== 'sphere') continue;
+    const nb = neighbourSurfs(id);
+    if (nb.length < 3) continue;
+    if (allExact(F, nb)) continue; // von den Spezialregeln erfasst
+    const neu = snapRollingBall(F, nb, { centre: F.c });
+    if (!neu) continue;
+    if (!okChange(id, neu)) continue;
+    surfs.set(id, neu);
+    log.push(`Region ${id} (sphere): Rollkugel an ${nb.length} Nachbarn exakt `
+      + `tangential (R = ${F.R.toFixed(6)})`);
   }
 
   // ── Schritt 5: Prüfung ───────────────────────────────────────────────────
