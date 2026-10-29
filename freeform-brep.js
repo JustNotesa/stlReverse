@@ -569,6 +569,7 @@ function runRound(mesh, seg, state, round, opts, log) {
   }
   const nv = topo.vertices.length;
   const X = new Array(nv);
+  const vFailed = new Set();                 // Ecken mit gescheiterter Projektion (Diagnose)
   let worstRes = 0;
   for (let vi = 0; vi < nv; vi++) {
     // Zeitbudget (alle CHECK_EVERY Ecken prüfen)
@@ -613,6 +614,7 @@ function runRound(mesh, seg, state, round, opts, log) {
         + `Verschiebung ${shift.toExponential(2)} mm (Grenze ${maxShift.toFixed(3)}), `
         + `Flächen ${cands.map((c) => c.type).join('/')}`, nb, pickSmallestNonPlane);
       X[vi] = p;
+      vFailed.add(vi);
       continue;
     }
     X[vi] = r.x;
@@ -821,6 +823,17 @@ function runRound(mesh, seg, state, round, opts, log) {
     const p = vertices[v0], q = vertices[v1];
     const guides = ch.mv.slice(1, -1).map((mv) => ptOf(mesh, mv));
     const res = fitIntersectionCurve(A2, B2, p, q, guides, { tol: FIT_TOL, maxShift: EDGE_MAX_SHIFT });
+    // Diagnose (nur mit opts.debug.chainStats): Paar, Ausgang, Normalenwinkel in der Kettenmitte
+    if (opts.debug && Array.isArray(opts.debug.chainStats)) {
+      const mid = guides.length ? guides[guides.length >> 1] : mul(add(p, q), 0.5);
+      const na = normalAt(A2, mid), nb = normalAt(B2, mid);
+      const ang = Math.acos(Math.min(1, Math.abs(dot(na, nb)))) * 180 / Math.PI;
+      opts.debug.chainStats.push({
+        round, L: regions[ch.L].type, R: regions[ch.R].type, idL: regions[ch.L].src, idR: regions[ch.R].src, kL: regions[ch.L].kind, kR: regions[ch.R].kind,
+        fail: res.fail || null, curve: res.curve ? res.curve.type : null, ang,
+        endsOK: !vFailed.has(vi0) && !vFailed.has(vi1), n: ch.mv.length, A: A2, B: B2, p, q, mid,
+      });
+    }
     if (res.fail) {
       fail(`chain:${res.fail}`, [regions[ch.L], regions[ch.R]],
         `Kette ${ch.id} (${regions[ch.L].type}/${regions[ch.R].type}): Schnittkurve ${res.fail}`,
