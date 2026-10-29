@@ -1,4 +1,4 @@
-import { formatBytes, describeDetailLevel } from './utils.js';
+import { formatBytesDe, describeDetailLevel } from './utils.js';
 import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=45';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=29';
@@ -10,7 +10,7 @@ import {
   setStatus, setExportEnabled,
   setProgress, progressStep, startIndeterminateProgress, stopIndeterminateProgress,
   initProgressSteps, resetProgressSteps, setProgressStepStatus, setLiveDetail,
-  handleWorkerProgress, getActiveStep, setProgressStepCurrent
+  handleWorkerProgress, getActiveStep, getStepByKey, setProgressStepCurrent
 } from './ui.js?v=2';
 import {
   updateStats, resetStats, renderOutlines, clearOutlines
@@ -148,16 +148,16 @@ function _runWorkerAnalysis(buffer, fileName, detail, onProgress, { reanalyzeOnl
 // ── File handling ─────────────────────────────────────────────────────────────
 
 async function handleFile(file) {
+  // Während einer laufenden Analyse keine neue Datei annehmen.
+  if (isProcessing) return;
   const buffer = await file.arrayBuffer();
+  if (isProcessing) return;
   lastSourceBuffer = buffer.slice(0);
   lastFileName     = file.name;
   lastFileSize     = buffer.byteLength;
 
   // Datei-Chip in der Kopfzeile (Name sofort, Größe nach der Analyse mit den Dreiecken).
-  const chipName = document.getElementById('file-chip-name');
-  if (chipName) chipName.textContent = file.name;
-  const chipMeta = document.getElementById('file-chip-meta');
-  if (chipMeta) chipMeta.textContent = formatBytes(lastFileSize);
+  setFileChip(file.name, formatBytesDe(lastFileSize));
 
   await runAnalysis({ buffer: lastSourceBuffer, fileName: lastFileName, reason: 'upload', fileSize: lastFileSize });
 }
@@ -189,6 +189,22 @@ function setViewState(state) {
   setHidden('expert-panel',  state !== 'done');
   setHidden('file-chip',     state === 'empty');
   setHidden('file-change',   state === 'empty');
+
+  // Das Menü „Weitere Formate“ gehört zum Verdikt-Kasten: beim Zustandswechsel schließen.
+  const moreFormats = document.getElementById('more-formats');
+  if (moreFormats) moreFormats.open = false;
+
+  // Bildunterschrift der Nachher-Ansicht: im Zustand „inspect“ steht dort eine
+  // angesehene STEP-Datei, sonst der künftige Export.
+  const figStepTitle = document.getElementById('fig-step-title');
+  if (figStepTitle) {
+    figStepTitle.textContent = (state === 'inspect') ? 'Angesehene STEP-Datei' : 'STEP – so wird exportiert';
+  }
+
+  // Die Ansichtsumschaltung „Vergleich | Nur STEP“ gibt es im Zustand „inspect“
+  // nicht — sie würde dort in die leere Original-Ansicht führen.
+  const seg = document.querySelector('#compare-panel .seg');
+  if (seg) seg.hidden = (state === 'inspect');
 
   if (state !== 'inspect') {
     const title = document.getElementById('compare-title');
@@ -258,8 +274,16 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
   const focusBefore = document.activeElement;
   isProcessing = true;
   lastExport = null;
+  if (reason !== 'detail') {
+    // Altdaten verwerfen: zu einer neuen Datei darf kein Ergebnis der
+    // vorherigen Datei stehen bleiben.
+    lastAnalysis = null;
+    window.__lastExport = null;
+  }
   const normalizedDetail = Math.max(0.1, Math.min(0.99, detailLevel / 100));
-  const sizeLabel = formatBytes(fileSize || buffer.byteLength || 0);
+  const sizeLabel = formatBytesDe(fileSize || buffer.byteLength || 0);
+  // Merkt sich, ob der Worker das Einlesen schon überstanden hat (Fortschritt ≥ 38 %).
+  let readDone = false;
 
   resetProgressSteps(reason, sizeLabel);
   if (reason === 'upload') setProgressStepStatus('read', 'active', 'liest Datei …');
@@ -270,6 +294,14 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
       // Aus dem Zustand „STEP ansehen“ zurück in den normalen Ablauf.
       if (document.body.dataset.state === 'inspect') setCompareView('split');
       setViewState('running');
+      // Bildunterschriften und Vorschau leeren — während der Analyse dürfen keine
+      // Werte der vorherigen Datei stehen bleiben.
+      const figOriginalMeta = document.getElementById('fig-original-meta');
+      if (figOriginalMeta) figOriginalMeta.textContent = '';
+      const figStepMeta = document.getElementById('fig-step-meta');
+      if (figStepMeta) figStepMeta.textContent = '';
+      const placeholder = document.getElementById('step-occt-placeholder');
+      if (placeholder) placeholder.hidden = true;
     }
 
     if (reason === 'upload') {
@@ -303,7 +335,13 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
     startIndeterminateProgress(0.25, workerLabel);
 
     const analysis = await _runWorkerAnalysis(
-      workerBuffer, fileName, normalizedDetail, handleWorkerProgress, { reanalyzeOnly }
+      workerBuffer, fileName, normalizedDetail,
+      // Wrapper: merkt sich, ob das Einlesen der Datei schon durch ist.
+      (p) => {
+        if (Number.isFinite(p?.ratio) && p.ratio >= 0.38) readDone = true;
+        handleWorkerProgress(p);
+      },
+      { reanalyzeOnly }
     );
     lastAnalysis = analysis;
 
@@ -340,8 +378,7 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
 
     // Kopfzeile: Größe + Dreiecke, Vergleichsansicht: Dreiecke und CAD-Flächen.
     const triText = analysis?.meta?.triangles?.toLocaleString('de-DE') ?? '?';
-    const chipMeta = document.getElementById('file-chip-meta');
-    if (chipMeta) chipMeta.textContent = `${formatBytes(lastFileSize)} · ${triText} Dreiecke`;
+    setFileChip(fileName, `${formatBytesDe(lastFileSize)} · ${triText} Dreiecke`);
     const figOriginalMeta = document.getElementById('fig-original-meta');
     if (figOriginalMeta) figOriginalMeta.textContent = `${triText} Dreiecke`;
 
@@ -363,17 +400,28 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
       const inDropZone = dropZone && focusBefore
         && typeof focusBefore.closest === 'function'
         && dropZone.contains(focusBefore);
+      // Die Datei-Knöpfe sind ebenfalls neutral: von dort aus startet die Dateiauswahl.
+      const onFileButton = focusBefore
+        && ['file-pick-button', 'file-change', 'file-pick-error'].some(
+          (id) => document.getElementById(id) === focusBefore);
       const neutral = !focusBefore
         || focusBefore === document.body
         || focusBefore === dropZone
         || focusBefore === fileInput
+        || onFileButton
         || inDropZone;
       if (neutral) document.getElementById('step-export-button')?.focus();
     }
   } catch (error) {
     console.error(error);
     stopIndeterminateProgress();
-    const step = getActiveStep();          // vor resetUI — das setzt den aktiven Schritt zurück
+    // Ergebnis verwerfen: nach einem Fehler darf kein alter Export benutzt werden.
+    lastAnalysis = null;
+    lastExport = null;
+    window.__lastExport = null;
+    // Scheitert schon das Einlesen, steht Schritt 1 in der Fehlerzeile.
+    // (vor resetUI — das setzt den aktiven Schritt zurück)
+    const step = (reason === 'upload' && !readDone) ? getStepByKey('read') : getActiveStep();
     resetUI('Fehler', null);
     setStatus(`Fehler beim Einlesen: ${error.message}`, 'error');
     setLiveDetail('Fehler beim Einlesen');
@@ -404,11 +452,34 @@ function resetUI(message = '–', statusPayload = { text: 'Bereit – lege eine 
   setProgress(0, 'Bereit');
   clearVerdict();
   lastExport = null;
+  // Bildunterschriften leeren — sonst stehen hier die Werte der letzten Datei.
+  const figOriginalMeta = document.getElementById('fig-original-meta');
+  if (figOriginalMeta) figOriginalMeta.textContent = '';
+  const figStepMeta = document.getElementById('fig-step-meta');
+  if (figStepMeta) figStepMeta.textContent = '';
   const placeholder = document.getElementById('step-occt-placeholder');
   if (placeholder) placeholder.hidden = true;
 }
 
 // ── Hilfen für die Anzeige ───────────────────────────────────────────────────
+
+/**
+ * Datei-Chip in der Kopfzeile setzen: Name, Zusatzinfo und Tooltip.
+ * @param {string} name  Dateiname (z. B. 'Bauteil.stl')
+ * @param {string} meta  Zusatzinfo (Größe, Dreiecke …); leer = nur der Name
+ */
+function setFileChip(name, meta = '') {
+  const title   = meta ? `${name} · ${meta}` : name;
+  const chip     = document.getElementById('file-chip');
+  const chipName = document.getElementById('file-chip-name');
+  const chipMeta = document.getElementById('file-chip-meta');
+  if (chipName) {
+    chipName.textContent = name;
+    chipName.title = title;
+  }
+  if (chipMeta) chipMeta.textContent = meta || '';
+  if (chip) chip.title = title;
+}
 
 /** Flächenzahl der STEP in der Bildunterschrift der Nachher-Ansicht. */
 function setFigStepMeta(faceCount) {
@@ -441,7 +512,14 @@ function updateDetailUI() {
 
 fileInput?.addEventListener('change', (e) => {
   const file = e.target.files?.[0];
-  if (file) { handleFile(file); e.target.value = ''; }
+  e.target.value = '';          // immer zurücksetzen, damit dieselbe Datei erneut gewählt werden kann
+  if (file && !isProcessing) handleFile(file);
+});
+
+// Die drei Datei-Knöpfe öffnen den Dateidialog (die Beschriftung eines <label>
+// ist nicht per Tastatur bedienbar).
+['file-pick-button', 'file-change', 'file-pick-error'].forEach((id) => {
+  document.getElementById(id)?.addEventListener('click', () => fileInput?.click());
 });
 
 if (detailSlider) {
@@ -632,6 +710,9 @@ document.getElementById('min-detail-select')?.addEventListener('change', async (
 // Gemeinsamer Handler für alle vier Export-Schalter (ui-spec.md 6.1).
 async function onExportOptionChange() {
   syncSharpenBends();
+  // Die Schalter wirken nur im Zustand „fertig“ — im Fehler-, Lauf- oder Leerzustand
+  // gibt es kein Ergebnis, das neu berechnet werden könnte.
+  if (document.body.dataset.state !== 'done') return;
   if (!lastAnalysis || isProcessing) return;   // die Optionen werden beim Analyse-Ende neu gelesen
 
   const card      = document.getElementById('verdict-card');
@@ -653,7 +734,7 @@ async function onExportOptionChange() {
   } finally {
     if (card) card.dataset.busy = 'false';
     if (note) note.textContent = 'Wirken sofort auf das Ergebnis.';
-    if (exportBtn) exportBtn.disabled = !lastAnalysis;
+    if (exportBtn) exportBtn.disabled = !lastAnalysis || document.body.dataset.state !== 'done';
   }
 }
 
@@ -670,14 +751,41 @@ document.addEventListener('stlreverse:step-imported', (e) => {
   if (title) title.textContent = 'STEP-Datei ansehen';
   const placeholder = document.getElementById('step-occt-placeholder');
   if (placeholder) placeholder.hidden = true;
-  const chipName = document.getElementById('file-chip-name');
-  if (chipName) chipName.textContent = e.detail?.name || 'STEP-Datei';
-  const chipMeta = document.getElementById('file-chip-meta');
-  if (chipMeta) chipMeta.textContent = 'STEP';
+  setFileChip(e.detail?.name || 'STEP-Datei', 'STEP');
   const figStepMeta = document.getElementById('fig-step-meta');
   if (figStepMeta) figStepMeta.textContent = '';
   setStatus(`STEP-Datei geladen: ${e.detail?.name || ''}`, 'success');
 });
+
+// ── Menü „Weitere Formate“ ───────────────────────────────────────────────────
+
+/**
+ * Menü „Weitere Formate“: schließt nach einer Auswahl, bei Escape und bei einem
+ * Klick außerhalb des Menüs.
+ */
+function initFormatsMenu() {
+  const details = document.getElementById('more-formats');
+  if (!details) return;
+  const summary = details.querySelector('summary');
+  const menu    = details.querySelector('.formats__menu');
+
+  // (a) Auswahl im Menü → Menü schließen (der Klick-Handler des Knopfes läuft zuerst).
+  menu?.addEventListener('click', () => { details.open = false; });
+
+  // (b) Escape schließt das Menü und legt den Fokus auf die Überschrift.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !details.open) return;
+    details.open = false;
+    summary?.focus();
+  });
+
+  // (c) Klick außerhalb des Menüs → Menü schließen.
+  document.addEventListener('pointerdown', (e) => {
+    if (!details.open) return;
+    if (details.contains(e.target)) return;
+    details.open = false;
+  });
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -685,6 +793,7 @@ applyFeatureColorVars();
 buildFeatureLegend(document.getElementById('feature-legend'));
 initTabs();
 initViewToggle();
+initFormatsMenu();
 initDocumentDrop({ onFile: (file) => handleFile(file) });
 syncSharpenBends();
 

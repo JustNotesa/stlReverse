@@ -155,14 +155,23 @@ export function setProgressStepStatus(key, status, detailText = '') {
 }
 
 /**
+ * Ein Schritt anhand seines Schlüssels (z. B. 'read').
+ * @param {string} key  Schlüssel aus STEP_DEFS
+ * @returns {{key: string, label: string, index: number, total: number}|null} index ist 1-basiert
+ */
+export function getStepByKey(key) {
+  const def = _stepDef(key);
+  if (!def) return null;
+  return { key: def.key, label: def.label, index: def.index + 1, total: STEP_DEFS.length };
+}
+
+/**
  * Der aktuell (zuletzt) aktive Schritt.
  * @returns {{key: string, label: string, index: number, total: number}|null} index ist 1-basiert
  */
 export function getActiveStep() {
   if (!activeStepKey) return null;
-  const def = _stepDef(activeStepKey);
-  if (!def) return null;
-  return { key: def.key, label: def.label, index: def.index + 1, total: STEP_DEFS.length };
+  return getStepByKey(activeStepKey);
 }
 
 /** Text der Zeile „aktueller Schritt“ setzen ('' leert sie). */

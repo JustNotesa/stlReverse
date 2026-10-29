@@ -24,7 +24,7 @@
       <span class="file-chip__meta" id="file-chip-meta"></span>
     </div>
     <div class="head-actions">
-      <label class="btn btn--ghost" for="file-input" id="file-change" hidden>↺ Andere Datei …</label>
+      <button type="button" class="btn btn--ghost" id="file-change" hidden>↺ Andere Datei …</button>
       <button type="button" class="btn btn--ghost" id="step-import-button"
               title="Eine vorhandene STEP-Datei im Viewer ansehen (z. B. zum Gegenprüfen)">STEP ansehen</button>
     </div>
@@ -60,8 +60,8 @@
         </svg>
         <h2>STL hier ablegen</h2>
         <p>… und als <abbr title="Austauschformat für echte CAD-Körper, öffnet in Fusion 360, FreeCAD, CST">STEP</abbr>-Volumenkörper herunterladen.</p>
-        <label class="btn btn--primary btn--lg" for="file-input">Datei auswählen …</label>
-        <input id="file-input" class="visually-hidden" type="file" accept=".stl,model/stl">
+        <button type="button" class="btn btn--primary btn--lg" id="file-pick-button">Datei auswählen …</button>
+        <input id="file-input" class="visually-hidden" type="file" accept=".stl,model/stl" tabindex="-1" aria-hidden="true">
         <ul class="chips"><li>Bleibt auf deinem Rechner</li><li>ASCII &amp; binär</li><li>Verrundungen werden entfernt</li></ul>
       </div>
     </section>
@@ -105,7 +105,7 @@
       <div class="note note--warn" id="verdict-faceted" hidden></div>
       <div class="note note--err" id="verdict-error" hidden>
         <p id="verdict-error-text"></p>
-        <label class="btn" for="file-input">Andere Datei wählen</label>
+        <button type="button" class="btn" id="file-pick-error">Andere Datei wählen</button>
       </div>
     </section>
 
@@ -168,7 +168,7 @@
           <div id="stl-viewer" class="viewer-3d"></div>
         </figure>
         <figure class="vw" id="fig-step">
-          <figcaption>STEP – so wird exportiert <span class="muted" id="fig-step-meta"></span></figcaption>
+          <figcaption><span id="fig-step-title">STEP – so wird exportiert</span> <span class="muted" id="fig-step-meta"></span></figcaption>
           <div id="step-occt-viewer" class="viewer-3d" data-state="empty"></div>
           <div class="vw__placeholder" id="step-occt-placeholder" hidden>
             <p id="step-occt-placeholder-text">Großes Modell – 3D-Vorschau auf Wunsch.</p>
