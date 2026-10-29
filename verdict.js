@@ -143,7 +143,10 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
 
   // ── Rundungen: weg (scharf gemacht) vs. erhalten (echte Teil-Zylinder/-Kegel) ──
   // `coneBandsDefeatured` steckt schon in `bandsDefeatured` — nicht doppelt zählen.
-  const roundsRemoved = finite(report.bandsDefeatured) + finite(report.cornersDefeatured) + finite(report.filletsDefeatured);
+  // `rimFilletsAbsorbed`: Rundungen am Lochrand, die in die Bohrungs-/Mantel-Umwandlung
+  // aufgingen (Chamfer-Zone) — sie wurden ebenfalls scharf gemacht, sonst zählt die Kachel
+  // „keine gezählt“, obwohl Facetten verschwunden sind.
+  const roundsRemoved = finite(report.bandsDefeatured) + finite(report.cornersDefeatured) + finite(report.filletsDefeatured) + finite(report.rimFilletsAbsorbed);
   const roundsKept = finite(report.arcCylinders) + finite(report.arcCones);
 
   // ── Überwiegend facettiert? ─────────────────────────────────────────────────
@@ -180,6 +183,8 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
   if (finite(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
   if (finite(report.cornersDefeatured)) rounds.push(`${report.cornersDefeatured} gerundete Profilecke${report.cornersDefeatured === 1 ? '' : 'n'}`);
   if (finite(report.filletsDefeatured)) rounds.push(`${report.filletsDefeatured} Kanten-Verrundung${report.filletsDefeatured === 1 ? '' : 'en'}`);
+  const rimRounds = finite(report.rimFilletsAbsorbed);
+  if (rimRounds > 0) rounds.push(`${rimRounds} ${rimRounds === 1 ? 'Randband (Rundung/Fase)' : 'Randbänder (Rundung/Fase)'} am Loch/Mantel übernommen`);
   if (rounds.length) converted.push(`scharf gemacht: ${rounds.join(', ')}`);
 
   const info = [];
