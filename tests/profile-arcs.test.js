@@ -1527,4 +1527,30 @@ describe('profile-arcs.js — Band-Erkennung', () => {
       expect(all.size).toBe(360);                          // 4×90 Facetten, jede genau einmal
     }
   });
+
+  // ── Achsen-Kandidaten: Deckfläche mit Bohrungs-Mündung (circleRim) ─────────
+  // Die Deckflächen eines Knöchels mit koaxialem Loch tragen den analytischen Kreis-Rand
+  // (circleRim) der Bohrungs-Mündung in einem INNEREN Loop. Genau diese Deckflächen sind die
+  // einzigen Flächen ⟂ zur Knöchel-Achse: werden sie als Achsen-Quelle übersprungen, gibt es
+  // gar keine Achse und der Knöchel bleibt facettiert. Der Kreis-Rand-Loop zählt deshalb NICHT
+  // mit (seine Punkte gehören einem Kreis, nicht zum Polygon der Fläche) — der Außen-Loop
+  // schon: die Fläche liefert ihre Normale. Die Bogen-Validierung prüft ohnehin nur den Loop,
+  // IN DEM der Bogen liegt — der circleRim-Loop daneben stört sie nicht.
+  test('35: axisCandidates — Deckfläche mit circleRim-Loop liefert die Achse (nur der Außen-Loop zählt)', () => {
+    const mkFace = (nOuter, nInner) => {
+      const outer = [], inner = [];
+      for (let i = 0; i < nOuter; i++) { const a = 2 * Math.PI * i / nOuter; outer.push([8 * Math.cos(a), 8 * Math.sin(a), 0]); }
+      for (let i = 0; i < nInner; i++) { const a = 2 * Math.PI * i / nInner; inner.push([2 * Math.cos(a), 2 * Math.sin(a), 0]); }
+      inner.circleRim = {};                                 // analytischer Kreis-Rand (Bohrungs-Mündung)
+      return { outer, inner: [inner], normal: [0, 0, 1], centroid: [0, 0, 0] };
+    };
+    // Außen-Loop mit 8 Punkten (≥ capMinPts 6) → die Fläche liefert die Achse [0,0,1]
+    const axes = axisCandidates([mkFace(8, 16)], { vtxKey });
+    expect(axes.length).toBe(1);
+    expect(axes[0][0]).toBeCloseTo(0, 9);
+    expect(axes[0][1]).toBeCloseTo(0, 9);
+    expect(axes[0][2]).toBeCloseTo(1, 9);
+    // zählbare Punkte nur 4 (Außen-Loop) + 16 im circleRim-Loop → unter capMinPts → keine Achse
+    expect(axisCandidates([mkFace(4, 16)], { vtxKey }).length).toBe(0);
+  });
 });

@@ -417,8 +417,15 @@ const hasArcEdges = (fd) => {
 };
 
 /**
- * Achsen-Kandidaten aus den ebenen Flächen: jede Fläche ohne circleRim/arcEdges mit
+ * Achsen-Kandidaten aus den ebenen Flächen: jede Fläche ohne arcEdges mit
  * ≥ opts.capMinPts Randpunkten (Außen + Innen zusammen) liefert ihre Normale.
+ * Loops mit circleRim (analytischer Kreis-Rand — z. B. die Mündung einer Bohrung) zählen
+ * NICHT mit: ihre Punkte gehören einem Kreis, nicht zum Polygon der Fläche. Die Fläche
+ * selbst zählt aber (ihr Außen-Loop): eine Deckfläche mit Bohrungs-Mündung liefert die
+ * Achse trotzdem — die Bogen-Validierung prüft nur den Loop, IN DEM der Bogen liegt; ein
+ * circleRim-Loop daneben stört sie nicht. (Vorher wurde die ganze Fläche übersprungen →
+ * die Deckflächen einer Bohrung fehlten als Achsen-Quelle, und ein Teil-Zylinder um ein
+ * koaxiales Loch blieb facettiert.)
  * Vorzeichen kanonisch (erste Komponente mit |x| > 1e-9 positiv), Duplikate
  * (|cos| ≥ opts.capCos) werden zusammengefasst (erste gewinnt, Punktzahl addiert),
  * Sortierung nach Gesamtpunktzahl absteigend.
@@ -430,9 +437,10 @@ export function axisCandidates(fds, opts) {
     if (!fd) continue;
     if (hasArcEdges(fd)) continue;
     const loops = [fd.outer, ...(fd.inner || [])];
-    if (loops.some((L) => L && L.circleRim)) continue;   // analytischer Kreis-Rand
+    // analytischer Kreis-Rand (Bohrungs-Mündung): Punkte zählen nicht mit — die Fläche
+    // selbst (ihr Außen-Loop) schon → die Deckfläche liefert die Achse.
     let count = 0;
-    for (const L of loops) if (L) count += L.length;
+    for (const L of loops) if (L && !L.circleRim) count += L.length;
     if (count < o.capMinPts) continue;
     const nn = fd.normal;
     if (!nn || !Number.isFinite(nn[0]) || !Number.isFinite(nn[1]) || !Number.isFinite(nn[2])) continue;
