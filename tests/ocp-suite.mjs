@@ -68,8 +68,10 @@ origLog(`OCP-Prüfer: ${py.join(' ')} tests/occt-check.py`);
 const EXPECT = {
   // dino: zwei Körper durchdringen sich schon im NETZ (44 Kanten-Durchstöße zwischen den Komponenten
   // mit 2176 und 1048 Dreiecken, gemessen am STL) plus Selbstberührungen innerhalb der Körper
-  'dino_clip_v3_04-strong-closing.stl [AN]': { bop: { BOPAlgo_SelfIntersect: 51 } },
-  'dino_clip_v3_04-strong-closing.stl [AUS]': { bop: { BOPAlgo_SelfIntersect: 51 } },
+  // seit dem Pinch-Split 52 statt 51 Befunde: der eine zusätzliche Befund liegt zwischen den Körpern 0/1
+  // im Bereich der bekannten Netz-Durchdringung, das Volumen bleibt unverändert (32727.824).
+  'dino_clip_v3_04-strong-closing.stl [AN]': { bop: { BOPAlgo_SelfIntersect: 52 } },
+  'dino_clip_v3_04-strong-closing.stl [AUS]': { bop: { BOPAlgo_SelfIntersect: 52 } },
 };
 for (const cs of CASES) if (cs.ocpBop) for (const t of ['AN', 'AUS']) EXPECT[`${cs.name} [${t}]`] = { bop: cs.ocpBop };
 
