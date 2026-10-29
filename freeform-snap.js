@@ -29,6 +29,13 @@
 //       Nachbarband mitverschlucken kann und die Regionsgrenze dann nicht
 //       auf der Berührungsstelle liegt
 //   1 Radien-Cluster (Zylinder R, Kugel R, Torus r) vereinheitlichen
+//   1b orthogonale Achsen: Zylinder/Kegel/Torus, die mit einer Ebene eine
+//      Kette teilen und deren Achse parallel zur Ebenennormale ist
+//      (|a·n| > cos 0,5° — z. B. die Bohrung durch eine Platte), bekommen
+//      die Achse exakt auf ±n gesetzt. Vorher (1b-0) bekommen genau
+//      parallele Ebenen eine gemeinsame Normale: sonst wären die beiden
+//      Deckflächen um das float32-Rauschen der STL gegeneinander
+//      verkippt und der exakte Schnittkreis ginge verloren.
 //   2 Zylinder exakt an seine tangentialen Ebenen legen
 //   3 Torus koaxial zum Zylinder, Mitte exakt in der tangentialen Ebene
 //   4 Kugel auf die Achse(n) ihrer tangentialen Zylinder setzen
@@ -41,6 +48,8 @@ import {
 
 const DEG = Math.PI / 180;
 const COS5 = Math.cos(5 * DEG);
+const COS05 = Math.cos(0.5 * DEG);    // orthogonale Achse ↔ Ebene
+const COSPARA = Math.cos(0.05 * DEG);  // parallel: Ebenen-Normalen
 
 // ── Hilfen ───────────────────────────────────────────────────────────────────
 
@@ -96,6 +105,11 @@ function sameSurf(a, b) {
     } else if (va !== vb) return false;
   }
   return true;
+}
+
+// Zwei Vektoren gleich? (Werte, nicht Referenzen)
+function sameVec(a, b) {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 // Radius einer gekrümmten Fläche (Zylinder R, Kugel R, Torus r); null sonst
@@ -310,6 +324,72 @@ export function snapSurfaces({ mesh, regions, chains }, opts = {}) {
     log.push(`Radien-Cluster: ${arr.length} Region(en) auf ${m.toFixed(6)} gesetzt`);
   }
 
+  // ── Schritt 1b-0: parallele Ebenen teilen eine Normale ─────────────────
+  // Zwei genau parallele Ebenen (z. B. die beiden Deckflächen einer Platte)
+  // bekommen vom Fit je eine eigene Normale; die beiden unterscheiden sich
+  // um das float32-Rauschen der STL (≈1e-8 rad). Der Schnitt Ebene ∩ Zylinder
+  // ist aber nur dann ein exakter Kreis, wenn die Zylinderachse EXAKT
+  // senkrecht auf der Ebene steht — und der Schnitt der Deckfläche mit dem
+  // Torus nur dann ein exakter Kreis, wenn beide Ebenen exakt parallel
+  // sind. Deshalb bekommen alle Ebenen einer Richtungsgruppe dieselbe
+  // Normale (die der größten Fläche; das Vorzeichen nach außen bleibt).
+  const planeIds = ids.filter((id) => surfs.get(id).type === 'plane');
+  const paraGroups = [];
+  for (const id of planeIds) {
+    const p = surfs.get(id);
+    const area = (regById.get(id) ? regById.get(id).area : 0) || 0;
+    let g = null;
+    for (const gr of paraGroups) if (Math.abs(dot(gr.n, p.n)) > COSPARA) { g = gr; break; }
+    if (!g) { paraGroups.push({ n: p.n, area, ids: [id] }); continue; }
+    g.ids.push(id);
+    if (area > g.area) { g.area = area; g.n = p.n; }
+  }
+  for (const g of paraGroups) {
+    if (g.ids.length < 2) continue;
+    const changed = [];
+    for (const id of g.ids) {
+      const p = surfs.get(id);
+      if (p.n === g.n) continue; // der Vertreter behält seine Normale
+      const nn = dot(p.n, g.n) < 0 ? mul(g.n, -1) : Array.from(g.n);
+      if (!sameVec(p.n, nn)) changed.push(id);
+      p.n = nn;
+    }
+    if (changed.length) {
+      log.push(`Parallele Ebenen ${g.ids.join(',')}: gemeinsame Normale `
+        + `(${changed.join(',')} angeglichen)`);
+    }
+  }
+
+  // ── Schritt 1b: orthogonale Achsen ─────────────────────────────────────
+  // Ein Zylinder/Kegel/Torus, der mit einer Ebene eine Kette teilt und dessen
+  // Achse parallel zur Ebenennormale ist (|a·n| > cos 0,5° — die Bohrung
+  // durch eine Platte), bekommt die Achse exakt auf ±n gesetzt (Zylinder:
+  // o bleibt, Kegel: Apex bleibt, Torus: c bleibt). Der Fit liefert die
+  // Achse um das float32-Rauschen der STL verkippt; eine verkippte Achse
+  // macht aus Ebene ∩ Zylinder eine fast kreisförmige Ellipse, die die
+  // B-Spline-Verfeinerung nicht mehr auflösen kann.
+  for (const id of ids) {
+    const s = surfs.get(id);
+    if (s.type !== 'cylinder' && s.type !== 'cone' && s.type !== 'torus') continue;
+    const cands = [];
+    for (const st of stats.values()) {
+      const other = st.L === id ? st.R : (st.R === id ? st.L : null);
+      if (other === null) continue;
+      const ps = surfs.get(other);
+      if (!ps || ps.type !== 'plane') continue;
+      const ad = Math.abs(dot(s.a, ps.n));
+      if (ad <= COS05) continue;
+      cands.push({ id: other, len: st.len, ad });
+    }
+    if (!cands.length) continue;
+    // die Ebene mit den längsten gemeinsamen Ketten (parallel: gleiche Normale)
+    cands.sort((x, y) => (y.len - x.len) || (x.id - y.id));
+    const ps = surfs.get(cands[0].id);
+    s.a = dot(s.a, ps.n) < 0 ? mul(ps.n, -1) : Array.from(ps.n);
+    log.push(`Region ${id} (${s.type}): Achse orthogonal zur Ebene ${cands[0].id} `
+      + `(|a·n| = ${cands[0].ad.toFixed(9)})`);
+  }
+
   // ── Schritt 2: Zylinder an die tangentialen Ebenen legen ─────────────────
   for (const id of ids) {
     const c = surfs.get(id);
@@ -380,6 +460,7 @@ export function snapSurfaces({ mesh, regions, chains }, opts = {}) {
     if (t.type !== 'torus') continue;
     const cands = partners(id);
     // koaxialer Zylinder
+    let coaxial = false;
     for (const p of cands) {
       const cs = surfs.get(p.id);
       if (!cs || cs.type !== 'cylinder') continue;
@@ -391,19 +472,25 @@ export function snapSurfaces({ mesh, regions, chains }, opts = {}) {
       t.a = an;
       t.c = c;
       t.Rm = Rm;
+      coaxial = true;
       log.push(`Region ${id} (torus): koaxial zu Zylinder ${p.id} (Rm = ${Rm.toFixed(6)})`);
       break;
     }
-    // tangentiale Ebenen
+    // tangentiale Ebenen: die Mitte EXAKT in die Ebene legen. Ist der Torus
+    // koaxial zum Zylinder, bleibt die Achse die des Zylinders (nach Schritt
+    // 1b exakt die Ebenennormale) und nur die Mitte wird entlang der Achse
+    // verschoben — das ist exakt, weil a ∥ n.
     for (const p of cands) {
       const ps = surfs.get(p.id);
       if (!ps || ps.type !== 'plane') continue;
       const n = ps.n;
       if (Math.abs(dot(n, t.a)) <= COS5) continue;
+      if (!coaxial) t.a = dot(n, t.a) < 0 ? mul(n, -1) : Array.from(n);
       const s = Math.sign(sdist(ps, t.c)) || 1;
-      const d = sdist(ps, t.c) - s * t.r;
-      t.c = sub(t.c, mul(n, d));
-      t.a = dot(n, t.a) < 0 ? mul(n, -1) : Array.from(n);
+      const an = dot(t.a, n);   // ±1, wenn die Achse exakt senkrecht steht
+      if (!an) continue;
+      const d = (sdist(ps, t.c) - s * t.r) / an;
+      t.c = sub(t.c, mul(t.a, d));
       log.push(`Region ${id} (torus): Mitte in der Ebene ${p.id} (Abstand = ${t.r.toFixed(6)})`);
     }
   }

@@ -10,20 +10,25 @@
 //   • Rundquader: jeder Zylinder tangentiell zu genau 2 Ebenen
 //       |sdist(Ebene, Achsenpunkt)| = R  und  |a·n| = 0
 //     jede Kugel: Mittelpunkt auf allen Zylinderachsen, R = deren R
-//   • Platte: Torus-Achse parallel zur Bohrungsachse, Mitte auf ihr,
+//   • Platte: Bohrungsachse EXAKT orthogonal zur Deckfläche (|a×n| = 0),
+//     Torus-Achse = Bohrungsachse, Torus-Mitte auf der Bohrungsachse,
 //     Rm = R_Zyl + r, Abstand der Torus-Mitte zur Deckfläche = ±r
 //   • Halbkugel: Kugelmittelpunkt auf der Zylinderachse, R = R_Zyl
+//   • synthetisch: Zylinder zwischen zwei Ebenen, Achse um 0,3° geneigt →
+//     nach dem Snap exakt (0,0,±1)
 //
-// Toleranzen: Größen, die der Snap EXAKT konstruiert (Tangentialität, R = R),
-// werden mit 1e-9/1e-12 geprüft — auch an den gedrehten Körpern. Größen, die
-// nur näherungsweise aus zwei unabhängigen Fits folgen (Kugelmittelpunkt auf
-// mehreren Achsen, Torus-Achse ‖ Zylinderachse), sind beim gedrehten Körper
-// durch das float32-Rauschen der STL (≈1e-6 mm) begrenzt → dort 1e-5.
+// Toleranzen: Größen, die der Snap EXAKT konstruiert (Tangentialität, R = R,
+// orthogonale Achsen), werden mit 1e-9/1e-12 geprüft — auch an den gedrehten
+// Körpern. Größen, die nur näherungsweise aus zwei unabhängigen Fits folgen
+// (Kugelmittelpunkt auf mehreren Achsen), sind beim gedrehten Körper durch
+// das float32-Rauschen der STL (≈1e-6 mm) begrenzt → dort 1e-5.
 //
 // Die GEDREHTEN Körper werden nur geprüft, wenn die Segmentierung dieselben
 // Flächenarten liefert wie der ungedrehte Körper. SegmenTIERT der gedrehte
 // Körper anders (bekannter Segmentierungs-Fehler, wird parallel behoben), wird
-// der Fall mit "SKIP (segmentation)" übersprungen statt zu scheitern.
+// der Fall mit "SKIP (segmentation)" übersprungen statt zu scheitern. AUSNAHME
+// Platte: dort stören nur zusätzliche Facetten-Regionen (bekannter Fehler);
+//   fehlen Zylinder oder Torus, wird trotzdem übersprungen.
 //
 // Aufruf:  .dev/test-stl.sh ff-snap
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,8 +198,9 @@ function checkBox(body, achseTol) {
   }
 }
 
-// Platte: Torus koaxial zur Bohrung, Mitte auf der Achse, an der Deckfläche
-function checkPlate(body, achseTol) {
+// Platte: Bohrungsachse exakt orthogonal zur Deckfläche, Torus koaxial zur
+// Bohrung, Mitte auf der Achse, an der Deckfläche
+function checkPlate(body) {
   const { surfs } = body;
   const tor = byType(surfs, 'torus');
   const cyl = byType(surfs, 'cylinder');
@@ -203,22 +209,31 @@ function checkPlate(body, achseTol) {
   const [tid, t] = tor[0];
   const [cid, c] = cyl[0];
 
-  const par = len(cross(t.a, c.a));
-  assert.ok(par < achseTol,
-    `Torus ${tid}: Achse nicht parallel zur Bohrung (|a×a| = ${par.toExponential(3)} > ${achseTol})`);
-  const dc = axisDist(t.c, c.o, c.a);
-  assert.ok(dc < GENAU, `Torus ${tid}: Mitte ${dc.toExponential(3)} von der Bohrungsachse entfernt`);
-  assert.ok(Math.abs(t.Rm - (c.R + t.r)) < EXAKT,
-    `Torus ${tid}: Rm = ${t.Rm.toFixed(12)} statt R_Zyl + r = ${(c.R + t.r).toFixed(12)}`);
-
-  // tangentiale Ebene (Deckfläche): eine Ebene parallel zur Torusachse muss den
-  // Torus berühren — ihr Abstand zur Torusmitte ist dann exakt ±r
-  const parPlanes = byType(surfs, 'plane')
+  // Deckfläche oben: die zur Torusachse parallele Ebene, an der der Torus
+  // tangential anliegt (Abstand der Torusmitte zur Ebene = r)
+  const decks = byType(surfs, 'plane')
     .filter(([, p]) => Math.abs(dot(p.n, t.a)) > 1 - 1e-6)
     .map(([pid, p]) => [pid, p, Math.abs(Math.abs(sdist(p, t.c)) - t.r)])
     .sort((a, b) => a[2] - b[2]);
-  assert.ok(parPlanes.length, `Torus ${tid}: keine Ebene parallel zur Torusachse`);
-  const [pid, p, dev] = parPlanes[0];
+  assert.ok(decks.length, `Torus ${tid}: keine Ebene parallel zur Torusachse`);
+  const [pid, p, dev] = decks[0];
+
+  // exakt: die Bohrungsachse steht senkrecht auf der Deckfläche
+  const perp = len(cross(c.a, p.n));
+  assert.ok(perp < RICHTUNG,
+    `Zylinder ${cid}: Achse nicht orthogonal zur Deckfläche ${pid} `
+    + `(|a×n| = ${perp.toExponential(3)})`);
+  // exakt: Torus koaxial zur Bohrung
+  const par = len(cross(t.a, c.a));
+  assert.ok(par < RICHTUNG,
+    `Torus ${tid}: Achse nicht parallel zur Bohrung (|a×a| = ${par.toExponential(3)})`);
+  // exakt projiziert: Torusmitte auf der Bohrungsachse
+  const dc = axisDist(t.c, c.o, c.a);
+  assert.ok(dc < GENAU, `Torus ${tid}: Mitte ${dc.toExponential(3)} von der Bohrungsachse entfernt`);
+  // exakt konstruiert: Rm = R_Zyl + r
+  assert.ok(Math.abs(t.Rm - (c.R + t.r)) < EXAKT,
+    `Torus ${tid}: Rm = ${t.Rm.toFixed(12)} statt R_Zyl + r = ${(c.R + t.r).toFixed(12)}`);
+  // exakt: Abstand der Torusmitte zur Deckfläche = r
   assert.ok(dev < EXAKT,
     `Torus ${tid} ↔ Ebene ${pid}: |sdist| = ${Math.abs(sdist(p, t.c)).toFixed(12)} `
     + `statt r = ${t.r.toFixed(12)} (Abweichung ${dev.toExponential(3)})`);
@@ -239,6 +254,77 @@ function checkHalf(body) {
   assert.equal(s.R, c.R, `Kugel ${sid}: R = ${s.R} statt ${c.R}`);
 }
 
+// ── Synthetischer Fall: Zylinder zwischen zwei Ebenen ─────────────────────
+// Der Fit liefert die Achse um das float32-Rauschen der STL verkippt; die
+// orthogonalen Achsen (Schritt 1b) müssen sie exakt auf die Ebenennormale
+// setzen. Gebaut: Zylinder R5 zwischen den Ebenen z = 0 und z = 10, Achse um
+// 0,3° gegen z geneigt.
+function syntheticTiltedCylinder() {
+  const N = 16;
+  const R = 5;
+  const z0 = 0;
+  const z1 = 10;
+  const pts = [];
+  const idx = (x, y, z) => { pts.push([x, y, z]); return pts.length - 1; };
+  const bot = [];
+  const top = [];
+  for (let j = 0; j < N; j++) {
+    const th = (j / N) * 2 * Math.PI;
+    bot.push(idx(R * Math.cos(th), R * Math.sin(th), z0));
+    top.push(idx(R * Math.cos(th), R * Math.sin(th), z1));
+  }
+  const cB = idx(0, 0, z0);
+  const cT = idx(0, 0, z1);
+  const wall = [];
+  const capB = [];
+  const capT = [];
+  for (let j = 0; j < N; j++) {
+    const j2 = (j + 1) % N;
+    wall.push([pts[bot[j]], pts[bot[j2]], pts[top[j2]]]);
+    wall.push([pts[bot[j]], pts[top[j2]], pts[top[j]]]);
+    capB.push([pts[cB], pts[bot[j2]], pts[bot[j]]]);
+    capT.push([pts[cT], pts[top[j]], pts[top[j2]]]);
+  }
+  const mesh = indexMesh([...wall, ...capB, ...capT]);
+  assert.ok(mesh, 'synthetisch: indexMesh lieferte null');
+  // Netz-Indizes der Ringpunkte (indexMesh nummeriert die Ecken neu)
+  const key = (p) => `${p[0]},${p[1]},${p[2]}`;
+  const vidx = new Map();
+  for (let i = 0; i < mesh.nV; i++) {
+    vidx.set(key([mesh.P[3 * i], mesh.P[3 * i + 1], mesh.P[3 * i + 2]]), i);
+  }
+  const meshIdx = (list) => list.map((i) => vidx.get(key(pts[i])));
+  const tilt = 0.3 * Math.PI / 180;
+  const regions = [
+    {
+      id: 1,
+      kind: 'analytic',
+      surf: { type: 'plane', o: [0, 0, 0], n: [0, 0, -1] },
+      tris: capB.map((_, k) => 2 * N + k),
+      area: Math.PI * R * R,
+    },
+    {
+      id: 2,
+      kind: 'analytic',
+      surf: { type: 'cylinder', o: [0, 0, 5], a: [Math.sin(tilt), 0, Math.cos(tilt)], R },
+      tris: wall.map((_, k) => k),
+      area: 2 * Math.PI * R * (z1 - z0),
+    },
+    {
+      id: 3,
+      kind: 'analytic',
+      surf: { type: 'plane', o: [0, 0, 10], n: [0, 0, 1] },
+      tris: capT.map((_, k) => 3 * N + k),
+      area: Math.PI * R * R,
+    },
+  ];
+  const chains = [
+    { L: 2, R: 1, mv: meshIdx(bot) },
+    { L: 2, R: 3, mv: meshIdx(top) },
+  ];
+  return { mesh, regions, chains };
+}
+
 // ── Fälle ────────────────────────────────────────────────────────────────────
 const BODY = {
   box: 'ff_rundquader_r1.stl',
@@ -255,16 +341,27 @@ for (const [key, file] of Object.entries(BODY)) {
 }
 
 // gedreht/ungedreht: nur prüfen, wenn die Segmentierung gleich ist
+// (need: nur diese Regionstypen müssen vorhanden sein — dann stören
+//  zusätzliche Facetten-Regionen nicht, siehe Platte)
 const skips = [];
-function rotatedCase(key, name, fn) {
+function rotatedCase(key, name, fn, need) {
   const plain = key.replace(/G$/, '');
-  const same = typeCounts(bodies[key].regions) === typeCounts(bodies[plain].regions);
-  if (!same) {
-    skips.push(`SKIP (segmentation) ${name} — ${bodies[key].file}: `
-      + `${typeCounts(bodies[key].regions)} statt ${typeCounts(bodies[plain].regions)}`);
-    return;
+  const b = bodies[key];
+  if (need) {
+    const missing = need.filter((t) => !b.regions.some((r) => r.type === t));
+    if (missing.length) {
+      skips.push(`SKIP (segmentation) ${name} — ${b.file}: Region(en) ${missing.join(',')} fehlen`);
+      return;
+    }
+  } else {
+    const same = typeCounts(b.regions) === typeCounts(bodies[plain].regions);
+    if (!same) {
+      skips.push(`SKIP (segmentation) ${name} — ${b.file}: `
+        + `${typeCounts(b.regions)} statt ${typeCounts(bodies[plain].regions)}`);
+      return;
+    }
   }
-  test(name, () => fn(bodies[key]));
+  test(name, () => fn(b));
 }
 
 test('Rundquader: Zylinder tangential zu genau 2 Ebenen, Kugel auf den Achsen', () => {
@@ -274,12 +371,12 @@ test('Rundquader: Zylinder tangential zu genau 2 Ebenen, Kugel auf den Achsen', 
 rotatedCase('boxG', 'Rundquader gedreht: Zylinder tangential zu genau 2 Ebenen, Kugel auf den Achsen',
   (b) => checkBox(b, RAUSCH));
 
-test('Platte: Torus koaxial zur Bohrung, Mitte auf der Achse, an der Deckfläche', () => {
-  checkPlate(bodies.plate, RICHTUNG);
+test('Platte: Bohrungsachse orthogonal zur Deckfläche, Torus koaxial zur Bohrung, an der Deckfläche', () => {
+  checkPlate(bodies.plate);
 });
 
-rotatedCase('plateG', 'Platte gedreht: Torus koaxial zur Bohrung, Mitte auf der Achse, an der Deckfläche',
-  (b) => checkPlate(b, RAUSCH));
+rotatedCase('plateG', 'Platte gedreht: Bohrungsachse orthogonal zur Deckfläche, Torus koaxial zur Bohrung, an der Deckfläche',
+  (b) => checkPlate(b), ['cylinder', 'torus']);
 
 test('Halbkugel: Kugelmittelpunkt auf der Zylinderachse, R = R_Zyl', () => {
   checkHalf(bodies.half);
@@ -287,6 +384,18 @@ test('Halbkugel: Kugelmittelpunkt auf der Zylinderachse, R = R_Zyl', () => {
 
 rotatedCase('halfG', 'Halbkugel gedreht: Kugelmittelpunkt auf der Zylinderachse, R = R_Zyl',
   (b) => checkHalf(b));
+
+test('Synthetisch: Zylinder zwischen zwei Ebenen, Achse 0,3° geneigt → exakt orthogonal', () => {
+  const { mesh, regions, chains } = syntheticTiltedCylinder();
+  const { surfs } = snapSurfaces({ mesh, regions, chains });
+  const cyl = surfs.get(2);
+  assert.ok(cyl, 'Zylinderregion fehlt in surfs');
+  assert.equal(cyl.type, 'cylinder');
+  // die geneigte Achse wurde auf die Ebenennormale gesetzt — exakt
+  assert.equal(Math.abs(cyl.a[0]), 0, `a[0] = ${cyl.a[0]}`);
+  assert.equal(Math.abs(cyl.a[1]), 0, `a[1] = ${cyl.a[1]}`);
+  assert.equal(Math.abs(Math.abs(cyl.a[2]) - 1), 0, `a[2] = ${cyl.a[2]}`);
+});
 
 test('Snap verändert die Eingabe nicht', () => {
   for (const key of Object.keys(bodies)) {
@@ -356,6 +465,7 @@ for (const key of ['box', 'boxG']) {
 }
 
 for (const line of skips) console.log(line);
+
 
 for (const [name, fn] of cases) {
   try {
