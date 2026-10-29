@@ -81,6 +81,23 @@
 // Ablauf je Runde: Arbeitsregionen → Topologie → Snap → Orientierung → Ecken →
 // Kanten → Flächen. Jeder Fehler nennt die schuldige Region; sie wird zur Fassade
 // (jedes Dreieck eine eigene Ebene) und die Runde läuft erneut (höchstens 8 Runden).
+//
+// Fehlerarten (Rundebilanz in opts.debug.log, eine Zeile je Runde):
+//   vertex           Projektion einer Ecke ungenau (Rest > VERT_TOL)
+//   chain:<grund>    Schnittkurve einer Kette gescheitert (fehlt/shift/maxPts/…)
+//   degenerate       entartete Facette oder entartete Schleife
+//   orientation      Vorzeichen der Flächennormale zu schwach
+//
+// Täterwahl: Eckenfehler → kleinste analytische NICHT-Ebene unter den beteiligten
+// Regionen (sonst die kleinste analytische), Streifen = Ecke + 1-Ring; entartete
+// Facette → kleinste Region, die die Eckbedingungen des Dreiecks besitzt; Kante →
+// nicht-ebene Region bevorzugt. Findet sich KEINE analytische Region direkt, wird
+// die Umgebung gesucht: analytische Regionen, deren Dreiecke Netzecken im 2-Ring
+// (sonst 3-Ring) um den Fehler berühren, werden gestreift. Erst wenn dort auch
+// nichts ist, wird abgebrochen (kein stilles Scheitern an einer einzelnen Fläche).
+//
+// Optionen: opts.maxRounds (Standard 12), opts.debug.log (Rundenbilanz),
+//   opts.testForceChainFail / opts.testForceVertexFail (Testschalter, je einmal).
 // ─────────────────────────────────────────────────────────────────────────────
 import { trianglesFromGroups, indexMesh, segmentByFit } from './freeform-segment.js';
 import { buildTopology, checkTopology } from './freeform-topology.js';
@@ -92,7 +109,9 @@ import { snapSurfaces } from './freeform-snap.js';
 import { writeFreeformStep } from './freeform-step.js';
 
 // ---- Grenzwerte (Etappe 1) ----
-const ROUNDS_MAX = 12;           // höchstens 12 Runden
+const ROUNDS_MAX = 12;           // höchstens 12 Runden (Standard; opts.maxRounds)
+const NEIGH_RING = 2;            // Ringe um einen Fehler: analytische Regionen suchen
+const NEIGH_RING_MAX = 3;        // erst danach aufgeben (kein Abbruch, solange etwas da ist)
 const STRIP_ROUNDS_MAX = 3;      // 3 Runden mit Streifen → Region ganz zur Fassade
 const SEG_ANGLE_DEG = 12;        // Segmentierwinkel
 const SENSE_MIN = 0.8;           // |flächengewichtetes Vorzeichen| je Region
@@ -170,6 +189,89 @@ function pickSmallestAnalytic(cands) {
   return best;
 }
 
+// Kleinste analytische NICHT-Ebene unter den Kandidaten (sonst die kleinste
+// analytische): Eckenfehler stammen fast immer von gekrümmten Flächen
+function pickSmallestNonPlane(cands) {
+  let best = null;
+  for (const c of cands) {
+    if (!c || c.kind !== 'analytic' || !c.surf) continue;
+    if (c.surf.type === 'plane') continue;
+    if (!best || c.area < best.area) best = c;
+  }
+  return best || pickSmallestAnalytic(cands);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Nachbarschaft im Netz (Ringe über die Dreieckskanten) — Umgebungssuche
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Adjazenz Ecke → Nachbarecken (jede Dreieckskante verbindet zwei Ecken)
+function buildVertexAdjacency(mesh) {
+  const { tri, T } = mesh;
+  const adj = new Map();
+  const link = (a, b) => {
+    let l = adj.get(a);
+    if (!l) { l = new Set(); adj.set(a, l); }
+    l.add(b);
+  };
+  for (let t = 0; t < T; t++) {
+    const i0 = tri[3 * t], i1 = tri[3 * t + 1], i2 = tri[3 * t + 2];
+    link(i0, i1); link(i1, i0);
+    link(i1, i2); link(i2, i1);
+    link(i2, i0); link(i0, i2);
+  }
+  return adj;
+}
+
+// Netzecken im Umkreis von seed (rings Schritte über die Dreieckskanten)
+function vertexNeighbourhood(adj, seed, rings) {
+  const cur = new Set(seed);
+  let front = [...cur];
+  for (let r = 0; r < rings && front.length; r++) {
+    const next = [];
+    for (const v of front) {
+      const l = adj.get(v);
+      if (!l) continue;
+      for (const w of l) if (!cur.has(w)) { cur.add(w); next.push(w); }
+    }
+    front = next;
+  }
+  return cur;
+}
+
+// Analytische Regionen in der Umgebung der Netzecken (Ringe) + die Ecken selbst
+function analyticNear(adj, incident, regions, seed, rings) {
+  const verts = vertexNeighbourhood(adj, seed, rings);
+  const found = new Map();          // Region → eine ihrer Ecken
+  for (const mv of verts) {
+    const ids = incident.get(mv);
+    if (!ids) continue;
+    for (const id of ids) {
+      const w = regions[id];
+      if (w && w.kind === 'analytic' && !found.has(w)) found.set(w, mv);
+    }
+  }
+  return { regions: [...found.keys()], verts };
+}
+
+// Analytische Regionen an den Ecken eines Dreiecks (Eckenzuständigkeit):
+// sie besitzen die Eckbedingungen, an denen das Dreieck entartet sein kann
+function analyticAtVertices(mesh, wr, incident, regions) {
+  const { tri } = mesh;
+  const t = wr.tris[0];
+  const found = new Map();          // Region → Netzecke
+  for (let k = 0; k < 3; k++) {
+    const mv = tri[3 * t + k];
+    const ids = incident.get(mv);
+    if (!ids) continue;
+    for (const id of ids) {
+      const w = regions[id];
+      if (w && w.kind === 'analytic' && !found.has(w)) found.set(w, mv);
+    }
+  }
+  return found;
+}
+
 // Zylinder/Kugel-Paar (Testschalter)
 function isCylSphere(A, B) {
   const ta = A && A.type, tb = B && B.type;
@@ -216,10 +318,14 @@ function buildInner(normalGroups, opts, log) {
     stripTris: new Set(),        // Netz-Dreiecke, die zu eigenen Facetten wurden
     demotedRegions: new Set(),   // Regionen, die ganz zur Fassade wurden
     stripRounds: new Map(),      // Region → Runden, in denen sie gestreift wurde
-    testForceUsed: false,        // Testschalter: wirkt nur einmal
+    testForceUsed: false,        // Testschalter (Kette): wirkt nur einmal
+    testForceVertexUsed: false,  // Testschalter (Ecke): wirkt nur einmal
     segById: new Map(seg.regions.map((r) => [r.id, r])),
+    adj: buildVertexAdjacency(mesh),   // Nachbarschaft im Netz (Umgebungssuche)
   };
-  for (let round = 0; round < ROUNDS_MAX; round++) {
+  const maxRounds = Number.isFinite(opts.maxRounds) && opts.maxRounds > 0
+    ? Math.floor(opts.maxRounds) : ROUNDS_MAX;
+  for (let round = 0; round < maxRounds; round++) {
     const res = runRound(mesh, seg, state, round, opts, log);
     if (res.hard) return null;
     if (res.failures.length) {
@@ -266,7 +372,7 @@ function buildInner(normalGroups, opts, log) {
     };
     return { step, report, brep: res.brep };
   }
-  if (log) log.push(`Nach ${ROUNDS_MAX} Runden noch Fehler → Abbruch`);
+  if (log) log.push(`Nach ${maxRounds} Runden noch Fehler → Abbruch`);
   return null;
 }
 
@@ -275,22 +381,10 @@ function buildInner(normalGroups, opts, log) {
 // ─────────────────────────────────────────────────────────────────────────────
 function runRound(mesh, seg, state, round, opts, log) {
   const { tri, nV, T, N, A } = mesh;
+  const adj = state.adj;
   const failures = [];
   const strips = new Map();            // Quellregion → Netzecken des Streifens
-  const fail = (cands, reason, mvSet, pick) => {
-    failures.push(reason);
-    const c = pick ? pick(cands) : pickCulprit(cands);
-    if (c && c.kind === 'analytic') {
-      let s = strips.get(c.src);
-      if (!s) { s = new Set(); strips.set(c.src, s); }
-      for (const mv of (mvSet || [])) s.add(mv);
-    }
-    if (log) {
-      log.push(`Runde ${round}: ${reason}${c
-        ? ` → Täter: Region ${c.id} (${c.type}, ${c.area.toFixed(1)} mm²)`
-        : ' → kein Täter'}`);
-    }
-  };
+  const failKinds = new Map();         // Fehlerart → Anzahl
 
   // ── a) Arbeitsregionen: gestrippte und Facetten-Regionen werden Dreieck für Dreieck
   const regions = [];
@@ -322,6 +416,60 @@ function runRound(mesh, seg, state, round, opts, log) {
     regions.push(wr); byId.set(wr.id, wr);
     for (const t of rest) wLabel[t] = wr.id;
   }
+
+  // ── Eckenzuständigkeit: Netzecke → Regionen (wer besitzt die Eckbedingung?)
+  const incident = new Map();
+  for (let t = 0; t < T; t++) {
+    const id = wLabel[t];
+    for (let k = 0; k < 3; k++) {
+      const mv = tri[3 * t + k];
+      let s = incident.get(mv);
+      if (!s) { s = new Set(); incident.set(mv, s); }
+      s.add(id);
+    }
+  }
+
+  // ── Fehler melden: Täter suchen — sonst die Umgebung durchsuchen
+  // (analytische Regionen im 2-Ring, sonst im 3-Ring um den Fehler)
+  const fail = (kind, cands, reason, mvSet, pick) => {
+    failures.push(reason);
+    failKinds.set(kind, (failKinds.get(kind) || 0) + 1);
+    let c = pick ? pick(cands) : pickCulprit(cands);
+    let mv = mvSet;
+    if (!c || c.kind !== 'analytic') {
+      const seed = mvSet ? [...mvSet] : [];
+      let near = seed.length ? analyticNear(adj, incident, regions, seed, NEIGH_RING) : null;
+      if (!near || !near.regions.length) {
+        near = seed.length ? analyticNear(adj, incident, regions, seed, NEIGH_RING_MAX) : null;
+      }
+      if (near && near.regions.length) {
+        // alle analytischen Regionen der Umgebung streifen (mvSet = Nachbarschaft)
+        const list = near.regions.slice().sort((a, b) => a.area - b.area);
+        for (const w of list) {
+          let s = strips.get(w.src);
+          if (!s) { s = new Set(); strips.set(w.src, s); }
+          for (const v of near.verts) s.add(v);
+        }
+        c = list[0];
+        mv = near.verts;
+        if (log) {
+          log.push(`Runde ${round}: ${reason} → Umgebung: ${list.length} analytische Region(en) `
+            + `(${list.map((w) => `#${w.id} ${w.type}`).join(', ')}) gestreift`);
+        }
+      } else c = null;
+    }
+    if (c && c.kind === 'analytic') {
+      let s = strips.get(c.src);
+      if (!s) { s = new Set(); strips.set(c.src, s); }
+      for (const v of (mv || [])) s.add(v);
+    }
+    if (log) {
+      log.push(`Runde ${round}: ${reason}${c
+        ? ` → Täter: Region ${c.id} (${c.type}, ${c.area.toFixed(1)} mm²)`
+        : ' → kein Täter'}`);
+    }
+    return c;
+  };
 
   // ── b) Topologie
   const topo = buildTopology(mesh, wLabel, { forceVertex });
@@ -357,22 +505,12 @@ function runRound(mesh, seg, state, round, opts, log) {
     const s = wr.area > 0 ? acc / wr.area : 0;
     wr.sense = s;
     if (!(Math.abs(s) >= SENSE_MIN)) {
-      fail([wr], `Orientierung Region ${wr.id} (${wr.type}) = ${s.toFixed(3)} (zu schwach)`,
+      fail('orientation', [wr], `Orientierung Region ${wr.id} (${wr.type}) = ${s.toFixed(3)} (zu schwach)`,
         regionVertices(mesh, wr));
     } else wr.sameSense = s > 0;
   }
 
   // ── e) Ecken: Projektion auf alle anliegenden analytischen Flächen
-  const incident = new Map();                 // Netzecke → Regionen
-  for (let t = 0; t < T; t++) {
-    const id = wLabel[t];
-    for (let k = 0; k < 3; k++) {
-      const mv = tri[3 * t + k];
-      let s = incident.get(mv);
-      if (!s) { s = new Set(); incident.set(mv, s); }
-      s.add(id);
-    }
-  }
   const edgeLen = new Float64Array(nV);      // mittlere Kantenlänge je Netzecke
   const edgeCnt = new Float64Array(nV);
   for (let t = 0; t < T; t++) {
@@ -398,7 +536,14 @@ function runRound(mesh, seg, state, round, opts, log) {
     if (!S.length) { X[vi] = p; continue; }   // nur Facetten → Netzecke bleibt
     const meanEdge = edgeCnt[mv] > 0 ? edgeLen[mv] / edgeCnt[mv] : 0;
     const maxShift = Math.min(0.5, Math.max(0.05, 3 * meanEdge));
-    const r = projectMulti(S, p);
+    let r = projectMulti(S, p);
+    // Testschalter: die Projektion genau EINER Ecke scheitern lassen (wirkt einmal)
+    const forced = !state.testForceVertexUsed && typeof opts.testForceVertexFail === 'function'
+      && !!opts.testForceVertexFail(p);
+    if (forced) {
+      state.testForceVertexUsed = true;
+      r = { x: p, res: 1e-3, iters: r.iters, ok: false };
+    }
     const shift = len(sub(r.x, p));
     if (r.res > worstRes) worstRes = r.res;
     // projectMulti verlangt selbst Rest ≤ 1e-10 mm — das ist für GEFITTETE Flächen
@@ -409,17 +554,19 @@ function runRound(mesh, seg, state, round, opts, log) {
     const projOK = r.ok || (Number.isFinite(r.res) && r.res <= VERT_TOL);
     if (!projOK || shift > maxShift) {
       const cands = [...ids].map((id) => regions[id]).filter((w) => w.kind === 'analytic');
-      fail(cands, `Ecke ${vi} (Netz ${mv} bei ${p.map((x) => x.toFixed(3)).join(',')}): `
+      // Streifen um die Ecke (Ecke + 1-Ring): die kleinste nicht-ebene analytische
+      // Region, die an der Ecke beteiligt ist, wird zur Fassade gestreift
+      const nb = vertexNeighbourhood(adj, [mv], 1);
+      fail('vertex', cands, `Ecke ${vi} (Netz ${mv} bei ${p.map((x) => x.toFixed(3)).join(',')}): `
         + `Projektion res=${r.res.toExponential(2)} mm, `
         + `Verschiebung ${shift.toExponential(2)} mm (Grenze ${maxShift.toFixed(3)}), `
-        + `Flächen ${cands.map((c) => c.type).join('/')}`, [mv]);
+        + `Flächen ${cands.map((c) => c.type).join('/')}`, nb, pickSmallestNonPlane);
       X[vi] = p;
       continue;
     }
     X[vi] = r.x;
   }
-  if (log) log.push(`Runde ${round}: ${regions.length} Regionen, ${nv} Ecken, `
-    + `größter Projektionsrest ${worstRes.toExponential(2)} mm`);
+  if (log) log.push(`Ecken: ${nv}, größter Projektionsrest ${worstRes.toExponential(2)} mm`);
 
   // ── f) Zusammenfallen: Kante mit |X[start] − X[end]| < 1e-6 fällt weg
   const parent = new Int32Array(nv);
@@ -441,7 +588,7 @@ function runRound(mesh, seg, state, round, opts, log) {
     const uses = lp.uses.filter((u) => !collapsed.has(u.chain));
     if (!uses.length) {
       const wr = regions[lp.region];
-      fail(wr && wr.kind === 'analytic' ? [wr] : [],
+      fail('degenerate', wr && wr.kind === 'analytic' ? [wr] : [],
         `Schleife ${lp.region} wurde durch das Zusammenfallen leer`,
         loopMeshVertices(mesh, topo, lp));
     }
@@ -473,9 +620,19 @@ function runRound(mesh, seg, state, round, opts, log) {
     const agree = dot(nrm, [N[3 * t], N[3 * t + 1], N[3 * t + 2]]);
     const eLen = Math.max(len(sub(pb, pa)), len(sub(pc, pb)), len(sub(pa, pc)));
     if (!(nl > 1e-9 * eLen * eLen) || agree < 0.5) {
-      fail(analyticTouching(mesh, wr, wLabel, regions, incident),
+      // Ursache: die Ecken wurden auf analytische Flächen verschoben — schuld sind
+      // die Regionen, die diese Eckbedingungen besitzen (kleinste davon wird gestreift)
+      const owners = analyticAtVertices(mesh, wr, incident, regions);
+      let c = null, mv0 = null;
+      for (const [w, mv] of owners) {
+        if (!c || w.area < c.area) { c = w; mv0 = mv; }
+      }
+      const nb = mv0 !== null
+        ? vertexNeighbourhood(adj, [mv0], 1)
+        : new Set([tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]]);
+      fail('degenerate', [...owners.keys()],
         `Facette ${t}: Ebene entartet oder gegen die Netznormale (${agree.toFixed(3)})`,
-        [tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]], pickSmallestAnalytic);
+        nb, () => c);
       continue;
     }
     facetSurf.set(wr.id, { surf: { type: 'plane', o: pa.slice(), n: nrm }, sameSense: true });
@@ -496,12 +653,14 @@ function runRound(mesh, seg, state, round, opts, log) {
     const A2 = surfOfRegion(ch.L), B2 = surfOfRegion(ch.R);
     const vi0 = topo.vOfMesh[ch.mv[0]], vi1 = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
     if (!A2 || !B2 || vi0 < 0 || vi1 < 0) {
-      fail([regions[ch.L], regions[ch.R]], `Kette ${ch.id}: Fläche oder Ecke fehlt`, new Set(ch.mv));
+      fail('chain:fehlt', [regions[ch.L], regions[ch.R]],
+        `Kette ${ch.id}: Fläche oder Ecke fehlt`, new Set(ch.mv));
       continue;
     }
     const v0 = vIdx(vi0), v1 = vIdx(vi1);
     if (v0 === v1) {
-      fail([regions[ch.L], regions[ch.R]], `Kette ${ch.id}: beide Enden sind dieselbe Ecke`, new Set(ch.mv));
+      fail('chain:identisch', [regions[ch.L], regions[ch.R]],
+        `Kette ${ch.id}: beide Enden sind dieselbe Ecke`, new Set(ch.mv));
       continue;
     }
     // Testschalter: eine Kette einmal scheitern lassen (Streifen-Demotion prüfen)
@@ -510,7 +669,7 @@ function runRound(mesh, seg, state, round, opts, log) {
       : !!(opts.testForceChainFail && isCylSphere(A2, B2));
     if (forced && !state.testForceUsed) {
       state.testForceUsed = true;
-      fail([regions[ch.L], regions[ch.R]],
+      fail('chain:testForce', [regions[ch.L], regions[ch.R]],
         `Kette ${ch.id} (${regions[ch.L].type}/${regions[ch.R].type}): Schnittkurve testForceChainFail`,
         new Set(ch.mv));
       continue;
@@ -519,7 +678,7 @@ function runRound(mesh, seg, state, round, opts, log) {
     const guides = ch.mv.slice(1, -1).map((mv) => ptOf(mesh, mv));
     const res = fitIntersectionCurve(A2, B2, p, q, guides, { tol: FIT_TOL, maxShift: EDGE_MAX_SHIFT });
     if (res.fail) {
-      fail([regions[ch.L], regions[ch.R]],
+      fail(`chain:${res.fail}`, [regions[ch.L], regions[ch.R]],
         `Kette ${ch.id} (${regions[ch.L].type}/${regions[ch.R].type}): Schnittkurve ${res.fail}`,
         new Set(ch.mv));
       continue;
@@ -572,12 +731,17 @@ function runRound(mesh, seg, state, round, opts, log) {
       const cands = wr.kind === 'facet'
         ? analyticTouching(mesh, wr, wLabel, regions, incident)
         : analyticNeighbours(topo, regions, wr, degen.chains);
-      if (!cands.length) {
-        if (log) log.push(`Runde ${round}: entartete Fläche ${wr.id} ohne analytischen Nachbarn → Abbruch`);
+      // Kein analytischer Nachbar direkt? → Umgebung (2 Ringe, sonst 3) suchen;
+      // erst wenn dort auch nichts ist, aufgeben
+      const seed = new Set(chainMeshVertices(mesh, topo, degen.chains));
+      for (const mv of regionVertices(mesh, wr)) seed.add(mv);
+      const c = fail('degenerate', cands, `Fläche ${wr.id} (${kind}): ${degen.why}`,
+        seed, pickSmallestAnalytic);
+      if (!c) {
+        if (log) log.push(`Runde ${round}: entartete Fläche ${wr.id} ohne analytischen Nachbarn `
+          + `im ${NEIGH_RING_MAX}-Ring → Abbruch`);
         return { hard: true };
       }
-      fail(cands, `Fläche ${wr.id} (${kind}): ${degen.why}`,
-        chainMeshVertices(mesh, topo, degen.chains), pickSmallestAnalytic);
       continue;
     }
     // Außenrand: bei Ebenen der größte projizierte Flächeninhalt, bei gekrümmten
@@ -601,6 +765,17 @@ function runRound(mesh, seg, state, round, opts, log) {
   for (const e of edges) {
     const t = e.curve?.type || 'line';
     edgesByType[t] = (edgesByType[t] || 0) + 1;
+  }
+
+  // ── Rundenbilanz: Regionen, Facetten, Fehler je Art
+  if (log) {
+    let nFacet = 0;
+    for (const wr of regions) if (wr.kind === 'facet') nFacet++;
+    const kinds = [...failKinds.entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([k, n]) => `${k} ${n}`).join(', ');
+    log.push(`Runde ${round}: Regionen ${regions.length} · Facetten ${nFacet}`
+      + ` · Fehler ${kinds || 'keine'}`);
   }
 
   if (failures.length) return { failures, strips, hard: false };

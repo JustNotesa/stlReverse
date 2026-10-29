@@ -21,6 +21,11 @@
 // Zylinder- und Kugelfläche bleiben erhalten, es gibt Facetten, und die
 // STEP-Datei bleibt strikt gültig.
 //
+// Zusatzfall "ecken-fehler": die Projektion EINER Ecke wird scheitern gelassen
+// (opts.testForceVertexFail = Prädikat auf der Netzposition). Erwartet: die
+// schuldige analytische Region wird um die Ecke gestreift (wenige Facetten),
+// Zylinder und Torus bleiben erhalten, die STEP-Datei bleibt strikt gültig.
+//
 // Die STEP-Datei wird nach tests/freeform/out/<körper>.step geschrieben.
 // ─────────────────────────────────────────────────────────────────────────────
 import assert from 'node:assert/strict';
@@ -140,6 +145,44 @@ function check(body, groups, dbg) {
   writeFileSync(join('tests/freeform/out', body.file.replace(/\.stl$/, '.step')), res.step);
 }
 
+// ── Ecken-Fehler: die Projektion EINER Ecke scheitern lassen ──────────────────
+// Erwartung: die Ecke bleibt Netzpunkt, die schuldige analytische Region wird
+// um die Ecke herum gestreift (wenige Facetten), der Rest bleibt analytisch —
+// und die STEP-Datei bleibt strikt gültig.
+test('ecken-fehler', () => {
+  const file = 'ff_platte_loch_torus.stl';
+  const buf = readFileSync(join('tests/freeform/stl', file));
+  const groups = pipeline(buf);
+  // B-Rep-Ecke unten rechts: Netzpunkt (15, 10, 0) — dort stoßen drei Ebenen
+  // zusammen (Boden, Seitenfläche x = 15, Seitenfläche y = 10)
+  const passt = (p) => Math.abs(p[0] - 15) < 1e-6 && Math.abs(p[1] - 10) < 1e-6
+    && Math.abs(p[2]) < 1e-6;
+  let getroffen = 0;
+  const res = buildFreeformBrep(groups, {
+    testForceVertexFail: (p) => {
+      if (passt(p)) { getroffen++; return true; }
+      return false;
+    },
+  });
+  assert.ok(res, 'Freiform-Bau lieferte null');
+  const ff = res.report && res.report.freeform;
+  assert.ok(ff && ff.used, 'Freiform-Pfad nicht benutzt');
+  const faces = typesOf(ff.faces, FACE_TYPES);
+  console.log(`     ecken-fehler: Flächen ${JSON.stringify(faces)}`
+    + ` · Runden ${ff.rounds} · demotet ${ff.demoted} · Streifen ${ff.stripTris}`);
+  assert.ok(getroffen >= 1, 'erzwungene Ecke nicht erreicht');
+  assert.ok(faces.facet > 0, `keine Facetten (kein Streifen): ${JSON.stringify(faces)}`);
+  assert.ok(faces.facet < 30, `zu viele Facetten: ${JSON.stringify(faces)}`);
+  assert.ok(ff.stripTris < 30, `zu viele gestreifte Dreiecke: ${ff.stripTris}`);
+  assert.ok(faces.cylinder >= 1, `kein Zylinder mehr: ${JSON.stringify(faces)}`);
+  assert.ok(faces.torus >= 1, `kein Torus mehr: ${JSON.stringify(faces)}`);
+  const { violations } = checkStepStrict(res.step);
+  if (violations.length) {
+    throw new Error(`${violations.length} Verstöße: `
+      + violations.slice(0, 3).map((v) => `${v.kind}: ${v.msg}`).join(' | '));
+  }
+});
+
 // ── Streifen-Demotion: eine Kette Zylinder↔Kugel scheitern lassen ─────────────
 // Erwartung: nur die Dreiecke der schuldigen Region am Kettenverlauf werden
 // Facetten — Zylinder- und Kugelfläche bleiben erhalten, die STEP bleibt gültig.
@@ -165,5 +208,6 @@ test('streifen-demotion', () => {
   }
 });
 
-console.log(failed ? `FAIL ${failed} Fall(e)` : `ok alle ${describeBodies().length} Körper + Streifen-Demotion`);
+console.log(failed ? `FAIL ${failed} Fall(e)`
+  : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler`);
 process.exit(failed ? 1 : 0);
