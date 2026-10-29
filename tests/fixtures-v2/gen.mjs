@@ -326,6 +326,10 @@ function capSeq(spec, end, z0, z1, draftDeg = 0) {
 // spec.bottom/top: { kind, r, N, edges? } — `edges` = Liste der Profilkanten-Indizes, die den
 // Übergang bekommen (Rest scharf; Schicht-z bleibt gemeinsam, nur der Versatz ist 0).
 // col.wallSteps: Wand in so viele Zeilen unterteilen (Default 1 = ein Viereck je Profilkante).
+// col.topRot: { deg, c: [cx, cy] } — dreht NUR den obersten Ring der Säule um die vertikale
+// Achse durch (cx, cy) (CCW von +Z). Die Wand-Dreiecke (lo[i], lo[j], hi[j]) / (lo[i], hi[j],
+// hi[i]) bleiben unverändert → die Wand wird zum Zickzack aus nicht-koplanaren Dreiecken; keine
+// Seitenkante ist eine senkrechte Mantellinie. Nur erlaubt bei scharfen Enden und ohne wallSteps.
 function buildRings(col) {
   const { profile, z0, z1, draftDeg = 0 } = col;
   const n = profile.length;
@@ -346,11 +350,29 @@ function buildRings(col) {
   const layers = [...lo, ...mid, ...hi];
   for (let k = 1; k < layers.length; k++) if (!(layers[k].z > layers[k - 1].z + 1e-9)) throw new Error(`Schichten nicht aufsteigend (${col.name || ''} k=${k})`);
   const s0 = Math.sign(polyArea(profile));
-  return layers.map(({ z, off }) => {
+  const rings = layers.map(({ z, off }) => {
     const ring2 = offsetRing(profile, off);
     if (Math.sign(polyArea(ring2)) !== s0) throw new Error('Versatz kehrt Kontur um (Rundung zu groß)');
     return ring2.map(([x, y]) => [x, y, z]);
   });
+  // topRot: nur den OBERSTEN Ring der Säule drehen (der Rest der Säule bleibt unberührt) — die
+  // Wand-Dreiecke in buildMesh bleiben (lo[i], lo[j], hi[j]) / (lo[i], hi[j], hi[i]) und bilden
+  // dadurch den Zickzack. Deckflächen, die auf diesen Ring verweisen (cap.outer/cap.holes mit
+  // { c, end: 'top' }), nehmen ihn über ringAt automatisch mit.
+  if (col.topRot) {
+    const sharp = (s) => !s || s.kind === 'sharp';
+    if (!sharp(col.bottom) || !sharp(col.top)) throw new Error(`topRot nur bei scharfen Enden erlaubt (${col.name || 'Säule'})`);
+    if ((col.wallSteps || 1) !== 1) throw new Error(`topRot nicht mit wallSteps erlaubt (${col.name || 'Säule'})`);
+    const { deg, c } = col.topRot;
+    if (!Array.isArray(c) || c.length !== 2) throw new Error(`topRot.c muss [cx, cy] sein (${col.name || 'Säule'})`);
+    const [cx, cy] = c, a = deg * PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+    const top = rings[rings.length - 1];
+    for (let i = 0; i < top.length; i++) {
+      const dx = top[i][0] - cx, dy = top[i][1] - cy;
+      top[i] = [cx + dx * ca - dy * sa, cy + dx * sa + dy * ca, top[i][2]];
+    }
+  }
+  return rings;
 }
 
 // ── Ear-Clipping (Polygon CCW, Löcher CW über Brücken eingefügt) ───────────
@@ -1490,6 +1512,31 @@ export const BODIES = [
     // Pfad übernimmt die Wand: 1 Bogen-Fläche (Teil-Zylinder) — im AUS- wie im AN-Lauf (die
     // Bohrungs-Sperre des Bogen-Pfads darf eine an den Rändern gescheiterte Bohrung nicht blockieren).
     expect: { mode: 'skip', arcsOff: 1, arcsOn: 1 },
+  },
+  // ── Öse mit VERDREHTER oberer Lochhälfte (Werkstück-Befund) ────────────────
+  // Wie (z2), aber die obere Lochhälfte (z 5…10) ist um 2° um die Lochachse (10,10) verdreht
+  // (topRot). Die Wand-Dreiecke (lo[i], lo[j], hi[j]) / (lo[i], hi[j], hi[i]) bleiben, werden aber
+  // zu einem ZICKZACK aus nicht-koplanaren Dreiecken: keine Seitenkante ist eine senkrechte
+  // Mantellinie → der Profil-Bogen-Pfad kann aus dieser Wand kein Band bilden. 2° sind weniger als
+  // ein Segment (7.5° je Segment bei 48 Segmenten) → die Wand kollabiert nicht, das Netz bleibt
+  // geschlossen.
+  {
+    id: 'z4', extra: true, file: 'v2_x_oese_verdreht',
+    desc: 'Block 20×20×10 (Kanten scharf) mit senkrechtem Loch R2.75 (48 Seg.) bei (10,10): untere Hälfte (z 0…5) D-Form (Kreis, unten durch die Sehne y = 8 abgeschnitten), obere Hälfte (z 5…10) voller Kreis, Steg bei z = 5 — obere Lochhälfte um 2° verdreht (Wand = Zickzack-Dreiecke, keine Mantellinie)',
+    columns: [
+      { name: 'block', profile: rectProfile(0, 0, 20, 20), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'loch_unten', profile: EYELET.d.slice().reverse(), z0: 0, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'loch_oben', profile: EYELET.ring.slice().reverse(), z0: 5, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'sharp' }, topRot: { deg: 2.0, c: [10, 10] } },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 2, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [{ c: 1, end: 'bottom' }] },
+      // Steg bei z = 5 (zwischen Sehne und Bogen): Material darunter, Loch darüber → Normale nach +Z
+      { up: true, outer: { pts: EYELET.ledge.map(([x, y]) => [x, y, 5]) }, holes: [] },
+    ],
+    // Soll: der Exporter darf an der verdrehten Wand nichts verlieren (wasserdicht, Volumen = Netz).
+    // Die verdrehte Wand bleibt bisher facettiert (0 Bogen-Flächen, 146 Flächen).
+    expect: { mode: 'skip' },
   },
   // ── PINCH: zwei Löcher EINER Deckfläche berühren sich in genau EINER Ecke ────
   // Die Deckfläche z=3 der Platte hat zwei Löcher, die sich im Punkt (12; 18.5) berühren: der
