@@ -404,10 +404,101 @@ export const GLYPHS = {
   mix: { contours: [{ cmds: glyphMix(), hole: false }] },
 };
 
+// ── Feine Konturen (echte Kreisbögen, Sehnenlänge 0,005 mm) ─────────────────
+// Motiv: ein echter STL-Logo-Export hat Ring-Kanten, die VIEL feiner sind als die
+// Mindest-Detailgröße von mesh-clean.js (τ = 0,02 mm). Hier wird das nachgebaut: die Konturen
+// sind aus echten Kreisbögen in Schritten von 0,005 mm Sehnenlänge abgetastet (Tausende Punkte).
+// Die Konturen sind deshalb direkt als Punktlisten (kein Pfad-Befehlssatz) definiert.
+export const FINE_CHORD = 0.012;
+
+// Kreisbogen → Punktliste (Sehnenlänge ≤ FINE_CHORD); beide Endpunkte sind enthalten.
+// `ceil` (nicht `round`): so ist die Sehne garantiert NICHT länger als FINE_CHORD.
+function arcPts(cx, cy, r, a0, a1) {
+  const n = Math.max(1, Math.ceil(Math.abs(a1 - a0) * r / FINE_CHORD));
+  const out = [];
+  for (let k = 0; k <= n; k++) { const a = a0 + (a1 - a0) * k / n; out.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
+  return out;
+}
+
+// Aufeinanderfolgende gleiche Punkte entfernen (1e-9 mm) — die Bogenstöße treffen sich exakt
+const dedupePts = (pts) => {
+  const out = [];
+  for (const p of pts) {
+    const q = out[out.length - 1];
+    if (q && Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-9) continue;
+    out.push(p);
+  }
+  if (out.length > 1) {
+    const a = out[0], b = out[out.length - 1];
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9) out.pop();
+  }
+  return out;
+};
+
+// „C“: Annulus-Sektor 300° (Außen r 1,5 / Innen r 1,0) mit RUNDEN Enden. Die Enden sind
+// Halbkreise um den Mittelradius 1,25 (Radius 0,25) → der Übergang Außenbogen → Ende →
+// Innenbogen ist überall TANGENT: die Kontur hat keine scharfe Ecke.
+function glyphFineC() {
+  const Ro = 1.5, Ri = 1.0, rm = (Ro + Ri) / 2, rc = (Ro - Ri) / 2;
+  const a0 = 30 * DEG, a1 = 330 * DEG;                       // Sektor 30°…330° (Lücke rechts, 60°)
+  const pts = [];
+  pts.push(...arcPts(0, 0, Ro, a0, a1));                     // Außenbogen 30°…330° (CCW)
+  pts.push(...arcPts(rm * Math.cos(a1), rm * Math.sin(a1), rc, a1, a1 + Math.PI));   // rundes Ende bei 330°
+  pts.push(...arcPts(0, 0, Ri, a1, a0));                     // Innenbogen 330°…30° (rückwärts)
+  pts.push(...arcPts(rm * Math.cos(a0), rm * Math.sin(a0), rc, a0 + Math.PI, a0 + 2 * Math.PI));  // rundes Ende bei 30°
+  return dedupePts(pts);
+}
+
+// „D“: senkrechter Stiel (1×6) + Halbkreis-Schale (Außen r 2). Der Zähler ist ein Halbkreis
+// r 1 (flache Seite auf x = 1) — er liegt INNERHALB der Schale und berührt die Außenkontur
+// NICHT (kein Pinch).
+function glyphFineD() {
+  const stemW = 1.0, H = 6.0, cx = stemW, cy = H / 2, Ro = 2.0, Ri = 1.0;
+  const a0 = -90 * DEG, a1 = 90 * DEG;
+  const outer = [[0, 0], [stemW, 0], [cx, cy - Ro]];
+  outer.push(...arcPts(cx, cy, Ro, a0, a1));                 // Schale −90°…90°
+  outer.push([stemW, H], [0, H]);
+  const counter = arcPts(cx, cy, Ri, a0, a1);                // Zähler: Halbkreis r 1
+  return { outer: dedupePts(outer), counter: dedupePts(counter) };
+}
+
+const FINE_D = glyphFineD();
+
+// Feine Glyphen (Konturen als Punktlisten; `cmds: null` → keine Bézier-Kurvenläufe)
+export const FINE_GLYPHS = {
+  C: { contours: [{ pts: glyphFineC(), hole: false }] },
+  Dfein: { contours: [{ pts: FINE_D.outer, hole: false }, { pts: FINE_D.counter, hole: true }] },
+};
+
+// Ecken einer geschlossenen Polylinie: Winkel zwischen den beiden Kanten an jedem Punkt
+// (echte Knicke > sharpDeg). Für die feinen Konturen (Punktlisten statt Pfad) nötig.
+export function polyCorners(pts, sharpDeg = 40) {
+  const n = pts.length;
+  if (n < 3) return 0;
+  let corners = 0;
+  for (let i = 0; i < n; i++) {
+    const p = pts[(i - 1 + n) % n], v = pts[i], q = pts[(i + 1) % n];
+    const a = [v[0] - p[0], v[1] - p[1]], b = [q[0] - v[0], q[1] - v[1]];
+    const la = Math.hypot(a[0], a[1]), lb = Math.hypot(b[0], b[1]);
+    if (la < 1e-12 || lb < 1e-12) continue;
+    const ang = Math.abs(Math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1])) * 180 / Math.PI;
+    if (ang > sharpDeg) corners++;
+  }
+  return corners;
+}
+
 // ── Glyphe vorbereiten ───────────────────────────────────────────────────────
 // Pfade verschieben, abflachen, orientieren: Außenkontur CCW (Material links),
-// Zähler/Löcher CW.
+// Zähler/Löcher CW. Die FEINEN Glyphen liegen schon als Punktliste vor (echte Kreisbögen) —
+// sie werden nur verschoben und orientiert.
 export function prepareGlyph(key, dx = 0, dy = 0) {
+  const fine = FINE_GLYPHS[key];
+  if (fine) {
+    return fine.contours.map((c) => {
+      const pts = c.pts.map(([x, y]) => [x + dx, y + dy]);
+      return { pts: ensureOrientation(pts, !c.hole), hole: c.hole, cmds: null };
+    });
+  }
   const spec = GLYPHS[key];
   if (!spec) throw new Error('unbekannte Glyphe ' + key);
   return spec.contours.map((c) => {
@@ -430,9 +521,8 @@ function glyphStats(glyphs) {
   for (const g of glyphs) {
     for (const c of prepareGlyph(g.key, g.dx, g.dy)) {
       area += polyArea(c.pts);                       // Vorzeichen: Außen +, Zähler −
-      const pc = pathCorners(c.cmds);
-      corners += pc.corners;
-      runs += curveRuns(c.cmds);
+      if (c.cmds) { const pc = pathCorners(c.cmds); corners += pc.corners; runs += curveRuns(c.cmds); }
+      else corners += polyCorners(c.pts);            // feine Konturen: Ecken aus der Polylinie
       contours++;
       points += c.pts.length;
     }
@@ -495,8 +585,8 @@ function engravedBody(w, d, h, glyphs, depth) {
 //   glatten Loop in 3 Flächen) + 1 je offenem Kurvenlauf zwischen zwei Ecken.
 // expect.maxFaces: obere Schranke der Flächenzahl —
 //   die am Exporter gemessene Flächenzahl (AN = AUS) + 2 Reserve.
-function makeEntry({ name, desc, glyphs, w, d, h = 3, engraved = false, depth = 1, transform = null, expect }) {
-  const height = engraved ? depth : 1;
+function makeEntry({ name, desc, glyphs, w, d, h = 3, engraved = false, depth = 1, height: heightArg = null, transform = null, capSelfTest = true, expect }) {
+  const height = engraved ? depth : (heightArg ?? 1);
   const body = engraved ? engravedBody(w, d, h, glyphs, depth) : raisedBody(w, d, h, glyphs, height);
   if (transform) body.transform = transform;
   const st = glyphStats(glyphs);
@@ -504,14 +594,18 @@ function makeEntry({ name, desc, glyphs, w, d, h = 3, engraved = false, depth = 
   const man = checkManifold(tris);
   // Generator-Selbsttest: die Deckflächen mit Löchern (Plattenoberseite mit Glyphenöffnung,
   // Zählerböden, Rillenboden) müssen über Brücken + Ear-Clipping triangulierbar sein.
+  // `capSelfTest: false` überspringt das: bei sehr feinen Konturen ist es redundant (buildMesh
+  // trianguliert dieselben Deckflächen und würde sonst werfen) und würde die Laufzeit verdreifachen.
   const ringOf = (ref) => {
     const prof = body.columns[ref.c].profile;
     return ref.rev ? prof.slice().reverse() : prof.slice();
   };
   let capTris = 0;
-  for (const cap of body.caps) {
-    if (!cap.outer || cap.outer.pts || !(cap.holes || []).length) continue;
-    capTris += triangulateWithHoles(ringOf(cap.outer), (cap.holes || []).map(ringOf)).length;
+  if (capSelfTest) {
+    for (const cap of body.caps) {
+      if (!cap.outer || cap.outer.pts || !(cap.holes || []).length) continue;
+      capTris += triangulateWithHoles(ringOf(cap.outer), (cap.holes || []).map(ringOf)).length;
+    }
   }
   // Welt-Bounding-Box (bei gedrehten Körpern über makeTransform)
   const T = body.transform ? makeTransform(body.transform) : null;
@@ -521,6 +615,7 @@ function makeEntry({ name, desc, glyphs, w, d, h = 3, engraved = false, depth = 
   });
   return {
     name, desc, glyphs, body, expect,
+    mesh: tris,                                   // das bereits gebaute Netz (buildGravurMesh nutzt es)
     info: {
       meshVolume: meshVolume(tris),                // mm³ (Divergenzsatz)
       manifold: man.ok,                            // Netz wasserdicht orientiert?
@@ -593,11 +688,34 @@ export const GRAVUR_BODIES = [
     //   Flächen (AN = AUS) + 2 Reserve.
     expect: { minExtFaces: 2, maxFaces: 13 },
   }),
+  // ── FEIN: Konturen aus echten Kreisbögen in 0,005-mm-Sehnen (echter STL-Logo-Export) ──
+  // Die Ring-Kanten der Konturen (0,005 mm) liegen weit UNTER der Mindest-Detailgröße von
+  // mesh-clean.js (τ = 0,02 mm) — der härteste Fall für die Netz-Bereinigung.
+  // „C“: Annulus-Sektor 300° (Außen r 1,5 / Innen r 1,0), runde Enden (Halbkreise r 0,25 um
+  // den Mittelradius 1,25) → Übergänge überall tangential, KEINE scharfe Ecke.
+  // „D“: senkrechter Stiel (1×6) + Halbkreis-Schale (Außen r 2), Zähler = Halbkreis r 1.
+  // Die Wände sind Viereck-Streifen (oben exakt über unten) — der Generator baut sie so.
+  makeEntry({
+    name: 'gravur_fein',
+    desc: 'Platte 40×20×3, erhabene Schrift 0,5 mm hoch aus FEIN abgetasteten Kreisbögen (Sehnenlänge 0,005 mm — weit unter der Mindest-Detailgröße 0,02 mm von mesh-clean.js): „C“ (Annulus-Sektor 300°, r 1,5/1,0, runde Enden) und „D“ (Stiel + Halbkreis-Schale, Zähler r 1)',
+    glyphs: [{ key: 'C', dx: 8, dy: 5 }, { key: 'Dfein', dx: 15, dy: 4 }],
+    w: 40, d: 20, height: 0.5,
+    // Die Deckflächen werden von buildMesh ohnehin trianguliert (ein Fehler wirft dort) —
+    // der zusätzliche Selbsttest würde dieselbe Brücken-Triangulierung ein zweites Mal
+    // ausführen (bei ~5000 Konturpunkten spürbar langsam).
+    capSelfTest: false,
+    // Die Konturen sind echte Kreisbögen → der Exporter liefert Zylinder-Flächen, KEINE
+    // SURFACE_OF_LINEAR_EXTRUSION (kein B-Spline). minExtFaces 0; maxFaces großzügig — der
+    // Körper ist ein NETZ-Prüfling (feine Abtastung), keine STEP-Form-Vorlage.
+    expect: { minExtFaces: 0, maxFaces: 20000 },
+  }),
 ];
 
 // Netz eines Körpers (buildMesh-Format → Dreiecke [[a,b,c], …])
+// Das Netz wird beim Anlegen des Eintrags schon gebaut (makeEntry) — hier wird es nur
+// wiederverwendet (bei den feinen Konturen wäre das ein zweiter, sehr teurer Aufbau).
 export function buildGravurMesh(entry) {
-  return buildMesh(entry.body);
+  return entry.mesh || buildMesh(entry.body);
 }
 
 // STLs schreiben (die Tests benutzen das nicht)

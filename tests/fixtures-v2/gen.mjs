@@ -56,6 +56,25 @@ export const roundedRectProfile = (w, h, Rc, seg) => {
   }
   return pts;
 };
+// Rechteck w×h ab (x0, y0) mit TANGENTER Eckrundung an EINER Ecke: der Bogen (Radius r) liegt
+// tangential an beiden angrenzenden Kanten (Mittelpunkt um r nach innen versetzt) — die Kanten
+// knickEN dort also nicht, sie laufen stetig in den Bogen über. `corner` = 'tr' (oben rechts).
+// `degStep` = Winkelschritt des Bogens in Grad (1° → 90 Segmente je 90°-Bogen). CCW.
+// Achtung: der Bogen wird als Sehnen-POLYGON geführt (kein echter Bogen) — die Sehnenlänge ist
+// 2·r·sin(degStep/2) (bei r = 1 und 1° = 0,01745 mm, UNTER der Mindest-Detailgröße 0,02 mm von
+// mesh-clean.js).
+export const tangentFilletRectProfile = (x0, y0, w, h, r, corner = 'tr', degStep = 1) => {
+  if (corner !== 'tr') throw new Error(`tangentFilletRectProfile: Ecke ${corner} nicht vorgesehen`);
+  const x1 = x0 + w, y1 = y0 + h, seg = Math.round(90 / degStep);
+  const cx = x1 - r, cy = y1 - r;                          // Bogenmittelpunkt
+  const pts = [[x0, y0], [x1, y0]];                        // Unterkante + rechte Kante bis zum Tangentenpunkt
+  for (let k = 0; k <= seg; k++) {                         // Bogen 0° … 90° (Tangentenpunkte (x1;y1−r) und (x1−r;y1))
+    const a = (k / seg) * PI / 2;
+    pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+  }
+  pts.push([x0, y1]);                                      // Oberkante zurück
+  return pts;
+};
 // L-Profil (Schenkel a×t und t×b) mit einspringender (konkaver) senkrechter Ecke, CCW
 export const lProfile = (a, b, t) => [[0, 0], [a, 0], [a, t], [t, t], [t, b], [0, b]];
 // Rechteck w×h, Unter- und Oberkante als flacher Kreisbogen (Stich f nach außen, seg Segmente); die
@@ -1595,6 +1614,35 @@ export const BODIES = [
     // Loch-Loops der beiden Deckflächen — genau das blockierte vorher die Achse).
     holes: [{ col: 1, R: 2, seg: 32, kind: 'through' }],
     expect: { mode: 'skip', arcsOff: 1, arcsOn: 1, maxFaces: 9, bores: 1 },
+  },
+  // ── HAKEN-SPITZE: tangentiale Eckrundung (R1) + 45°-Fase 0,5 mm an Ober- UND Unterkante ──
+  // Prisma Z 0…16, Querschnitt = Rechteck 20×6, dessen Ecke (20;6) TANGENT verrundet ist: der
+  // Bogen R1 hat den Mittelpunkt (19;5) und liegt damit tangential an der rechten Kante (x = 20)
+  // und an der Oberkante (y = 6) — die Kanten knicken dort NICHT, sie laufen stetig in den Bogen
+  // über. Die anderen drei Ecken bleiben scharf. Der Bogen ist in 1°-Schritten abgetastet (90
+  // Segmente, Sehnenlänge 2·1·sin(0,5°) = 0,01745 mm) — das liegt UNTER der Mindest-Detailgröße
+  // von mesh-clean.js (τ = 0,02 mm). An Ober- UND Unterkante sitzt ringsum eine 45°-Fase 0,5 mm
+  // ({kind:'chamfer', r:0.5}) → die Verrundung trägt oben und unten je ein Kegel-Band.
+  //
+  // Warum dieser Körper (Werkstück-Befund „Haken-Spitze“): BEVOR der Spalten-Kollaps in
+  // mesh-clean.js griff, dezimierte cleanMesh die oberen und unteren Ringe UNABHÄNGIG voneinander
+  // → an den TANGENTENPUNKTEN des Bogens (dort, wo Wand und Fase ohne Knick ineinanderlaufen)
+  // entstanden Fächer-Dreiecke statt Vierecke → Splitter-Flächen (Sliver). Die Wände selbst sind
+  // Viereck-Streifen (der Generator baut sie so); der Kollaps in mesh-clean.js räumt die Spalten
+  // jetzt Spalten-für-Spalte ab. Der Körper hält beide Fälle fest: das Netz ist geschlossen und
+  // manifold, und die Fase-Bänder müssen im Export als Fläche erhalten bleiben (Bögen AN/AUS).
+  //
+  // Messung: AUS ohne Spalten-Kollaps 27 Flächen (Splitter am Tangentenpunkt), mit Spalten-Kollaps
+  // 20 (= ungereinigtes Netz) mit 3 Bogen-Flächen (1 Zylinder + 2 Kegel) → maxFaces 20, arcsOff 3.
+  // AN: die Profil-Rundung wird geschärft (fillets=1, 14 Flächen); diese Schärfung MIT Fasen bildet
+  // variantsFor (check.mjs) nicht ab → `anFree` (AN-Geometrie frei, Pflichten wie wasserdicht gelten).
+  {
+    id: 'z5', extra: true, file: 'v2_x_haken_fase_fein',
+    desc: 'Prisma Z 0…16, Rechteck 20×6 mit TANGENTER Eckrundung R1 an (20;6) (Mittelpunkt (19;5), 90 Segmente zu 1° = Sehne 0,01745 mm — unter der Mindest-Detailgröße 0,02 mm von mesh-clean.js), die drei anderen Ecken scharf; 45°-Fase 0,5 mm an Ober- UND Unterkante ringsum',
+    columns: [
+      { name: 'haken', profile: tangentFilletRectProfile(0, 0, 20, 6, 1, 'tr', 1), z0: 0, z1: 16, bottom: { kind: 'chamfer', r: 0.5 }, top: { kind: 'chamfer', r: 0.5 } },
+    ],
+    expect: { mode: 'skip', anFree: true, arcsOff: 3, maxFaces: 20 },
   },
 ];
 
