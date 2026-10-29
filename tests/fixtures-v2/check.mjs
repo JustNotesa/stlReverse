@@ -763,6 +763,14 @@ async function checkBody(body, occt) {
     const n = on.arcCyl + on.arcCones;
     if (n !== body.expect.arcsOn) out.problems.push(`AN: ${n} Bogen-Flächen, Soll ${body.expect.arcsOn} (fallbackStage ${on.fallbackStage})`);
   }
+  // Höchstzahl der Flächen (AUS/AN): zerfällt eine Fläche in Einzel-Dreiecke (Pinch-Rückfall:
+  // berührende Ränder können von occt nicht trianguliert werden), entstehen Hunderte Flächen —
+  // das ist ein Fehler, kein Zufall (s. expect.maxFaces im Körper).
+  if (body.expect.maxFaces !== undefined) {
+    for (const [tag, r] of [['AUS', off], ['AN', on]]) {
+      if (r && r.exported && r.faces > body.expect.maxFaces) out.problems.push(`${tag}: ${r.faces} Flächen, Soll ≤ ${body.expect.maxFaces}`);
+    }
+  }
   // Fallback verwirft v2: allein schärft v2 wasserdicht, in der vollen Pipeline ist alles facettiert.
   // Bei Körpern mit Biegungen darf das nicht gemeldet werden: der isolierte Lauf kennt keine
   // Primitive (keine Biegungs-Erkennung) und schärft die Biegung deshalb — der AN-Lauf lässt sie
