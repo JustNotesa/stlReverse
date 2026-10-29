@@ -250,6 +250,93 @@ test('schliff', () => {
   }
 });
 
+// ── Schliff-Fächer: drei benachbarte Facetten-Schliffe, die sich Kanten
+// teilen ────────────────────────────────────────────────────────────────────
+// Am Äquator der Halbkugel wird ein Streifen zu Facetten (die Kette
+// Zylinder↔Kugel scheitern lassen). Je Ring liegen dort zwei Dreiecke:
+//   Tri1(k,j) = (R_k[j], R_k[j+1], R_{k+1}[j+1])   Tri2(k,j) = (R_k[j], R_{k+1}[j+1], R_{k+1}[j])
+// Sie teilen sich die Diagonale (R_k[j], R_{k+1}[j+1]); Tri2(k,j) und
+// Tri1(k+1,j) teilen sich den Ringrand (R_{k+1}[j], R_{k+1}[j+1]). Werden in
+// den drei Dreiecken je zwei Ecken zusammengelegt, entstehen drei Schliffe,
+// die sich zwei Kanten teilen. Erwartet: ALLE Schliffe werden erkannt und
+// entfernt (im Protokoll KEIN 'Schleife aus 2 Geraden') und die STEP-Datei
+// bleibt strikt gültig.
+test('schliff-faecher', () => {
+  const file = 'ff_halbkugel_zylinder.stl';
+  const buf = readFileSync(join('tests/freeform/stl', file));
+  const groups = pipeline(buf);
+  const RAD = 5, Z1 = 10, SEG = 48, RINGS = 12;
+  const ring = (k, j) => {
+    const phi = (k / (RINGS + 1)) * (Math.PI / 2);
+    const th = (j / SEG) * 2 * Math.PI;
+    return [RAD * Math.cos(phi) * Math.cos(th), RAD * Math.cos(phi) * Math.sin(th),
+      Z1 + RAD * Math.sin(phi)];
+  };
+  const near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < 5e-2;
+  // Zieldreiecke: der Streifen liegt am Äquator (Ring 0), das Segment wird
+  // gesucht. Je Dreieck Tri1(0,j) = (R0[j], R0[j+1], R1[j+1]) werden die
+  // beiden Äquatorecken R0[j] und R0[j+1] zusammengelegt — beide liegen auf
+  // Zylinder UND Kugel, die Ecke bleibt also auf beiden Flächen. Die
+  // zusammenfallende Kante ist die Zylinder↔Kugel-Kante; das Dreieck läuft
+  // danach doppelt über dieselbe Strecke und ist ein Schliff.
+  const ziele = [];
+  for (let j = 0; j < SEG; j++) {
+    const j1 = (j + 1) % SEG;
+    ziele.push({ j, p: [ring(0, j), ring(0, j1), ring(1, j1)], m: [0, 1] });
+  }
+  const dbg = { log: [] };
+  let gemergt = 0;
+  let treffer = 0;
+  const segmente = [];
+  const res = buildFreeformBrep(groups, {
+    testForceChainFail: true,                   // Streifen am Äquator → Facetten
+    testMergeFacetVertices: (p0, p1, p2) => {
+      if (gemergt >= 3) return false;            // drei Zusammenlegungen genügen
+      const ps = [p0, p1, p2];
+      for (const z of ziele) {
+        const idx = z.p.map((q) => ps.findIndex((p) => near(p, q)));
+        if (idx.some((i) => i < 0)) continue;
+        treffer++;
+        if (treffer % 2 === 0) continue;          // jedes zweite Dreieck stehen lassen
+        // Kante zwischen den beiden Zielecken (Index im Dreieck)
+        const a = idx[z.m[0]], b = idx[z.m[1]];
+        const k = ((a + 1) % 3 === b) ? a : b;
+        gemergt++;
+        segmente.push(z.j);
+        return k;
+      }
+      return false;
+    },
+    debug: dbg,
+  });
+  const schliffe = dbg.log.filter((s) => s.includes('ist ein Schliff'));
+  const zweier = dbg.log.filter((s) => s.includes('Schleife aus 2 Geraden'));
+  const runden = dbg.log.filter((x) => x.startsWith('Runde'));
+  console.log(`     schliff-faecher: Schliffe ${schliffe.length} · Zusammenlegungen ${gemergt}`
+    + ` · Ergebnis ${res ? 'ok' : 'null'}`);
+  for (const s of schliffe) console.log('       ' + s);
+  if (!res || schliffe.length < 3) {
+    for (const s of runden.slice(-10)) console.log('       ' + s);
+  }
+  assert.ok(res, `Freiform-Bau lieferte null\n     ${runden.slice(-6).join('\n     ')}`);
+  assert.equal(gemergt, 3, `nur ${gemergt} Ecken zusammengelegt`);
+  assert.ok(schliffe.length >= 3, `nur ${schliffe.length} Schliffe erkannt`);
+  // Jede 'Schleife aus 2 Geraden' muss von einer GESCHEITERTEN KETTE derselben
+  // Runde herrühren (die Kante fehlt dann in der Schleife) — nicht von einem
+  // übersehenen Schliff.
+  for (const z of zweier) {
+    const rd = (z.match(/^Runde (\d+)/) || [])[1];
+    assert.ok(runden.some((r) => r.startsWith(`Runde ${rd}:`) && r.includes('Kette')),
+      `Schleife aus 2 Geraden ohne gescheiterte Kante: ${z}`);
+  }
+  const { violations } = checkStepStrict(res.step);
+  if (violations.length) {
+    throw new Error(`${violations.length} Verstöße: `
+      + violations.slice(0, 3).map((v) => `${v.kind}: ${v.msg}`).join(' | '));
+  }
+});
+
 console.log(failed ? `FAIL ${failed} Fall(e)`
-  : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler + Schliff`);
+  : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler`
+    + ' + Schliff + Schliff-Fächer');
 process.exit(failed ? 1 : 0);
