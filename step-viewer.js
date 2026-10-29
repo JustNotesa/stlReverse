@@ -1,5 +1,5 @@
 import * as THREE from './libs/three.module.js';
-import { createThreeJsViewer, disposeThreeJsViewer, registerSyncViewer, setViewSync, syncViewsFrom } from './viewers.js?v=29';
+import { createThreeJsViewer, disposeThreeJsViewer, registerSyncViewer, setViewSync, syncViewsFrom } from './viewers.js?v=31';
 
 const extensionApi = typeof browser !== 'undefined' ? browser
   : typeof chrome !== 'undefined' ? chrome : null;

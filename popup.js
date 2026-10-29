@@ -1,10 +1,10 @@
 import { formatBytesDe, describeDetailLevel } from './utils.js?v=2';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=45';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=46';
 
-import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=29';
-import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=20';
-import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=3';
-import { initTabs, initViewToggle, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=1';
+import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=31';
+import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=21';
+import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=4';
+import { initTabs, initViewToggle, initFullscreen, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=3';
 import { applyFeatureColorVars, buildFeatureLegend } from './feature-colors.js?v=1';
 import {
   setStatus, setExportEnabled,
@@ -793,6 +793,7 @@ applyFeatureColorVars();
 buildFeatureLegend(document.getElementById('feature-legend'));
 initTabs();
 initViewToggle();
+initFullscreen();
 initFormatsMenu();
 initDocumentDrop({ onFile: (file) => handleFile(file) });
 syncSharpenBends();
