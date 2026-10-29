@@ -2,7 +2,7 @@
 // SURFACE_OF_LINEAR_EXTRUSION über einer B-Spline-Kurve.
 // Synthetisches Extrusionsband VON HAND gebaut (kein extrusion-bands.js nötig).
 import {
-  EXT_PLAN_DEFAULTS, buildExtPlans, expandCurveLoop, extGeomSamples,
+  EXT_PLAN_DEFAULTS, buildExtPlans, expandCurveLoop, extGeomSamples, guardCorner,
 } from '../extrusion-plans.js';
 import { edgeCanonKey } from '../profile-arcs.js';
 import { evalSpline, nearestParam, splineSamples } from '../spline-fit.js';
@@ -133,6 +133,79 @@ function makeCase(opt = {}) {
 }
 
 const run = (C) => buildExtPlans(C.fds, C.det, written, { vtxKey });
+
+// ── Band MIT Ecke (Deckfläche ist ein echtes Polygon) ───────────────────────
+/**
+ * Band, dessen Deckfläche ein Polygon [X, A, …Kurve…, Y] ist: der Bandkurve
+ * folgen an ihren beiden Enden je ein Nachbarpunkt der Deckfläche (X an A, Y an
+ * B) — das sind die „Nachbarkanten“, gegen die der Ecken-Wächter prüft.
+ *
+ * Die Kurve ist ein Kreisbogen (Radius 20 mm), der in A = (0,0) in +x startet
+ * und 30° nach links dreht; die Bandhöhe ist 1 mm (z = 3 → z = 4).
+ *
+ * opt.nbrA — Nachbarpunkt X an der Ecke A (Default: [0, -10], weit weg vom
+ *             Band, also unkritisch).  Setzt man X dicht an den Strahl der
+ *             Kurve (scharfer Winkel), kreuzt die Kurve die Nachbarkante.
+ */
+function makeCornerCase(opt = {}) {
+  const R = 20, aMax = (30 * Math.PI) / 180, nPts = 21;
+  const P2 = [];
+  for (let k = 0; k < nPts; k++) {
+    const phi = (aMax * k) / (nPts - 1);
+    P2.push([r9(R * Math.sin(phi)), r9(R * (1 - Math.cos(phi)))]);
+  }
+  const P = P2.map(([x, y]) => [x, y, 3]);                      // untere Kante
+  const H = P.slice().reverse().map((p) => [p[0], p[1], 4]);   // obere Kante (rückwärts)
+  const n = P.length - 1;
+
+  // Nachbarpunkte der Deckfläche: X an A, Y an B (senkrecht zur Endtangente)
+  const B = P[n];
+  const X = opt.nbrA || [0, -10];
+  const Y = [r9(B[0] - 5), r9(B[1] + 8.660254037844386)];
+
+  // Wandfacetten (wie makeCase)
+  const facets = [];
+  for (let k = 0; k < n; k++) {
+    const a = P[k], b = P[k + 1];
+    const aHi = [a[0], a[1], 4], bHi = [b[0], b[1], 4];
+    const quad = [a, b, bHi, aHi];
+    const nrm = norm3(cross3(sub3(b, a), sub3(bHi, b)));
+    facets.push({ outer: quad, inner: [], normal: nrm, centroid: centroid3(quad) });
+  }
+
+  // Deckflächen: Polygon [X, …Kurve…, Y] (oben dasselbe um z = 4 verschoben)
+  const loOuter = [[X[0], X[1], 3], ...P, [Y[0], Y[1], 3]];
+  const hiOuter = [[X[0], X[1], 4], ...P.map((p) => [p[0], p[1], 4]), [Y[0], Y[1], 4]];
+  const loCap = { outer: loOuter, inner: [], normal: [0, 0, 1], centroid: centroid3(loOuter) };
+  const hiCap = { outer: hiOuter, inner: [], normal: [0, 0, 1], centroid: centroid3(hiOuter) };
+
+  const fds = facets.concat([loCap, hiCap]);
+  const loCapFi = facets.length, hiCapFi = facets.length + 1;
+
+  const loKey = arcKeyOf(P), hiKey = arcKeyOf(H);
+  const band = {
+    id: 'e0', kind: 'ext', d: [0, 0, 1],
+    frame: { d: [0, 0, 1], e1: [1, 0, 0], e2: [0, 1, 0] },
+    facets: facets.map((_, i) => i),
+    segs: [
+      { type: 'arc', level: 'lo', pts: P, arcKey: loKey, adjType: 'cap', cap: { fi: loCapFi, li: 0 } },
+      { type: 'line', pts: [P[n], H[0]] },
+      { type: 'arc', level: 'hi', pts: H, arcKey: hiKey, adjType: 'cap', cap: { fi: hiCapFi, li: 0 } },
+      { type: 'line', pts: [H[H.length - 1], P[0]] },
+    ],
+    levels: { lo: { t: 3 }, hi: { t: 4 } },
+    sense: 1, sig: 'e0-sig', nSegs: n,
+  };
+  const det = {
+    bands: [band],
+    arcs: new Map([
+      [loKey, { key: loKey, pts: P, owners: [{ band: 'e0' }], kind: 'spline' }],
+      [hiKey, { key: hiKey, pts: H, owners: [{ band: 'e0' }], kind: 'spline' }],
+    ]),
+    capEdits: [],
+  };
+  return { fds, det, band, P, H, X, Y, facets, loKey, hiKey };
+}
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 describe('extrusion-plans.js', () => {
@@ -328,6 +401,91 @@ describe('extrusion-plans.js', () => {
       const { plans, failed } = run(C);
       expect(plans.length).toBe(0);
       expect(failed.has('e0')).toBe(true);
+    });
+  });
+
+  // ── Ecken-Wächter (guardCorner) ───────────────────────────────────────────
+  //
+  // ARGUMENTE (alles 2D in der Deckebene, projiziert):
+  //   corner2  [x, y]      Eckpunkt der Deckfläche (Start der Bandkurve)
+  //   c2       [x, y]      Endsehne: Vektor vom Eckpunkt in die Bandkurve
+  //   e2       [x, y]      Nachbarkante: Vektor vom Eckpunkt zum Nachbarpunkt
+  //                         der Deckfläche (die „Nachbarkante“ als STRAHL)
+  //   t2       [x, y]      Endtangente der Spline, zeigt IN die Kurve
+  //   samples2 [[x, y], …] Abtastpunkte der Kurve OHNE die beiden Endpunkte,
+  //                         absolut im Deckebenen-System
+  //
+  // Die Prüfungen im Code:
+  //   (b) cross2(e2, t2) · cross2(e2, c2) < 0 UND t2·e2 > 0 → 'Endtangente kreuzt …'
+  //   (c) je Abtastpunkt s: d = s − corner2; nur wenn |d| ≤ |e2| UND d·e2 > 0:
+  //         |cross2(e2, d)| / |e2| ≤ 1e-6 mm → 'Kurve berührt …'
+  //         cross2(e2, d) · cross2(e2, c2) < 0    → 'Kurve kreuzt …'
+  describe('guardCorner — Ecken-Wächter direkt', () => {
+    // Ecke in (0,0), Nachbarkante nach +x (e2 = [10,0]), Kurve nach +y (c2 = [0,10])
+    const CORNER = [0, 0];
+    const CHORD = [0, 10];
+    const EDGE = [10, 0];
+
+    test('(1) Kurve innen an der Nachbarkante, weit von ihr → null', () => {
+      const r = guardCorner(CORNER, CHORD, EDGE, [0, 1], [[2, 5], [3, 8], [4, 6]]);
+      expect(r).toBeNull();
+    });
+
+    test('(2) Endtangente kreuzt die Nachbarkante → Meldung', () => {
+      const r = guardCorner(CORNER, CHORD, EDGE, [1, -1], []);
+      expect(typeof r).toBe('string');
+      expect(r).toMatch(/Endtangente kreuzt/);
+    });
+
+    test('(3) Kurve berührt die Nachbarkante (< 1e-6 mm) → Meldung', () => {
+      const r = guardCorner(CORNER, CHORD, EDGE, [0, 1], [[5, 1e-9]]);
+      expect(typeof r).toBe('string');
+      expect(r).toMatch(/ber(?:ü|ue)hrt/);
+    });
+
+    test('(4) Kurve kreuzt die Nachbarkante → Meldung', () => {
+      const r = guardCorner(CORNER, CHORD, EDGE, [0, 1], [[5, -2]]);
+      expect(typeof r).toBe('string');
+      expect(r).toMatch(/kreuzt die Nachbarkante/);
+    });
+
+    test('(5) Abtastpunkt weit von der Ecke (> |e2|) → ignoriert', () => {
+      const r = guardCorner(CORNER, CHORD, EDGE, [0, 1], [[20, -2]]);
+      expect(r).toBeNull();
+    });
+
+    test('(6) Abtastpunkt hinter der Ecke (d·e2 ≤ 0) → ignoriert', () => {
+      const r = guardCorner(CORNER, CHORD, EDGE, [0, 1], [[-5, -2]]);
+      expect(r).toBeNull();
+    });
+  });
+
+  describe('Ecken-Wächter — Integration über buildExtPlans', () => {
+    // Nachbarpunkt X an der Ecke A = (0,0), 10 mm weit auf dem Strahl 5°
+    // (gegen die Startrichtung der Kurve) → sehr spitzer Winkel
+    const sharp = [
+      r9(10 * Math.cos((5 * Math.PI) / 180)),
+      r9(10 * Math.sin((5 * Math.PI) / 180)),
+    ];
+    // derselbe Punkt, aber 90° zur Startrichtung der Kurve → weiter Winkel
+    const wide = [0, 10];
+
+    test('scharfer Winkel: Spline kreuzt die Nachbarkante → Band scheitert', () => {
+      const C = makeCornerCase({ nbrA: sharp });
+      const { plans, failed, reasons } = run(C);
+      expect(failed.has('e0')).toBe(true);
+      expect(plans.length).toBe(0);
+      expect(reasons.get('e0')).toMatch(/Ecke unten vorn/);
+      expect(reasons.get('e0')).toMatch(/Kurve kreuzt die Nachbarkante/);
+    });
+
+    test('weiter Winkel: dasselbe Band kommt durch', () => {
+      const C = makeCornerCase({ nbrA: wide });
+      const { plans, failed, reasons } = run(C);
+      expect(failed.size).toBe(0);
+      expect(reasons.size).toBe(0);
+      expect(plans.length).toBe(1);
+      expect(plans[0].id).toBe('e0');
     });
   });
 });
