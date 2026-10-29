@@ -3,7 +3,7 @@ import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolume
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=29';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=20';
-import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=1';
+import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=2';
 import { initTabs, initViewToggle, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=1';
 import { applyFeatureColorVars, buildFeatureLegend } from './feature-colors.js?v=1';
 import {
@@ -11,7 +11,7 @@ import {
   setProgress, progressStep, startIndeterminateProgress, stopIndeterminateProgress,
   initProgressSteps, resetProgressSteps, setProgressStepStatus, setLiveDetail,
   handleWorkerProgress, getActiveStep, getStepByKey, setProgressStepCurrent
-} from './ui.js?v=2';
+} from './ui.js?v=3';
 import {
   updateStats, resetStats, renderOutlines, clearOutlines
 } from './tables.js';
