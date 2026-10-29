@@ -699,6 +699,25 @@ const blindPlate = (holes, W = 40, D = 30, H = 10, extra = {}) => {
 // Ösen-Loch (Körper z2): Kreis R2.75 bei (10,10), untere Hälfte D (Sehne y = 8)
 const EYELET = eyeletHole(10, 10, 2.75, 48, 8);
 
+// Scharnier-Knöchel (Körper z3): Querschnitt = Blatt (Streifen nach rechts) + Knöchel (270°-Bogen
+// R3.5 um (10;10)). Der Bogen läuft CCW von 0° (13,5;10) über 90° und 180° bis 270° (10;6,5) —
+// 72 Segmente zu je 3,75°, alle Bogenpunkte EXAKT auf dem Kreis. Das Blatt schließt den Bogen ab:
+// (30;6,5) → (30;10) → (13,5;10) → Bogen → (10;6,5) → (30;6,5). CCW (Material links).
+//
+// Segmente: 72 statt 36. Grund: der Prüfer vergleicht das Volumen des AN-Exports mit der
+// Soll-Variante „Loch→Zylinder“ (Toleranz 0.02 + 2·0.001·Mantelfläche = 0.52 mm³). Der Bogen
+// WEICHT das Volumen um die Sehnen-Pfeilhöhe ab: 36 Segmente → 1.65 mm³ (zu viel, der Export
+// wäre „falsche Geometrie“), 72 Segmente → 0.41 mm³ (passt). Die Profilgeometrie ist dieselbe.
+const KNUCKEL = (() => {
+  const cx = 10, cy = 10, R = 3.5, seg = 72;          // 270° in 72 Schritten (je 3,75°)
+  const pts = [[30, 6.5], [30, 10]];
+  for (let k = 0; k <= seg; k++) {
+    const a = (k / seg) * 1.5 * PI;                    // 0° … 270°
+    pts.push([cx + R * Math.cos(a), cy + R * Math.sin(a)]);
+  }
+  return pts;
+})();
+
 export const BODIES = [
   {
     id: 'a', file: 'v2_a_rechteck_r1.5',
@@ -1497,6 +1516,37 @@ export const BODIES = [
       { up: true, outer: { c: 2, end: 'bottom', rev: true }, holes: [] },              // Taschenboden (z=2)
     ],
     expect: { mode: 'skip', arcsOff: 2, arcsOn: 2, maxFaces: 20 },
+  },
+  // ── SCHARNIER-KNÖCHEL: Teil-Zylinder (270°-Bogen) um ein koaxiales Durchgangsloch ────
+  // Prisma (Z 0…20, Kanten scharf): Querschnitt = Scharnierblatt (Streifen nach rechts) +
+  // Knöchel (270°-Bogen R3.5 um (10;10), 72 Segmente zu 3,75° — alle Bogenpunkte exakt auf dem
+  // Kreis), Durchgangsloch R2 (32 Seg.) um DIESELBE Achse (10;10) → koaxial.
+  // Der Bohrungs-Pfad macht aus dem Loch eine Bohrung (Zylinder) und setzt `circleRim` auf die
+  // Loch-Loops der beiden Deckflächen (z = 0 und z = 20). Genau diese beiden Deckflächen sind die
+  // Flächen ⟂ zur Knöchel-Achse: `axisCandidates` (profile-arcs.js) hat sie früher wegen des
+  // circleRim-Loops ÜBERSPRUNGEN (jede Fläche mit circleRim-Loop) — damit gab es gar keine
+  // Achsen-Kandidaten und der Knöchel blieb facettiert. Jetzt zählen nur die Punkte der Loops OHNE
+  // circleRim → die Deckfläche (74 Randpunkte im Außen-Loop) liefert die Achse, und der
+  // 270°-Knöchel wird zum Teil-Zylinder. Die Bogen-Validierung prüft nur den Loop, IN DEM der
+  // Bogen liegt (hier der Außen-Loop) — der circleRim-Loop der Bohrung stört sie nicht.
+  {
+    id: 'z3', extra: true, file: 'v2_x_scharnier_knoechel',
+    desc: 'Prisma Z 0…20 (Kanten scharf), Querschnitt = Scharnierblatt (30;6,5)…(30;10) + Knöchel (270°-Bogen R3.5 um (10;10), 72 Seg. zu 3,75°) + koaxiales Durchgangsloch R2 (32 Seg.) um (10;10)',
+    columns: [
+      { name: 'koerper', profile: KNUCKEL, z0: 0, z1: 20, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'loch', profile: circleProfile(10, 10, 2, 32, true), z0: 0, z1: 20, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [{ c: 1, end: 'bottom' }] },
+    ],
+    // `holes`: nur die Prüf-Seite (check.mjs) — das Durchgangsloch als „Sackloch-Liste“ (wie s7):
+    // daraus baut der Prüfer die Soll-Variante „Loch→Zylinder R2“ (die Bohrung ist eine analytische
+    // Fläche, die planare Variante „Rundung bleibt“ kann sie nicht abdecken). `expect.bores: 1`
+    // hält fest: das Loch MUSS über den Bohrungs-Pfad laufen (er setzt `circleRim` auf die
+    // Loch-Loops der beiden Deckflächen — genau das blockierte vorher die Achse).
+    holes: [{ col: 1, R: 2, seg: 32, kind: 'through' }],
+    expect: { mode: 'skip', arcsOff: 1, arcsOn: 1, maxFaces: 9, bores: 1 },
   },
 ];
 
