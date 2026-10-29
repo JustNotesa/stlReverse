@@ -579,6 +579,41 @@ function pushPoint(pts, p) {
   pts.push(p);
 }
 
+// Querschnitt-Ebene durch x0 quer zur lokalen Polylinien-Richtung t.
+// Dritte Bedingung der Projektion: sie zwingt den Stützpunkt auf den
+// Schnittpunkt DIESER Querschnitt-Ebene (und damit auf den Bogen neben x0) —
+// bei geschlossenen Schnittkurven (Linse: Facetten-Ebene ∩ Verrundung) würde
+// die freie Minimalnorm-Projektion sonst auf den Nachbarbogen springen.
+function crossSectionPlane(x0, t) {
+  return { type: 'plane', o: [x0[0], x0[1], x0[2]], n: [t[0], t[1], t[2]] };
+}
+
+// lokale Richtung der Polylinie an der Bogenlänge s (Segment, das s enthält)
+function polyTangentAt(poly, cum, s) {
+  const last = poly.length - 1;
+  let i = 1;
+  while (i < last && cum[i] < s) i++;
+  const d = sub(poly[i], poly[i - 1]);
+  if (len(d) > 1e-12) return norm(d);
+  const dq = sub(poly[last], poly[0]); // entartetes Segment → Richtung p→q
+  return len(dq) > 1e-12 ? norm(dq) : [0, 0, 0];
+}
+
+// Projektion auf A∩B mit der Querschnitt-Ebene durch x0 (Rückfall: ohne sie).
+// seed = bereits projizierter Punkt (Zweigwahl: der Schnittpunkt, der dem
+// Vorgänger am nächsten liegt → der Bogen bleibt monoton).
+function projectOnSection(A, B, x0, t, seed) {
+  const hasT = (t[0] !== 0 || t[1] !== 0 || t[2] !== 0);
+  const S = hasT ? [A, B, crossSectionPlane(x0, t)] : [A, B];
+  if (seed) {
+    const r = projectMulti(S, seed);
+    if (r.ok) return r;
+  }
+  const r2 = projectMulti(S, x0);
+  if (r2.ok || !hasT) return r2;
+  return projectMulti([A, B], x0);
+}
+
 // Punkt auf der Polylinie bei Bogenlänge s (stückweise linear)
 function polyPointAt(poly, cum, s) {
   const last = poly.length - 1;
@@ -614,11 +649,26 @@ function curveResidual(A, B, c) {
 // Q = [p, ...guides, q] marschiert: an n+1 äquidistanten Längen wird der
 // Polylinienpunkt auf beide Flächen projiziert (liegt exakt auf der Schnittkurve).
 // Das Gitter wird bei Verdopplung wiederverwendet (n → 2n enthält n).
+//
+// Dritte Bedingung: die Querschnitt-Ebene durch den Polylinienpunkt, quer zur
+// lokalen Polylinien-Richtung. Ohne sie fällt die freie Minimalnorm-Projektion
+// bei geschlossenen Schnittkurven (Linse: Facetten-Ebene ∩ Verrundung) auf den
+// Nachbarbogen → Faltung. Die Querschnitt-Ebene legt den Schnittpunkt neben dem
+// Stützpunkt fest; Startwert ist der Vorgänger, damit der Bogenzweig bleibt.
 export function fitIntersectionCurve(A, B, p, q, guides, opts = {}) {
   const tol = opts.tol !== undefined ? opts.tol : 5e-7;
   const maxPts = opts.maxPts !== undefined ? opts.maxPts : 129;
   const gs = guides && guides.length ? guides : null;
-  const mid = gs ? gs[gs.length >> 1] : projectMulti([A, B], mul(add(p, q), 0.5)).x;
+  // Mitte der Schnittkurve (Bogen-Seiten-Wahl bei Kreisen): Schnittpunkt in der
+  // Querschnitt-Ebene durch die Sehnenmitte — nicht die freie Minimalnorm-
+  // Projektion (die bei geschlossenen Schnittkurven auf den Nachbarbogen fällt)
+  let mid;
+  if (gs) {
+    mid = gs[gs.length >> 1];
+  } else {
+    const x0 = mul(add(p, q), 0.5);
+    mid = projectOnSection(A, B, x0, norm(sub(q, p))).x;
+  }
   const an = analyticCurve(A, B, p, q, mid);
   if (an) return { curve: an, pts: [p, q] };
   // beide Ebenen → Gerade (analytisch abgedeckt, hier nur als Absicherung)
@@ -645,18 +695,26 @@ export function fitIntersectionCurve(A, B, p, q, guides, opts = {}) {
   for (let lvl = 0; lvl <= last; lvl++) {
     const n = NS[lvl];
     const pts = [p];
+    let prev = p;                             // letzter projizierter Stützpunkt
     for (let i = 1; i < n; i++) {
       const key = i / n;                      // exakt: n sind Zweierpotenzen
       let x = proj.get(key);
       if (!x) {
-        const x0 = polyPointAt(poly, cum, (i * Ls) / n);
-        const r = projectMulti([A, B], x0);
+        const s = (i * Ls) / n;
+        const x0 = polyPointAt(poly, cum, s);
+        // dritte Bedingung: Querschnitt-Ebene durch x0 quer zur lokalen
+        // Polylinien-Richtung → der Stützpunkt ist der Schnittpunkt dieser
+        // Ebene neben x0 (monoton, kein Sprung auf den Nachbarbogen);
+        // Startwert prev → der Zweig des Vorgängers wird beibehalten
+        const t = polyTangentAt(poly, cum, s);
+        const r = projectOnSection(A, B, x0, t, prev);
         if (!r.ok) return { fail: 'projectMulti', detail: r.res };
         const shift = len(sub(r.x, x0));
         if (shift > maxShift) return { fail: 'shift', detail: shift };
         x = r.x;
         proj.set(key, x);
       }
+      prev = x;
       pushPoint(pts, x);
     }
     pushPoint(pts, q);
