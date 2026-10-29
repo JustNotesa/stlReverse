@@ -6,6 +6,7 @@
 //   • Tabs im Expertenbereich (Klick, Pfeiltasten, Pos1/Ende)
 //   • Umschalter „Vergleich | Nur STEP“ (#compare-panel[data-view])
 //   • Datei-Drop über das ganze Dokument (statt Handler am #drop-zone)
+//   • Vollbild für den Vergleichsbereich (#compare-panel)
 //
 // Alle DOM-Zugriffe sind null-geprüft: fehlen Elemente (älterer Markupstand),
 // bleibt die Funktion wirkungslos, statt einen Fehler zu werfen.
@@ -14,6 +15,7 @@
 
 let dragDepth   = 0;      // Zähler für dragenter/dragleave — verhindert Flackern über Kindelemente
 let dropCleanup = null;   // Entferner für eine eventuell bereits aktive Drop-Logik
+let fsWired     = false;  // Vollbild-Logik bereits verdrahtet (idempotent)
 
 // ── Tabs ────────────────────────────────────────────────────────────────────
 
@@ -226,5 +228,94 @@ export function nextPaint() {
       ? (fn) => requestAnimationFrame(fn)
       : (fn) => setTimeout(fn, 0);
     raf(() => raf(() => resolve()));
+  });
+}
+
+// ── Vollbild der Vergleichsansicht ─────────────────────────────────────────
+//
+// Zwei Wege zum selben Ziel:
+//   1. Native Vollbildansicht der Engine (panel.requestFullscreen), wenn sie
+//      erlaubt ist — die CSS-Regeln greifen über :fullscreen.
+//   2. Rückfallebene: die Klasse .is-fullscreen legt das Panel als Overlay
+//      über die ganze Seite (position: fixed), Escape schließt es.
+// Beide Wege teilen sich denselben Zustandsanzeiger am Knopf.
+
+const FS_TEXT_ON  = '✕ Vollbild beenden';
+const FS_TEXT_OFF = '⛶ Vollbild';
+const FS_LABEL_ON  = 'Vollbild beenden';
+const FS_LABEL_OFF = 'Vollbild: Vorher/Nachher-Ansicht auf den ganzen Bildschirm';
+
+/**
+ * Vollbild-Schalter im Vergleichsbereich verdrahten. Mehrfaches Aufrufen ist
+ * unschädlich (idempotent). Fehlen die Elemente, bleibt die Funktion
+ * wirkungslos.
+ * @returns {void}
+ */
+export function initFullscreen() {
+  if (fsWired) return;
+
+  const panel = document.getElementById('compare-panel');
+  const btn = document.getElementById('fullscreen-toggle');
+  if (!panel || !btn) return;      // älterer Markupstand: still bleiben
+  fsWired = true;
+
+  const setState = (on) => {
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.textContent = on ? FS_TEXT_ON : FS_TEXT_OFF;
+    btn.setAttribute('aria-label', on ? FS_LABEL_ON : FS_LABEL_OFF);
+  };
+
+  // Sicherheitsnetz: der ResizeObserver passt die Viewer an, das resize hält
+  // zusätzlich abhängige Größen (Beschriftungen, Kacheln) in sync.
+  const notifyResize = () => window.dispatchEvent(new Event('resize'));
+
+  // Overlay-Rückfallebene: Klasse am Panel, Scrollsperre am Körper.
+  const setOverlay = (on) => {
+    panel.classList.toggle('is-fullscreen', on);
+    document.body?.classList.toggle('fs-open', on);
+    setState(on);
+    notifyResize();
+  };
+
+  const overlayOpen = () => panel.classList.contains('is-fullscreen');
+
+  const canNative = !!document.fullscreenEnabled && typeof panel.requestFullscreen === 'function';
+
+  if (canNative) {
+    // Nach jedem Wechsel (Knopf, Escape der Engine, Tabwechsel) den Zustand
+    // am Knopf nachziehen.
+    document.addEventListener('fullscreenchange', () => {
+      setState(document.fullscreenElement === panel);
+      notifyResize();
+    });
+  }
+
+  btn.addEventListener('click', () => {
+    if (!canNative) {
+      setOverlay(!overlayOpen());
+      return;
+    }
+    if (document.fullscreenElement === panel) {
+      try { Promise.resolve(document.exitFullscreen?.()).catch(() => {}); } catch (_) { /* egal */ }
+      return;
+    }
+    if (document.fullscreenElement) return;   // ein anderes Element ist bereits im Vollbild
+    try {
+      const p = panel.requestFullscreen();
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => {
+          if (err && err.name === 'AbortError') return;   // Nutzer hat abgebrochen
+          setOverlay(true);                               // Engine verweigert → Overlay
+        });
+      }
+    } catch (_) {
+      setOverlay(true);
+    }
+  });
+
+  // Escape schließt das Overlay — nur solange es offen ist.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !overlayOpen()) return;
+    setOverlay(false);
   });
 }
