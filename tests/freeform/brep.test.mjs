@@ -4,13 +4,23 @@
 //
 // Je Körper: STL → echte Worker-Pipeline (cleanMesh → buildNormalGroups →
 // unifyCoplanarGroups → recognizePrimitives → detectTubes) → buildVolumeStepBrepV2
-// mit fitSegmentation:true. Streng geprüft wird nur die GÜLTIGKEIT:
+// mit fitSegmentation:true. Streng geprüft wird die GÜLTIGKEIT:
 //   • report.freeform.used === true
 //   • checkStepStrict(res.step).violations leer (strikte CAD-Importer)
-// Die Flächenzahl je Typ wird gegen die Soll-Zahl aus describeBodies() GEDRUCKT:
-// Abweichung → 'MISMATCH' (kein Fehlschlag) — die Segmentierung der gedrehten
-// Körper und das tangentiale Snappen werden gerade parallel fertiggestellt, die
-// Soll-Flächenzahl ist erst danach verbindlich.
+// Für die beiden NICHT gedrehten Körper gilt zusätzlich die Soll-Flächenart
+// (STRICT) — dort wird genau geprüft:
+//   Platte mit Loch + Torus : {plane:6, cylinder:1, torus:1}, facet 0
+//   Halbkugel + Zylinder     : {plane:1, cylinder:1, sphere:1}, facet 0
+// Für die gedrehten Körper wird die Soll-Zahl nur GEMELDET (MISMATCH, kein
+// Fehlschlag) — die Segmentierung der gedrehten Körper wird gerade parallel
+// fertiggestellt, die Soll-Flächenzahl ist erst danach verbindlich.
+//
+// Zusatzfall "streifen-demotion": der Freiform-Bau wird direkt aufgerufen und
+// eine Kette zwischen Zylinder und Kugel einmal scheitern gelassen
+// (opts.testForceChainFail). Erwartet: nur ein STREIFEN wird demotiert —
+// Zylinder- und Kugelfläche bleiben erhalten, es gibt Facetten, und die
+// STEP-Datei bleibt strikt gültig.
+//
 // Die STEP-Datei wird nach tests/freeform/out/<körper>.step geschrieben.
 // ─────────────────────────────────────────────────────────────────────────────
 import assert from 'node:assert/strict';
@@ -61,6 +71,12 @@ const typesOf = (f, keys) => {
   return o;
 };
 
+// Soll-Flächenarten der beiden geraden Körper (strikt)
+const STRICT = {
+  'ff_platte_loch_torus.stl': { plane: 6, cylinder: 1, cone: 0, sphere: 0, torus: 1, facet: 0 },
+  'ff_halbkugel_zylinder.stl': { plane: 1, cylinder: 1, cone: 0, sphere: 1, torus: 0, facet: 0 },
+};
+
 // ── Fälle: je Körper ein Fall ────────────────────────────────────────────────
 for (const body of describeBodies()) {
   test(body.file, () => {
@@ -78,8 +94,8 @@ for (const body of describeBodies()) {
 
 // Debug-Protokoll knapp: Segmentierung + die Runden-Fehler
 function showLog(dbg) {
-  const head = dbg.log.slice(0, 3).map((s) => `Debug: ${s.slice(0, 300)}`).join('\n     ');
-  const rounds = dbg.log.filter((s) => s.startsWith('Runde')).slice(0, 8);
+  const head = dbg.log.slice(0, 2).map((s) => `Debug: ${s.slice(0, 300)}`).join('\n     ');
+  const rounds = dbg.log.filter((s) => s.startsWith('Runde')).slice(-12);
   return [head, ...rounds].join('\n     ');
 }
 
@@ -94,16 +110,20 @@ function check(body, groups, dbg) {
   const faces = typesOf(ff.faces, FACE_TYPES);
   const edges = typesOf(ff.edges, EDGE_TYPES);
   console.log(`     ${body.file}: Flächen ${JSON.stringify(faces)} · Kanten ${JSON.stringify(edges)}`
-    + ` · Runden ${ff.rounds} · demotet ${ff.demoted} · ${ff.ms} ms`);
+    + ` · Runden ${ff.rounds} · demotet ${ff.demoted} · Streifen ${ff.stripTris} · ${ff.ms} ms`);
 
-  // Flächenzahl je Typ wie Soll — Abweichung melden, aber nicht fehlschlagen
-  const want = typesOf(body.faces, FACE_TYPES);
-  const diff = FACE_TYPES.filter((k) => (faces[k] || 0) !== (want[k] || 0));
-  if (diff.length) {
-    console.log(`     MISMATCH ${body.file}: Flächen ${diff.map((k) => `${k} ${faces[k] || 0} statt ${want[k] || 0}`).join(', ')}`
-      + ` (erwartet ${JSON.stringify(want)})`);
-    buildFreeformBrep(groups, { debug: dbg });
-    console.log(`     ${showLog(dbg)}`);
+  // Flächenzahl je Typ: bei den geraden Körpern strikt, sonst nur melden
+  const want = STRICT[body.file];
+  if (want) {
+    assert.deepEqual(faces, want,
+      `Flächenarten weichen ab: ${JSON.stringify(faces)} statt ${JSON.stringify(want)}`);
+  } else {
+    const w = typesOf(body.faces, FACE_TYPES);
+    const diff = FACE_TYPES.filter((k) => (faces[k] || 0) !== (w[k] || 0));
+    if (diff.length) {
+      console.log(`     MISMATCH ${body.file}: Flächen ${diff.map((k) => `${k} ${faces[k] || 0} statt ${w[k] || 0}`).join(', ')}`
+        + ` (erwartet ${JSON.stringify(w)})`);
+    }
   }
 
   // strikte CAD-Importer
@@ -120,5 +140,30 @@ function check(body, groups, dbg) {
   writeFileSync(join('tests/freeform/out', body.file.replace(/\.stl$/, '.step')), res.step);
 }
 
-console.log(failed ? `FAIL ${failed} Fall(e)` : `ok alle ${describeBodies().length} Körper`);
+// ── Streifen-Demotion: eine Kette Zylinder↔Kugel scheitern lassen ─────────────
+// Erwartung: nur die Dreiecke der schuldigen Region am Kettenverlauf werden
+// Facetten — Zylinder- und Kugelfläche bleiben erhalten, die STEP bleibt gültig.
+test('streifen-demotion', () => {
+  const file = 'ff_halbkugel_zylinder.stl';
+  const buf = readFileSync(join('tests/freeform/stl', file));
+  const groups = pipeline(buf);
+  const res = buildFreeformBrep(groups, { testForceChainFail: true });
+  assert.ok(res, 'Freiform-Bau lieferte null');
+  const ff = res.report && res.report.freeform;
+  assert.ok(ff && ff.used, 'Freiform-Pfad nicht benutzt');
+  const faces = typesOf(ff.faces, FACE_TYPES);
+  console.log(`     streifen-demotion: Flächen ${JSON.stringify(faces)}`
+    + ` · Runden ${ff.rounds} · demotet ${ff.demoted} · Streifen ${ff.stripTris}`);
+  assert.ok(faces.cylinder >= 1, `kein Zylinder mehr: ${JSON.stringify(faces)}`);
+  assert.ok(faces.sphere >= 1, `keine Kugel mehr: ${JSON.stringify(faces)}`);
+  assert.ok(faces.facet > 0, `keine Facetten (kein Streifen): ${JSON.stringify(faces)}`);
+  assert.ok(ff.stripTris > 0, 'kein Streifen gezählt');
+  const { violations } = checkStepStrict(res.step);
+  if (violations.length) {
+    throw new Error(`${violations.length} Verstöße: `
+      + violations.slice(0, 3).map((v) => `${v.kind}: ${v.msg}`).join(' | '));
+  }
+});
+
+console.log(failed ? `FAIL ${failed} Fall(e)` : `ok alle ${describeBodies().length} Körper + Streifen-Demotion`);
 process.exit(failed ? 1 : 0);
