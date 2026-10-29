@@ -14,7 +14,13 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=4';
 // Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
-import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=3';
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=4';
+// Gravur (extrusion-bands.js): Schriftzüge (Wand-Streifen) → B-Spline-Kurven
+import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=1';
+// Gravur (extrusion-plans.js): Pläne der Extrusionsbänder (SURFACE_OF_LINEAR_EXTRUSION) + Rand-Aufweitung
+import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=1';
+// [freiform1] Einhängepunkt: Freiform-Pfad (fit-basierte Segmentierung → eigenes B-Rep → STEP)
+import { chooseFreeform } from './freeform-brep.js?v=1';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
@@ -392,6 +398,13 @@ export function findBendGroups(normalGroups) {
 // ============================================================================
 
 export function buildVolumeStepBrepV2(analysis) {
+  // [freiform1] Einhängepunkt: Freiform-Pfad versuchen (Schalter analysis.fitSegmentation:
+  // 'auto' | true | false). Der bisherige Weg läuft als Rückfall ( __ffLegacy ).
+  // Vorerst nur auf Wunsch (Standard aus): an echten Teilen wie dem Skoda-Haken scheitert der Versuch noch
+  // und kostet nur Zeit (+8 s); Etappe 2 macht ihn dort nützlich.
+  if (analysis && !analysis.__ffLegacy && (analysis.fitSegmentation === true || analysis.fitSegmentation === 'auto')) {
+    return chooseFreeform(analysis, buildVolumeStepBrepV2({ ...analysis, __ffLegacy: true }));
+  }
   // V2-Exporter: Nutzt echte Boundary-Loops aus normalGroups (wie Panel 3).
   // Jede normalGroup wird zu einer oder mehreren ADVANCED_FACE mit echten Polygon-Grenzen.
   const normalGroups = analysis?.normalGroups;
@@ -414,6 +427,9 @@ export function buildVolumeStepBrepV2(analysis) {
   const bendGroups = bendInfo.groups;
   // Profil-Bögen (profile-arcs.js): Schalter + Sperrliste
   const ARCS = analysis?.profileArcs !== false;   // Profil-Bögen (profile-arcs.js)
+  // Gravur (extrusion-bands.js): Extrusionsbänder (Schriftzüge als Wand-Streifen) → B-Spline-Kurven.
+  // Der Schalter ist der A/B-Messpunkt der Gravur-Arbeit (analyse.extrusionBands = false).
+  const EXT = ARCS && analysis?.extrusionBands !== false;   // Gravur (extrusion-bands.js): Extrusionsbänder
   const arcBlocked = new Set();                     // Band-Signaturen, die facettiert bleiben (Rückfall)
   let arcStats = { tried: 0, retries: 0, dropped: 0 };
   // Normalgruppen, deren Wände die Primitive-Pfade (Mantel/Bohrung) beanspruchen: diese Wände
@@ -599,6 +615,15 @@ export function buildVolumeStepBrepV2(analysis) {
   const addCircle = (placId, radius) => {
     const cid = id++;
     entities.push(`#${cid}=CIRCLE('',#${placId},${toStep(radius)});`);
+    return cid;
+  };
+  // Gravur (extrusion-bands.js): B-Spline-Kurve (Kontrollpunkte + Knoten) — OFFEN (closed_curve = .F.),
+  // wie der geschlossene B-Spline in getOrCreateCircleEdge, nur ohne Kremschluss.
+  const addBSplineCurve = (sp) => {
+    if (!sp || !sp.ctrl || !sp.ctrl.length) return null;
+    const cps = sp.ctrl.map((p) => addPoint(p));
+    const cid = id++;
+    entities.push(`#${cid}=B_SPLINE_CURVE_WITH_KNOTS('',${sp.degree},(${cps.map((c) => `#${c}`).join(',')}),.UNSPECIFIED.,.F.,.F.,(${sp.mults.join(',')}),(${sp.knots.map(toStep).join(',')}),.UNSPECIFIED.);`);
     return cid;
   };
   const addCylindricalSurface = (placId, radius) => {
@@ -5065,8 +5090,11 @@ export function buildVolumeStepBrepV2(analysis) {
     if (!arcRegistry.has(g.key)) {
       const tag = edgeScope ? edgeScope.get(`a:${g.key}`) || '' : '';
       const vA = getVertex(g.A, tag), vB = getVertex(g.B, tag);
-      const circleId = addCircle(addAxis2Placement3D(g.center, g.axis, g.refDir), g.radius);
-      arcRegistry.set(g.key, { ecId: addEdgeCurve(vA.vtxId, vB.vtxId, circleId), startKey: ptKey(g.A) });
+      // Gravur (extrusion-bands.js): Spline-Geometrie → B_SPLINE_CURVE_WITH_KNOTS statt CIRCLE
+      const curveId = (g.kind === 'spline')
+        ? addBSplineCurve(g.sp)
+        : addCircle(addAxis2Placement3D(g.center, g.axis, g.refDir), g.radius);
+      arcRegistry.set(g.key, { ecId: addEdgeCurve(vA.vtxId, vB.vtxId, curveId), startKey: ptKey(g.A) });
     }
     return arcRegistry.get(g.key);
   };
@@ -5761,8 +5789,19 @@ export function buildVolumeStepBrepV2(analysis) {
     // in Facetten-Umlaufrichtung (Fläche links), same_sense aus den Facetten-Normalen
     for (const pl of (arcsArg ? arcsArg.plans : [])) {
       const s = pl.surf;
-      const plac = addAxis2Placement3D(s.loc, s.axis, s.refDir);
-      const surf = s.kind === 'cyl' ? addCylindricalSurface(plac, s.radius) : addConicalSurface(plac, s.radius, s.semiAngle);
+      let surf;
+      // Gravur (extrusion-bands.js): Extrusionsband → SURFACE_OF_LINEAR_EXTRUSION über der B-Spline
+      // (kein Achsen-Placement: die Kurve IST das Profil, der Vektor die Extrusionsrichtung).
+      if (s.kind === 'ext') {
+        const curveId = addBSplineCurve(s.sp);
+        if (!curveId) throw new Error('Gravur: B-Spline-Kurve fehlt');
+        const vecId = addVector(addDirection(s.dir), s.len);
+        surf = id++;
+        entities.push(`#${surf}=SURFACE_OF_LINEAR_EXTRUSION('',#${curveId},#${vecId});`);
+      } else {
+        const plac = addAxis2Placement3D(s.loc, s.axis, s.refDir);
+        surf = s.kind === 'cyl' ? addCylindricalSurface(plac, s.radius) : addConicalSurface(plac, s.radius, s.semiAngle);
+      }
       const oe = [];
       for (const seg of pl.segs) {
         if (seg.type === 'arc') {
@@ -5837,11 +5876,16 @@ export function buildVolumeStepBrepV2(analysis) {
         snappedVertices: snapRes.moved, snapKept: snapRes.kept,
         snapMaxMove: Math.round(snapRes.maxMove * 1e9) / 1e9,
         // Profil-Bögen (profile-arcs.js): Bänder → echte Zylinder-/Kegel-Flächen (statt Facetten)
+        // Gravur (extrusion-bands.js): die Bogen-Kennzahlen zählen NUR die echten Bogen-Pläne
+        // (kind !== 'ext'); die Extrusionsbänder stehen in extBands/extFacetsReplaced.
         arcCylinders: arcsArg ? arcsArg.plans.filter((p) => p.kind === 'cyl').length : 0,
         arcCones: arcsArg ? arcsArg.plans.filter((p) => p.kind === 'cone').length : 0,
-        arcFacetsReplaced: arcsArg ? arcsArg.plans.reduce((n, p) => n + ((p.band && p.band.facets) || []).length, 0) : 0,
-        arcMaxSagitta: arcsArg ? Math.max(0, ...arcsArg.plans.map((p) => p.sag || 0)) : 0,
-        arcVolumeDelta: arcsArg ? Math.round(arcsArg.plans.reduce((n, p) => n + (p.dV || 0), 0) * 1e6) / 1e6 : 0,
+        arcFacetsReplaced: arcsArg ? arcsArg.plans.filter((p) => p.kind !== 'ext').reduce((n, p) => n + ((p.band && p.band.facets) || []).length, 0) : 0,
+        arcMaxSagitta: arcsArg ? Math.max(0, ...arcsArg.plans.filter((p) => p.kind !== 'ext').map((p) => p.sag || 0)) : 0,
+        arcVolumeDelta: arcsArg ? Math.round(arcsArg.plans.filter((p) => p.kind !== 'ext').reduce((n, p) => n + (p.dV || 0), 0) * 1e6) / 1e6 : 0,
+        // Gravur (extrusion-bands.js): Extrusionsbänder → echte Extrusions-Flächen (statt Facetten)
+        extBands: arcsArg ? arcsArg.plans.filter((p) => p.kind === 'ext').length : 0,
+        extFacetsReplaced: arcsArg ? arcsArg.plans.filter((p) => p.kind === 'ext').reduce((n, p) => n + ((p.band && p.band.facets) || []).length, 0) : 0,
       },
     };
   };
@@ -5907,7 +5951,8 @@ export function buildVolumeStepBrepV2(analysis) {
           if ((li === 0) !== (s > 0)) P = P.slice().reverse();
         } else if (fd.arcEdges && arcGeoms) {
           // Profil-Bögen (profile-arcs.js): Bogen-Kanten auf ihre exakten Bogen-Punkte aufweiten
-          P = expandArcLoop(L, fd.arcEdges, arcGeoms, vtxKey);
+          // Gravur (extrusion-bands.js): expandCurveLoop verarbeitet Kreis- UND Spline-Geometrien
+          P = expandCurveLoop(L, fd.arcEdges, arcGeoms, vtxKey);
         }
         for (let i = 0; i < P.length; i++) {
           const a = P[i], b = P[(i + 1) % P.length];
@@ -6689,26 +6734,62 @@ export function buildVolumeStepBrepV2(analysis) {
   const convertArcs = (fds) => {
     if (!ARCS) return { fds, arcs: null };
     arcStats.tried++;
-    const runArcs = (list) => {
+    // Gravur (extrusion-bands.js): die Extrusionsbänder werden ZUERST gesucht und allein
+    // validiert; ihre Facetten werden für die Bogen-Suche maskiert (null-Einträge — die Indizes
+    // bleiben, profile-arcs.js überspringt sie). Beide Arten werden danach gemeinsam validiert
+    // und gemeinsam angewandt (gleiche Datenmaschine, nur andere Geometrie-Entities).
+    const bo = { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() };
+    const findAll = (fds, useExt) => {
+      // Gravur (extrusion-bands.js): das Bogen-Ergebnis VOR der Extrusions-Suche berechnen —
+      // es entscheidet, welche Stücke beim Bogen-Pfad bleiben (statt der geometrischen Schätzung
+      // der Kreis-Abdeckung: die sagte „profile-arcs deckt es“, profile-arcs baute aber nichts).
+      const arc0 = useExt ? validateArcBands(fds, findArcBands(fds, bo), { vtxKey }) : null;
+      const ext = useExt
+        ? validateArcBands(fds, findExtBands(fds, { ...bo, arcDet: arc0 }), { vtxKey })
+        : null;
+      const claimed = new Set();
+      if (ext) for (const b of ext.bands) for (const fi of b.facets) claimed.add(fi);
+      // Gravur (extrusion-bands.js): hat die Extrusions-Suche nichts beansprucht, gilt das
+      // bereits berechnete Bogen-Ergebnis (kein zweiter Suchlauf nötig).
+      if (useExt && ext && claimed.size === 0 && arc0) return arc0;
+      const masked = claimed.size ? fds.map((fd, i) => (claimed.has(i) ? null : fd)) : fds;
+      const arc = findArcBands(masked, bo);
+      return validateArcBands(fds, mergeDets(arc, ext, vtxKey), { vtxKey });
+    };
+    const run = (fds, useExt) => {
       try {
-        // Wände, die die Primitive-Pfade (Mantel/Bohrung) beanspruchen, dürfen NICHT in Bänder
-        // geteilt werden: deren Gates (Delle, Verdrehung, dünner Steg, Rand an der Plattenkante,
-        // Konkavität) sind strenger als die des Bogen-Pfads — eine Teilung würde sie umgehen.
-        const fb0 = findArcBands(list, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() });
-        let det = validateArcBands(list, fb0, { vtxKey });
+        let det = findAll(fds, useExt);
         for (let it = 0; it < 4 && det.bands.length; it++) {
-          const ap = applyArcBands(list, det, { vtxKey });
+          const ap = applyArcBands(fds, det, { vtxKey });
           const snap = snapToPlanes(ap.fds).snap;
           const written = (p) => { const q = snap.get(vtxKey(p)) || p; return q.map((x) => +toStep(x)); };
-          const res = buildArcPlans(list, det, written, { vtxKey });   // ORIGINAL-Liste: band.facets indizieren sie
-          if (!res.failed.size) return { fds: ap.fds, arcs: { plans: res.plans, geoms: res.geoms } };
-          for (const b of det.bands) if (res.failed.has(b.id)) arcBlocked.add(b.sig);
-          det = validateArcBands(list, findArcBands(list, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() }), { vtxKey });
+          // Gravur (extrusion-bands.js): Bogen- und Extrusions-Pläne getrennt bauen, dann vereinen
+          const parts = splitDet(det);
+          const arcRes = buildArcPlans(fds, parts.arc, written, { vtxKey });   // ORIGINAL-Liste: band.facets indizieren sie
+          const extRes = useExt
+            ? buildExtPlans(fds, parts.ext, written, { vtxKey })
+            : { plans: [], geoms: new Map(), failed: new Set() };
+          const bad = new Set([...arcRes.failed, ...extRes.failed]);
+          if (!bad.size) {
+            return {
+              fds: ap.fds,
+              arcs: { plans: [...arcRes.plans, ...extRes.plans], geoms: new Map([...arcRes.geoms, ...extRes.geoms]) },
+            };
+          }
+          for (const b of det.bands) if (bad.has(b.id)) arcBlocked.add(b.sig);
+          det = findAll(fds, useExt);
         }
-      } catch (e) { /* Bögen sind optional: bei jedem Fehler facettiert */ }
-      return null;
+      } catch (e) { return { error: e }; }   // Bögen sind optional: bei jedem Fehler facettiert
+      return null;                          // erschöpft (kein Fehler) → Bögen verwerfen
     };
-    const plain = runArcs(fds);
+    const runAll = (list) => {
+      let r = run(list, EXT);
+      // Gravur (extrusion-bands.js): ein Fehler im Extrusions-Pfad darf nicht ALLE Bögen kosten —
+      // der ganze Aufbau läuft einmal ohne Extrusionsbändern neu (alter Bogen-Pfad allein).
+      if (r && r.error && EXT) r = run(list, false);
+      return r && !r.error ? r : null;
+    };
+    const plain = runAll(fds);
     // VERDREHTE RINGE (oberer Ring gegen den unteren verdreht, Wand = Zickzack-Dreiecke): keine
     // Seitenkante ist eine Mantellinie → kein Band-Ende, keine Ring-Teilung. insertRulings setzt
     // Punkte auf den Kreis und trianguliert die Wand neu (Mantellinien an den Schnittstellen).
@@ -6717,7 +6798,7 @@ export function buildVolumeStepBrepV2(analysis) {
     let ruled = null;
     try {
       const ins = insertRulings(fds, { vtxKey, blockedGroups: arcBlockedGroups() });
-      if (ins.fds !== fds) ruled = runArcs(ins.fds);
+      if (ins.fds !== fds) ruled = runAll(ins.fds);
     } catch (e) { ruled = null; }
     if (ruled && (!plain || ruled.fds.length < plain.fds.length)) return ruled;
     return plain || { fds, arcs: null };

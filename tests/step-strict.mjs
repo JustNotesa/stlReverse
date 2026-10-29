@@ -36,7 +36,7 @@
 //   shell-volume     jede Außenschale eines Körpers umschließt V > 0 (Divergenzsatz über die Flächen,
 //                    ohne Heilung) und ist kein Blech ohne Volumen; Hohlräume stehen als
 //                    ORIENTED_CLOSED_SHELL(.F.) einer positiven CLOSED_SHELL im BREP_WITH_VOIDS
-//                    (Ebene, Zylinder, Kegel, Torus; andere Flächenarten → Schale übersprungen)
+//                    (Ebene, Zylinder, Kegel, Torus, Kugel; andere Flächenarten → Schale übersprungen)
 //   shared-topology  kein VERTEX_POINT und keine EDGE_CURVE in zwei Schalen (getrennte Körper, Hohlraum
 //                    und Außenschale teilen nichts)
 //
@@ -204,6 +204,17 @@ export function checkStepStrict(text, opts = {}) {
       return { kind: 'torus', ax, R, rr, normal: (p) => norm(sub(p, core(p))), dist: (p) => Math.abs(len(sub(p, core(p))) - rr),
         rev: { O: ax.o, a: ax.z, u: (p) => { const w = sub(p, ax.o); return Math.atan2(dot(w, ax.y), dot(w, ax.x)); } } };
     }
+    if (e.type === 'SPHERICAL_SURFACE') {
+      // Kugel: Mittelpunkt = Lage der Achsenplatte, natürliche Normale radial nach außen.
+      const ax = axis2(e.args[1]), R = e.args[2], c = ax.o;
+      // rev: Drehachse + Drehwinkel u (wie Torus) — die Kugel ist um jede Achse durch den
+      // Mittelpunkt eine Drehfläche; für die Band-Prüfung (orient-curved) genügt die Achse der
+      // Platzierung.
+      return { kind: 'sphere', ax, R, c,
+        normal: (p) => norm(sub(p, c)),
+        dist: (p) => Math.abs(len(sub(p, c)) - R),
+        rev: { O: c, a: ax.z, u: (p) => { const w = sub(p, c); return Math.atan2(dot(w, ax.y), dot(w, ax.x)); } } };
+    }
     if (e.type === 'SURFACE_OF_REVOLUTION') {
       const pc = curveOf(e.args[1]);
       const a1 = E(e.args[2]).args; const O = P(a1[1]); const a = D(a1[2]);
@@ -234,6 +245,32 @@ export function checkStepStrict(text, opts = {}) {
     }
     if (e.type === 'SURFACE_OF_LINEAR_EXTRUSION') {
       const pc = curveOf(e.args[1]); const vv = E(e.args[2]).args; const V = mul(D(vv[1]), vv[2]);
+      if (pc.kind === 'bspline') {
+        // Extrusion einer (offenen) B-Spline (Gravur/Schrift, extrusion-plans.js): S(u,w) = C(u) + w·V.
+        // Abstand = Abstand zur Mantellinie durch C(u*) (u* über 2000 Proben + Goldener Schnitt),
+        // natürliche Normale C'(u*) × V; uw(p) liefert (u*, w) für das Volumen (Green im (u,w)-Raum).
+        const Vh = norm(V), N = 400, us = [], cs = [];
+        for (let i = 0; i <= N; i++) { const u = pc.t0 + (pc.t1 - pc.t0) * i / N; us.push(u); cs.push(pc.at(u)); }
+        const lineDist = (p, c) => { const w = sub(p, c); return len(sub(w, mul(Vh, dot(w, Vh)))); };
+        const near = (p) => {
+          let bi = 0, bd = Infinity;
+          for (let i = 0; i <= N; i++) { const d = lineDist(p, cs[i]); if (d < bd) { bd = d; bi = i; } }
+          let a = us[Math.max(0, bi - 1)], b = us[Math.min(N, bi + 1)];
+          const g = (Math.sqrt(5) - 1) / 2;
+          let x1 = b - g * (b - a), x2 = a + g * (b - a), f1 = lineDist(p, pc.at(x1)), f2 = lineDist(p, pc.at(x2));
+          for (let k = 0; k < 60 && b - a > 1e-13 * (1 + Math.abs(b)); k++) {
+            if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = b - g * (b - a); f1 = lineDist(p, pc.at(x1)); }
+            else { a = x1; x1 = x2; f1 = f2; x2 = a + g * (b - a); f2 = lineDist(p, pc.at(x2)); }
+          }
+          const u = (a + b) / 2, c = pc.at(u);
+          return { u, c, d: lineDist(p, c) };
+        };
+        const deriv = (u) => { const h = 1e-6 * (pc.t1 - pc.t0); const a = Math.max(pc.t0, u - h), b = Math.min(pc.t1, u + h); return mul(sub(pc.at(b), pc.at(a)), 1 / (b - a)); };
+        return { kind: 'extrusion', V, at: pc.at, deriv,
+          normal: (p) => norm(cross(deriv(near(p).u), V)),
+          dist: (p) => near(p).d,
+          uw: (p) => { const r = near(p); return r.d > 1e-3 ? null : [r.u, dot(sub(p, r.c), V) / dot(V, V)]; } };
+      }
       if (pc.kind !== 'circle') return { kind: 'extrusion?' };
       const m = pc.ax.z, c0 = pc.ax.o, r = pc.a, vm = dot(V, m);
       const back = (p) => { const v = dot(sub(p, c0), m) / vm; return sub(p, mul(V, v)); };
@@ -388,6 +425,15 @@ export function checkStepStrict(text, opts = {}) {
         }
         if (cnt && vote <= 0) flag('orient-curved', `#${fid} (${surf.kind}): Rand #${L.bref} läuft verkehrt herum — die Fläche läge rechts vom Rand (${vote}/${cnt})`, { face: fid });
       });
+    } else if (surf.kind === 'extrusion' && surf.uw && loops.length === 1) {
+      // Extrusion einer B-Spline (Gravur) mit EINEM Rand: im Parameterraum (u,w) läuft der Rand gegen
+      // den Uhrzeigersinn, wenn die Fläche links liegt (natürliche Normale C'×V) — × same_sense
+      const UW = loops[0].vpts.map((p) => surf.uw(p));
+      if (UW.some((x) => !x)) stats.skippedOrient++;
+      else {
+        let A2 = 0; for (let i = 0; i < UW.length; i++) { const a = UW[i], b = UW[(i + 1) % UW.length]; A2 += a[0] * b[1] - b[0] * a[1]; }
+        if (Math.sign(A2) * sense <= 0) flag('orient-curved', `#${fid} (${surf.kind}): Rand #${loops[0].bref} läuft verkehrt herum — die Fläche läge rechts vom Rand (Parameterfläche ${(A2 / 2).toExponential(2)}, same_sense ${sense > 0 ? 'T' : 'F'})`, { face: fid });
+      }
     } else stats.skippedOrient++;
   }
   const openEdgesOf = new Map();   // OPEN_SHELL → Anzahl ihrer Randkanten
@@ -432,9 +478,28 @@ export function checkStepStrict(text, opts = {}) {
   // shell-volume: orientiertes Volumen je Schale (Divergenzsatz, V = ⅓ Σ_F ∫ (x−o)·n_eff dA). Mit a
   // beliebig: ∫(x−o)·n dA = (a−o)·∫n dA + ∫(x−a)·n dA; ∫ n_eff dA = ½ ∮ x × dx über die Ränder wie
   // orientiert (Fläche links). (x−a)·n: Ebene/Kegel mit a = Ebenenpunkt/Spitze → 0; Zylinder (a auf der
-  // Achse) → R; Torus (a = Zentrum) → R·cos v + r — deren Flächenintegrale per Green im Parameterraum.
+  // Achse) → R; Torus (a = Zentrum) → R·cos v + r — deren Flächenintegrale per Green im Parameterraum;
+  // Kugel (a = Mittelpunkt) → R, also R·Fläche des Kugelflecks (Fläche per Fächer über den Rand).
   {
     const wrapPi = (x) => { while (x > Math.PI) x -= 2 * Math.PI; while (x <= -Math.PI) x += 2 * Math.PI; return x; };
+    // Fläche eines Kugelflecks (die Randkurve liegt auf der Kugel): Fächer von einem Pol der
+    // Fläche aus — der Pol ist die Richtung der Vektorfläche des Randes (zeigt in die Fläche
+    // hinein, bei einer Halbkugel senkrecht zur Äquatorebene). Je Randpunkt-Dreieck
+    // (Pol, P_i, P_{i+1}) die Kugeldreiecks-Fläche 2·atan2(det, 1+a·b+b·c+c·a); das Vorzeichen
+    // folgt der Laufrichtung des Randes.
+    const sphereArea = (surf, loop, va) => {
+      const { c, R } = surf;
+      const lv = len(va);
+      if (!(lv > 1e-9) || loop.vpts.length < 3) return NaN;
+      const a = mul(va, 1 / lv);        // Pol-Richtung (Einheitsvektor ab der Kugelmitte)
+      const P = loop.vpts;
+      let sum = 0;
+      for (let i = 0; i < P.length; i++) {
+        const b = norm(sub(P[i], c)), d = norm(sub(P[(i + 1) % P.length], c));
+        sum += 2 * Math.atan2(dot(a, cross(b, d)), 1 + dot(a, b) + dot(b, d) + dot(d, a));
+      }
+      return R * R * sum;
+    };
     const faceVolume = (fi, o) => {
       const { surf, loops } = fi;
       let va = [0, 0, 0];
@@ -445,6 +510,18 @@ export function checkStepStrict(text, opts = {}) {
         const ta = Math.tan(surf.al);
         if (!(Math.abs(ta) > 1e-12)) return NaN;
         return dot(sub(sub(surf.ax.o, mul(surf.ax.z, surf.R / ta)), o), va);
+      }
+      if (surf.kind === 'extrusion' && surf.uw) {
+        // S(u,w) = C(u) + w·V, natürliche Normale C'×V: ∫(x−o)·n dA = ∫∫ g(u) du dw mit
+        // g(u) = (C(u) − o)·(C'(u) × V) = −∮ w·g(u) du (Green, Ränder wie gespeichert — wie beim Zylinder)
+        const g = (u) => dot(sub(surf.at(u), o), cross(surf.deriv(u), surf.V));
+        let J = 0;
+        for (const L of loops) {
+          const P = L.vpts, UW = P.map((p) => surf.uw(p));
+          if (UW.some((x) => !x)) return NaN;
+          for (let i = 0; i < P.length; i++) { const [u1, w1] = UW[i], [u2, w2] = UW[(i + 1) % P.length]; J += (w1 * g(u1) + w2 * g(u2)) / 2 * (u2 - u1); }
+        }
+        return -J;
       }
       if (surf.kind === 'cylinder') {
         const { ax, R } = surf;
@@ -467,6 +544,16 @@ export function checkStepStrict(text, opts = {}) {
         let J = 0;   // ∮ u·f(v) dv
         for (const L of loops) { const P = L.vpts; for (let i = 0; i < P.length; i++) { const [u1, v1] = uv(P[i]), [u2, v2] = uv(P[(i + 1) % P.length]); J += (u1 * f(v1) + u2 * f(v2)) / 2 * wrapPi(v2 - v1); } }
         return dot(sub(ax.o, o), va) + J;
+      }
+      if (surf.kind === 'sphere') {
+        // (c−o)·∫n dA + R·Fläche des Kugelflecks (die Vektorfläche ∫n dA ist die des Randes,
+        // unabhängig vom sameSense). Bei sameSense .F. zeigt die Flächennormale nach innen: der
+        // Fleck ist dann die Gegenfläche der Kugel (Volumenbeitrag kehrt sich um). Ein Loch in der
+        // Kugelfläche (zwei Ränder) ist nicht gerechnet — die Schale wird dann übersprungen.
+        const A = loops.length === 1 ? sphereArea(surf, loops[0], va) : NaN;
+        if (!Number.isFinite(A)) return NaN;
+        const s = fi.sense ?? 1;
+        return dot(sub(surf.c, o), va) + surf.R * A - (1 - s) / 2 * 4 * Math.PI * surf.R ** 3;
       }
       return NaN;
     };
