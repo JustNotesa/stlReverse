@@ -481,8 +481,26 @@ function processChain(ctx, chain, state, nextId) {
     const lo2d = lo.pts.map((p) => { const l = toLocal(frame, p); return [l[0], l[1]]; });
     // Bogen-Bänder von profile-arcs (opts.arcDet): das TATSÄCHLICHE Bogen-Ergebnis
     // entscheidet, ob ein Stück beim Bogen-Pfad bleibt. Die geometrische Kreis-Schätzung
-    // unten ist nur der Notfall (ohne arcDet) — sie rät nur, was profile-arcs tun wird.
+    // ist nur der Notfall (ohne arcDet) — sie rät nur, was profile-arcs tun wird.
     const arcBands = (o.arcDet && Array.isArray(o.arcDet.bands)) ? o.arcDet.bands : null;
+    // Ein Stück, das geometrisch EINEN Kreis ergibt, ist NIE ein Extrusionsband — auch
+    // dann nicht, wenn arcDet es nicht abdeckt (profile-arcs' Gates verwerfen echte
+    // Ringe): sonst würden die Ringe zu Splines (falsche Geometrie).
+    let cover = null;
+    if (piece.cyclic) {
+      const K = fitCircle2d(lo2d);
+      if (K && K.maxRes <= Math.max(o.circleTolAbs, o.circleTolRel * K.r)) {
+        state.stats.circleSkipped++;
+        continue;
+      }
+    } else {
+      cover = circleCover(lo2d, o);
+      // genau EIN Kreisstück über den GANZEN Lauf → der Lauf ist ein Kreis
+      if (cover.length === 1 && cover[0].i === 0 && cover[0].j === lo2d.length - 1) {
+        state.stats.circleSkipped++;
+        continue;
+      }
+    }
     if (arcBands) {
       const F = new Set(piece.idx.map((k) => chain.facets[k]));
       const touched = new Set();
@@ -503,15 +521,8 @@ function processChain(ctx, chain, state, nextId) {
       const staysArc = covered === F.size && touching > 0 &&
         (touching <= o.maxArcPieces || covered / touching >= avgMin);
       if (staysArc) { state.stats.circleSkipped++; continue; }
-    } else if (piece.cyclic) {
-      const K = fitCircle2d(lo2d);
-      if (K && K.maxRes <= Math.max(o.circleTolAbs, o.circleTolRel * K.r)) {
-        state.stats.circleSkipped++;
-        continue;
-      }
-    } else {
+    } else if (!piece.cyclic) {
       // Greedy-Kreis-Abdeckung: die Kreisstücke mit ihren Segmentzahlen
-      const cover = circleCover(lo2d, o);
       const segsPer = cover.map((c) => c.j - c.i);
       const avgSegs = segsPer.length
         ? segsPer.reduce((a, b) => a + b, 0) / segsPer.length

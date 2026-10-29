@@ -109,6 +109,74 @@ function facetLoMid(fd, loKeys, vkey) {
   return centroidOf(lo.length ? lo : L);
 }
 
+// ── Wächter an scharfen Eckpunkten (Cap-Fläche ↔ Extrusion) ────────────────
+// Endet die Bandkurve in einer scharfen Ecke der Deckfläche, kann die Endtangente der
+// interpolierten Spline so weit von der Endsehne abweichen, dass die Kurve über die
+// Nachbarkante der Deckfläche kippt. OCCT meldet dann eine Selbstschneidung zwischen
+// der Cap-EBENE und der SURFACE_OF_LINEAR_EXTRUSION.
+
+/** 2D-Differenz */
+const sub2 = (a, b) => [a[0] - b[0], a[1] - b[1]];
+/** 2D-Kreuzprodukt (a × b)·z */
+const cross2 = (a, b) => a[0] * b[1] - a[1] * b[0];
+/** Winkel (rad, unsigned, [0, π]) zwischen zwei 2D-Vektoren */
+function angle2(a, b) {
+  const la = Math.hypot(a[0], a[1]);
+  const lb = Math.hypot(b[0], b[1]);
+  if (!(la > 0) || !(lb > 0)) return 0;
+  const c = (a[0] * b[0] + a[1] * b[1]) / (la * lb);
+  return Math.acos(Math.min(1, Math.max(-1, c)));
+}
+/** Loop einer Fläche: li = 0 → außen, li = k → inner[k−1] */
+function loopOf(fd, li) {
+  if (!fd) return null;
+  if (!li) return fd.outer || null;
+  return (fd.inner || [])[li - 1] || null;
+}
+
+/**
+ * Prüft einen Endpunkt eines Bandes an einer scharfen Ecke der Deckfläche.
+ *
+ * In der Deckebene projiziert (alles 2D):
+ *   c = Endsehne (Vektor vom Eckpunkt in die Kurve), e = Nachbarkante (Vektor vom
+ *   Eckpunkt zum Nachbarpunkt der Deckfläche), t = Endtangente (in die Kurve zeigend).
+ *   phi = Winkel(c, e), tau = Winkel(t, c).
+ *
+ * Gefordert wird:
+ *   (a) tau ≤ phi/2 — die Tangente darf höchstens halb so weit von der Endsehne
+ *       abweichen wie die Nachbarkante,
+ *   (b) t liegt auf derselben Seite der Geraden durch e wie c,
+ *   (c) kein Abtastpunkt der Kurve (ohne die beiden Endpunkte) liegt auf der anderen
+ *       Seite der Geraden durch e oder dicht (< 1e-6 mm) auf ihr.
+ *
+ * → null (in Ordnung) | String (Grund für das Scheitern des Bandes)
+ */
+function guardCorner(corner2, c2, e2, t2, samples2) {
+  const lc = Math.hypot(c2[0], c2[1]);
+  const le = Math.hypot(e2[0], e2[1]);
+  if (!(lc > 1e-9) || !(le > 1e-9)) return null;             // entartet → überspringen
+  const sC = cross2(e2, c2);
+  if (Math.abs(sC) <= 1e-12 * le * lc) return null;          // c liegt auf der Geraden → nichts zu prüfen
+  const deg = (r) => (r * 180 / Math.PI).toFixed(1);
+  const phi = angle2(c2, e2);
+  const tau = angle2(t2, c2);
+  // (a) tau ≤ phi/2 war zu streng (NozzleBox: 19 von 82 Schrift-Bändern fielen weg, ohne dass
+  // die Kurve die Nachbarkante kreuzte) — nur noch Diagnose; entscheidend sind (b) und (c).
+  void tau; void deg;
+  // (b) nur, wenn die Tangente auf der Seite des STRAHLS e liegt (dot > 0) — kreuzt sie nur die
+  // rückwärtige Verlängerung (glatter Übergang ins Nachbarstück, phi ≈ 180°), ist das harmlos
+  if (cross2(e2, t2) * sC < 0 && t2[0] * e2[0] + t2[1] * e2[1] > 0) return 'Endtangente kreuzt die Nachbarkante der Deckfläche';
+  for (const s of samples2) {
+    const d = sub2(s, corner2);
+    if (Math.hypot(d[0], d[1]) > le) continue;                // nur in der Nähe der Ecke
+    if (d[0] * e2[0] + d[1] * e2[1] <= 0) continue;          // nur auf der Seite des Strahls e
+    const sd = cross2(e2, d);
+    if (Math.abs(sd) / le <= 1e-6) return 'Kurve berührt die Nachbarkante der Deckfläche (< 1e-6 mm)';
+    if (sd * sC < 0) return 'Kurve kreuzt die Nachbarkante der Deckfläche';
+  }
+  return null;
+}
+
 // ── Plan eines Bands ────────────────────────────────────────────────────────
 
 /**
@@ -117,10 +185,11 @@ function facetLoMid(fd, loKeys, vkey) {
  * fds   — die ORIGINALEN Flächen (unveränderte Indizes der Band-Facetten und Deckflächen)
  * band  — das Band aus det.bands (kind 'ext')
  * wr    — (p) → geschriebene Koordinaten [x,y,z] | null
+ * ctx   — { reason } — wird bei einem Verstoß am scharfen Eckpunkt gefüllt
  *
  * → { plan, geoms } | null  (null = Band scheitert)
  */
-function buildBand(band, list, wr, vkey, o) {
+function buildBand(band, list, wr, vkey, o, ctx) {
   const segs = band.segs || [];
 
   // ── 1. Beide Bögen müssen an eine ebene Deckfläche grenzen ────────────────
@@ -196,6 +265,64 @@ function buildBand(band, list, wr, vkey, o) {
   }
   if (hiDev > 1e-3) return null;
 
+  // ── 5b. Wächter an den scharfen Eckpunkten (Cap-Fläche ↔ Extrusion) ───────
+  // Endet die Bandkurve in einer scharfen Ecke der Deckfläche, darf die Endtangente
+  // der Spline nicht so stark von der Endsehne abweichen, dass die Kurve über die
+  // Nachbarkante der Deckfläche kippt — OCCT meldet dann eine Selbstschneidung
+  // zwischen der Cap-EBENE und der SURFACE_OF_LINEAR_EXTRUSION.
+  const bLo = planeBasis(loN);
+  const bHi = planeBasis(hiN);
+  const to2Lo = (p) => [dot(p, bLo.e1), dot(p, bLo.e2)];
+  const to2Hi = (p) => [dot(p, bHi.e1), dot(p, bHi.e2)];
+  const uA = spLo.U[spLo.degree];                    // u am Anfang der unteren Kurve
+  const uB = spLo.U[spLo.U.length - spLo.degree - 1];  // u am Ende der unteren Kurve
+  const tanA = derivSpline(spLo, uA);                 // Endtangente vorn: zeigt IN die Kurve
+  const tanB = derivSpline(spLo, uB);                 // Endtangente hinten: zeigt AUS der Kurve
+  if (!tanA || !tanB) return null;
+  const KS = Math.max(16, 4 * (band.nSegs || 0));
+  const midLo = splineSamples(spLo, KS).slice(1, -1).map(to2Lo);   // ohne die beiden Endpunkte
+  const midHi = splineSamples(spHi, KS).slice(1, -1).map(to2Hi);
+  const keysLo = new Set(P.map(vkey));
+  const keysHi = new Set(H.map(vkey));
+
+  /**
+   * Ein Band-Ende gegen die Nachbarkante der Deckfläche prüfen.
+   * → null (in Ordnung) | String (Grund)
+   */
+  const guardEnd = (tag, loop, cOrig, cW, nOrig, to2, tan3, samples, keys) => {
+    if (!loop || !loop.length) return null;
+    const ck = vkey(cOrig);
+    let i = -1;
+    for (let k = 0; k < loop.length; k++) if (vkey(loop[k]) === ck) { i = k; break; }
+    if (i < 0) return null;                             // Ecke nicht im Loop → überspringen
+    const m = loop.length;
+    const prev = loop[(i - 1 + m) % m];
+    const next = loop[(i + 1) % m];
+    const kc = vkey(nOrig);
+    let nbr = null;                                     // der Nachbar auf der Kurven-Seite …
+    if (vkey(prev) === kc) nbr = next;                  // … ist bekannt, der andere ist die
+    else if (vkey(next) === kc) nbr = prev;             // Nachbarkante
+    else return null;                                   // Kurven-Seite unklar → überspringen
+    if (keys.has(vkey(nbr))) return null;               // entartet → überspringen
+    const cW2 = wr(nOrig);
+    if (!cW2) return null;
+    const nbrW = wr(nbr) || nbr;
+    const c2 = sub2(to2(cW2), to2(cW));                 // Endsehne
+    const e2 = sub2(to2(nbrW), to2(cW));                // Nachbarkante
+    const why = guardCorner(to2(cW), c2, e2, to2(tan3), samples);
+    return why ? `Ecke ${tag}: ${why}` : null;
+  };
+
+  for (const end of [
+    ['unten vorn', loopOf(loFd, loSeg.cap.li), P[0], Alo, P[1], to2Lo, tanA, midLo, keysLo],
+    ['unten hinten', loopOf(loFd, loSeg.cap.li), P[nP], Blo, P[nP - 1], to2Lo, mul(tanB, -1), midLo, keysLo],
+    ['oben vorn', loopOf(hiFd, hiSeg.cap.li), H[H.length - 1], Ahi, H[H.length - 2], to2Hi, tanA, midHi, keysHi],
+    ['oben hinten', loopOf(hiFd, hiSeg.cap.li), H[0], Bhi, H[1], to2Hi, mul(tanB, -1), midHi, keysHi],
+  ]) {
+    const why = guardEnd(end[0], end[1], end[2], end[3], end[4], end[5], end[6], end[7], end[8]);
+    if (why) { if (ctx) ctx.reason = why; return null; }
+  }
+
   // ── 6. Geometrien der beiden Bögen ────────────────────────────────────────
   const geoms = new Map();
   geoms.set(loSeg.arcKey, {
@@ -260,7 +387,7 @@ function buildBand(band, list, wr, vkey, o) {
   const devs = spanDeviation(spLo, Q);
   let sag = 0;
   for (const d of devs) if (d > sag) sag = d;
-  const { e1, e2 } = planeBasis(loN);
+  const { e1, e2 } = bLo;
   const to2 = (p) => [dot(p, e1), dot(p, e2)];
   const dV = Math.abs(polygonArea(Ls.map(to2)) - polygonArea(Q.map(to2))) * lv;
 
@@ -281,7 +408,9 @@ function buildBand(band, list, wr, vkey, o) {
  * written — (p) → geschriebene Koordinaten [x,y,z] eines Netzpunkts
  * opts    — { vtxKey (Pflicht), surfTol, sideTol, samples }
  *
- * → { plans, geoms, failed }   failed = Set der gescheiterten band.id
+ * → { plans, geoms, failed, reasons }
+ *   failed  = Set der gescheiterten band.id
+ *   reasons = Map band.id → Grund des Scheiterns (soweit bekannt)
  */
 export function buildExtPlans(fds, det, written, opts) {
   const o = { ...EXT_PLAN_DEFAULTS, ...(opts || {}) };
@@ -295,21 +424,27 @@ export function buildExtPlans(fds, det, written, opts) {
     return [w[0], w[1], w[2]];
   };
   const failed = new Set();
+  const reasons = new Map();
   const geoms = new Map();
   const plans = [];
   for (const band of (det && det.bands) || []) {
     if (!band || band.kind !== 'ext') continue;
     let res = null;
+    const ctx = { reason: null };
     try {
-      res = buildBand(band, list, wr, vkey, o);
+      res = buildBand(band, list, wr, vkey, o, ctx);
     } catch (e) {
       res = null;                      // ein Fehler im Band verwirft nur dieses Band
     }
-    if (!res) { failed.add(band.id); continue; }
+    if (!res) {
+      failed.add(band.id);
+      if (ctx.reason) reasons.set(band.id, ctx.reason);
+      continue;
+    }
     plans.push(res.plan);
     for (const [k, g] of res.geoms) geoms.set(k, g);
   }
-  return { plans, geoms, failed };
+  return { plans, geoms, failed, reasons };
 }
 
 /**
