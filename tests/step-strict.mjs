@@ -29,6 +29,10 @@
 //                    legen die Fläche in entgegengesetzte Drehrichtung (auch bei Bögen ≥ 180°);
 //                    tangentiale Kante zwischen zwei gekrümmten Flächen: keine Faltung (beide
 //                    Flächen liegen auf verschiedenen Seiten der Kante)
+//   orient-bspline   B-Spline-Fläche (B_SPLINE_SURFACE_WITH_KNOTS, Tensorprodukt/Polynom) mit
+//                    EINEM Rand: im Parameterraum (u,v) läuft der Rand gegen den Uhrzeigersinn,
+//                    wenn die Fläche links liegt (natürliche Normale Su×Sv) — passend zu
+//                    same_sense (.T. → CCW, .F. → CW)
 //   loop-overlap     Ebene: Ränder schneiden/berühren sich nicht, jedes Loch liegt im Außenrand, Löcher
 //                    nicht ineinander (Kreise exakt, sonst Polygone; Kurven dicht abgetastet)
 //   shell-connected  jede CLOSED_SHELL/OPEN_SHELL hängt über gemeinsame Kanten zusammen
@@ -36,11 +40,15 @@
 //   shell-volume     jede Außenschale eines Körpers umschließt V > 0 (Divergenzsatz über die Flächen,
 //                    ohne Heilung) und ist kein Blech ohne Volumen; Hohlräume stehen als
 //                    ORIENTED_CLOSED_SHELL(.F.) einer positiven CLOSED_SHELL im BREP_WITH_VOIDS
-//                    (Ebene, Zylinder, Kegel, Torus, Kugel; andere Flächenarten → Schale übersprungen)
+//                    (Ebene, Zylinder, Kegel, Torus, Kugel, B-Spline-Fläche; andere Flächenarten →
+//                    Schale übersprungen)
 //   shared-topology  kein VERTEX_POINT und keine EDGE_CURVE in zwei Schalen (getrennte Körper, Hohlraum
 //                    und Außenschale teilen nichts)
 //
-// Nutzung als Modul:  checkStepStrict(stepText) → { violations: [...], stats }
+// Unterstützte Flächenarten: PLANE, CYLINDRICAL_/CONICAL_/SPHERICAL_/TOROIDAL_SURFACE,
+// SURFACE_OF_LINEAR_EXTRUSION, SURFACE_OF_REVOLUTION, B_SPLINE_SURFACE_WITH_KNOTS.
+//
+// Nutzung als Modul:  checkStepStrict(stepText) → { violations: [...], stats, volumes: [{shell,V,thick}] }
 // CLI:                node tests/step-strict.mjs [datei.step …]    (ohne Argument: alle Samples
 //                     wie der Worker exportieren, Toggle AN und AUS)  — Exit 1 bei Verstößen
 // ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +96,13 @@ const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a
 const len = (a) => Math.hypot(a[0], a[1], a[2]);
 const norm = (a) => { const l = len(a); return l > 0 ? mul(a, 1 / l) : [0, 0, 0]; };
 const rot = (v, a, u) => { const c = Math.cos(u), s = Math.sin(u), d = dot(a, v) * (1 - c), x = cross(a, v); return [v[0] * c + x[0] * s + a[0] * d, v[1] * c + x[1] * s + a[1] * d, v[2] * c + x[2] * s + a[2] * d]; };
+// 8-Punkt-Gauß-Legendre auf [−1,1]: [Knoten, Gewicht]
+const GAUSS8 = [
+  [-0.9602898564975363, 0.1012285362903763], [-0.7966664774136267, 0.2223810344533745],
+  [-0.5255324099163290, 0.3137066458778873], [-0.1834346424956498, 0.3626837833783620],
+  [0.1834346424956498, 0.3626837833783620], [0.5255324099163290, 0.3137066458778873],
+  [0.7966664774136267, 0.2223810344533745], [0.9602898564975363, 0.1012285362903763],
+];
 
 export function checkStepStrict(text, opts = {}) {
   const TOL = opts.tol ?? 1e-4;          // mm — strikte Kerne arbeiten mit ~1e-6; 1e-4 ist großzügig
@@ -181,6 +196,143 @@ export function checkStepStrict(text, opts = {}) {
     return [ps, pe];
   };
 
+  // ---- B-Spline-Fläche (Tensorprodukt, Polynom, beidseitig geklemmt) ----
+  // ctrl[i][j]: i = u-Index, j = v-Index (ISO 10303-42 control_points_list).
+  // Liefert at(u,v), su(u,v), sv(u,v) (exakte Ableitungen) sowie den nächstgelegenen
+  // Flächenpunkt (Gitter + projiziertes Gauss-Newton) → dist(p), normal(p), uv(p).
+  const bsplineSurfaceOf = (e) => {
+    const du = e.args[1], dv = e.args[2], rows = e.args[3];
+    if (!Array.isArray(rows) || !rows.length || !Array.isArray(rows[0])) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    const ctrl = rows.map((row) => row.map((q) => P(q)));
+    const nu = ctrl.length, nv = ctrl[0].length;
+    const expand = (kn, mu) => { const out = []; mu.forEach((m, i) => { for (let k = 0; k < m; k++) out.push(kn[i]); }); return out; };
+    const ku = e.args[10] || [], kv = e.args[11] || [], mu = e.args[8] || [], mv = e.args[9] || [];
+    if (ku.length !== mu.length || kv.length !== mv.length) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    const U = expand(ku, mu), V = expand(kv, mv);
+    // Gültige B-Spline-Konfiguration: Grad ≥ 1, mind. 2 Stützpunkte je Richtung,
+    // Knotenvektorlänge = Kontrollpunkte + Grad + 1
+    if (!(du >= 1) || !(dv >= 1) || nu < 2 || nv < 2 || U.length !== nu + du + 1 || V.length !== nv + dv + 1) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+
+    const span = (K, p, t) => { let k = p; while (k < K.length - p - 2 && t >= K[k + 1]) k++; return k; };
+    // de Boor auf einer Kontrollpunktreihe (Vektoren)
+    const evalDir = (K, p, cps, t) => {
+      const k = span(K, p, t);
+      const d = [];
+      for (let j = 0; j <= p; j++) d.push(cps[k - p + j].slice());
+      for (let r = 1; r <= p; r++) for (let j = p; j >= r; j--) {
+        const i = j + k - p, den = K[i + p - r + 1] - K[i];
+        const al = den === 0 ? 0 : (t - K[i]) / den;
+        d[j] = add(mul(d[j - 1], 1 - al), mul(d[j], al));
+      }
+      return d[p];
+    };
+    // Ableitungs-Kontrollnetze: Q_i = p·(P_{i+1}−P_i)/(K[i+p+1]−K[i+1]); der Knotenvektor der
+    // Ableitung ist K ohne den ersten und den letzten Knoten.
+    const dU = [];   // ∂/∂u der Kontrollpunkte: (nu−1) × nv
+    for (let i = 0; i + 1 < nu; i++) {
+      const row = [];
+      for (let j = 0; j < nv; j++) {
+        const den = U[i + du + 1] - U[i + 1];
+        row.push(den === 0 ? [0, 0, 0] : mul(sub(ctrl[i + 1][j], ctrl[i][j]), du / den));
+      }
+      dU.push(row);
+    }
+    const dV = [];   // ∂/∂v der Kontrollpunkte: nu × (nv−1)
+    for (let i = 0; i < nu; i++) {
+      const row = [];
+      for (let j = 0; j + 1 < nv; j++) {
+        const den = V[j + dv + 1] - V[j + 1];
+        row.push(den === 0 ? [0, 0, 0] : mul(sub(ctrl[i][j + 1], ctrl[i][j]), dv / den));
+      }
+      dV.push(row);
+    }
+    const Ud = U.slice(1, -1), Vd = V.slice(1, -1);
+    const dvCols = [];   // je v-Index: die u-Kontrollpunkte der v-Ableitung
+    for (let j = 0; j + 1 < nv; j++) dvCols.push(dV.map((row) => row[j]));
+    const evalV = (v) => ctrl.map((row) => evalDir(V, dv, row, v));
+    const at = (u, v) => evalDir(U, du, evalV(v), u);
+    const su = (u, v) => evalDir(Ud, du - 1, dU.map((row) => evalDir(V, dv, row, v)), u);
+    const sv = (u, v) => evalDir(Vd, dv - 1, dvCols.map((col) => evalDir(U, du, col, u)), v);
+
+    const u0 = U[du], u1 = U[U.length - du - 1], v0 = V[dv], v1 = V[V.length - dv - 1];
+    if (!(u1 > u0) || !(v1 > v0)) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    // inneren Knoten (für Gitter + Integralsplitting)
+    const inner = (K, a, b) => { const s = []; for (const t of K) if (t > a + 1e-12 && t < b - 1e-12 && (!s.length || s[s.length - 1] < t)) s.push(t); return s; };
+    const iu = inner(U, u0, u1), iv = inner(V, v0, v1);
+    const proj = (x, a, b) => (x < a ? a : (x > b ? b : x));
+
+    // nächstgelegener Flächenpunkt: grobes Gitter (je Knotenspan) + projiziertes Gauss-Newton
+    const solve = (p) => {
+      const NU = Math.min(72, 8 * (iu.length + 1)), NV = Math.min(72, 8 * (iv.length + 1));
+      const cands = [];
+      for (let i = 0; i <= NU; i++) {
+        const u = u0 + (u1 - u0) * i / NU;
+        for (let j = 0; j <= NV; j++) {
+          const v = v0 + (v1 - v0) * j / NV;
+          const q = sub(at(u, v), p), d2 = dot(q, q);
+          cands.push({ d2, u, v });
+        }
+      }
+      cands.sort((a, b) => a.d2 - b.d2);
+      let best = { d2: Infinity, u: u0, v: v0 };
+      for (const c0 of cands.slice(0, 3)) {
+        let u = c0.u, v = c0.v;
+        for (let it = 0; it < 80; it++) {
+          const r = sub(at(u, v), p), g2 = dot(r, r);
+          if (g2 < 1e-28) break;
+          const du_ = su(u, v), dv_ = sv(u, v);
+          const gu = dot(du_, r), gv = dot(dv_, r);
+          const a = dot(du_, du_), b = dot(du_, dv_), c = dot(dv_, dv_), det = a * c - b * b;
+          let moved = false;
+          if (det > 1e-22 * (a * c + 1)) {
+            const eu = -(c * gu - b * gv) / det, ev = -(a * gv - b * gu) / det;
+            for (let k = 0; k < 26; k++) {
+              const s = Math.pow(0.5, k);
+              const un = proj(u + s * eu, u0, u1), vn = proj(v + s * ev, v0, v1);
+              const rn = sub(at(un, vn), p);
+              if (dot(rn, rn) < g2) { u = un; v = vn; moved = true; break; }
+            }
+          }
+          if (!moved) {
+            // projizierter Gradientenschritt (an den Rändern nur die zulässige Richtung)
+            let pu = gu, pv = gv;
+            if (u <= u0 + 1e-14 && gu < 0) pu = 0;
+            if (u >= u1 - 1e-14 && gu > 0) pu = 0;
+            if (v <= v0 + 1e-14 && gv < 0) pv = 0;
+            if (v >= v1 - 1e-14 && gv > 0) pv = 0;
+            const gn = Math.hypot(pu, pv);
+            if (gn < 1e-20) break;
+            const h = Math.max(u1 - u0, v1 - v0) * 0.05;
+            for (let k = 0; k < 30; k++) {
+              const s = h * Math.pow(0.5, k);
+              const un = proj(u - s * pu / gn, u0, u1), vn = proj(v - s * pv / gn, v0, v1);
+              const rn = sub(at(un, vn), p);
+              if (dot(rn, rn) < g2) { u = un; v = vn; moved = true; break; }
+            }
+          }
+          if (!moved) break;
+        }
+        const q = sub(at(u, v), p), d2 = dot(q, q);
+        if (d2 < best.d2) best = { d2, u, v };
+      }
+      return best;
+    };
+    const cache = new Map();
+    const closest = (p) => {
+      const k = `${p[0]},${p[1]},${p[2]}`;
+      if (cache.has(k)) return cache.get(k);
+      const res = solve(p);
+      cache.set(k, res);
+      return res;
+    };
+    return {
+      kind: 'bspline_surface', du, dv, ctrl, at, su, sv, u0, u1, v0, v1, iu, iv,
+      normal: (p) => { const c = closest(p); return norm(cross(su(c.u, c.v), sv(c.u, c.v))); },
+      dist: (p) => Math.sqrt(closest(p).d2),
+      uv: (p) => { const c = closest(p); return [c.u, c.v]; },
+    };
+  };
+
   // ---- Flächen: natürliche Normale (STEP-Konvention) und Abstand
   const surfOf = (r) => {
     const e = E(r);
@@ -214,6 +366,9 @@ export function checkStepStrict(text, opts = {}) {
         normal: (p) => norm(sub(p, c)),
         dist: (p) => Math.abs(len(sub(p, c)) - R),
         rev: { O: c, a: ax.z, u: (p) => { const w = sub(p, c); return Math.atan2(dot(w, ax.y), dot(w, ax.x)); } } };
+    }
+    if (e.type === 'B_SPLINE_SURFACE_WITH_KNOTS') {
+      return bsplineSurfaceOf(e);
     }
     if (e.type === 'SURFACE_OF_REVOLUTION') {
       const pc = curveOf(e.args[1]);
@@ -400,6 +555,19 @@ export function checkStepStrict(text, opts = {}) {
         if (Math.sign(areas[i]) !== want) flag('orient-plane', `#${fid}: ${i === big ? 'Außenrand' : 'Loch'}-Rand #${L.bref} läuft ${areas[i] > 0 ? 'gegen' : 'im'} Uhrzeigersinn um die Normale (Fläche ${Math.abs(areas[i]).toFixed(2)} mm²)`, { face: fid });
         if (L.outer !== (i === big)) flag('outer-bound', `#${fid}: FACE_OUTER_BOUND ${L.outer ? 'auf einem Loch' : 'fehlt am Außenrand'} (#${L.bref})`, { face: fid });
       });
+    } else if (surf.kind === 'bspline_surface' && surf.uv && loops.length === 1) {
+      // B-Spline-Fläche mit EINEM Rand: im Parameterraum (u,v) läuft der Rand gegen den
+      // Uhrzeigersinn, wenn die Fläche links liegt (natürliche Normale Su×Sv) — × same_sense.
+      // Der Parameterbereich ist CCW, wenn der Rand CCW um Su×Sv läuft; mit same_sense .F.
+      // muss er CW sein. Ein umgedrehtes same_sense (der Rand selbst bleibt unverändert)
+      // fällt hier ebenso auf wie ein verdrehter Rand.
+      const UV = loops[0].pts.map((p) => surf.uv(p));
+      if (UV.some((x) => !x)) stats.skippedOrient++;
+      else {
+        let A2 = 0;
+        for (let i = 0; i < UV.length; i++) { const a = UV[i], b = UV[(i + 1) % UV.length]; A2 += a[0] * b[1] - b[0] * a[1]; }
+        if (Math.sign(A2) * sense <= 0) flag('orient-curved', `#${fid} (${surf.kind}): Rand #${loops[0].bref} läuft verkehrt herum — die Fläche läge rechts vom Rand (Parameterfläche ${(A2 / 2).toExponential(2)}, same_sense ${sense > 0 ? 'T' : 'F'})`, { face: fid });
+      }
     } else if (loops.length >= 2) {
       // Drehfläche (Torus, SURFACE_OF_REVOLUTION) mit zwei Rändern konstanten Drehwinkels u (Band
       // um die Achse, z.B. Kanal-Bogen): von jedem Rand aus muss die Fläche in u-Richtung zum
@@ -475,6 +643,8 @@ export function checkStepStrict(text, opts = {}) {
       for (const e of es) { const o = eOwner.get(e); if (o === undefined) eOwner.set(e, sid); else if (o !== sid) flag('shared-topology', `EDGE_CURVE #${e} in den Schalen #${o} und #${sid}`); }
     }
   }
+  // Volumen je Schale (für Tests einsehbar): { shell, V, thick }
+  const volumes = [];
   // shell-volume: orientiertes Volumen je Schale (Divergenzsatz, V = ⅓ Σ_F ∫ (x−o)·n_eff dA). Mit a
   // beliebig: ∫(x−o)·n dA = (a−o)·∫n dA + ∫(x−a)·n dA; ∫ n_eff dA = ½ ∮ x × dx über die Ränder wie
   // orientiert (Fläche links). (x−a)·n: Ebene/Kegel mit a = Ebenenpunkt/Spitze → 0; Zylinder (a auf der
@@ -506,6 +676,39 @@ export function checkStepStrict(text, opts = {}) {
       for (const L of loops) { const P = L.vpts; for (let i = 0; i < P.length; i++) va = add(va, cross(sub(P[i], o), sub(P[(i + 1) % P.length], o))); }
       va = mul(va, 0.5);
       if (surf.kind === 'plane') return dot(sub(surf.ax.o, o), va);
+      if (surf.kind === 'bspline_surface' && surf.uv) {
+        // Fluss ∫(x−o)·n dA durch eine B-Spline-Fläche: der Rand der Fläche liegt im
+        // Parameterraum (u,v) als Polygon vor (Randkurve → (u,v)-Parameter je Punkt).
+        // Green im Parameterraum: ∫∫_D F du dv = ∮_∂D B dv mit F = (S−o)·(Su×Sv) und
+        // B(u,v) = ∫_{u0}^{u} F(u',v) du'.  Die Fläche des Parameterpolygons (CCW > 0)
+        // gibt die Orientierung von D; × same_sense für die effektive Normale.
+        const poly = [];
+        for (const L of loops) {
+          const P = (L.pts && L.pts.length >= 3) ? L.pts : (L.vpts || []);
+          for (const q of P) { const t = surf.uv(q); if (!t) return NaN; poly.push(t); }
+        }
+        if (poly.length < 3) return NaN;
+        while (poly.length > 3 && Math.abs(poly[0][0] - poly[poly.length - 1][0]) < 1e-12 && Math.abs(poly[0][1] - poly[poly.length - 1][1]) < 1e-12) poly.pop();
+        const F = (u, v) => { const s = surf.at(u, v); return dot(sub(s, o), cross(surf.su(u, v), surf.sv(u, v))); };
+        const B = (u, v) => {
+          const hi = Math.min(Math.max(u, surf.u0), surf.u1);
+          const brk = [surf.u0, ...surf.iu.filter((k) => k > surf.u0 + 1e-12 && k < hi - 1e-12), hi];
+          let s = 0;
+          for (let i = 0; i + 1 < brk.length; i++) {
+            const a = brk[i], b = brk[i + 1], m = 0.5 * (a + b), h = 0.5 * (b - a);
+            for (const [x, w] of GAUSS8) s += w * h * F(m + h * x, v);
+          }
+          return s;
+        };
+        let L = 0, A2 = 0;
+        for (let i = 0; i < poly.length; i++) {
+          const a = poly[i], b = poly[(i + 1) % poly.length];
+          L += 0.5 * (B(a[0], a[1]) + B(b[0], b[1])) * (b[1] - a[1]);
+          A2 += a[0] * b[1] - b[0] * a[1];
+        }
+        const sgn = A2 >= 0 ? 1 : -1;              // Parameterpolygon CCW → D positiv orientiert
+        return (fi.sense ?? 1) * sgn * L;
+      }
       if (surf.kind === 'cone') {
         const ta = Math.tan(surf.al);
         if (!(Math.abs(ta) > 1e-12)) return NaN;
@@ -593,6 +796,7 @@ export function checkStepStrict(text, opts = {}) {
       if (!wantPositive) { flag('shell-volume', `#${bid}: ${what} #${sid} nicht als ORIENTED_CLOSED_SHELL(.F.) referenziert`); return; }
       const r = shellVolume(sid);
       if (!r) { stats.volumeSkipped++; return; }
+      volumes.push({ shell: sid, V: r.V, thick: r.thick });
       if (r.thick < DEGEN) flag('shell-volume', `#${bid}: ${what} #${sid} ohne Volumen (V = ${r.V.toExponential(3)} mm³, Blech/Finne)`);
       else if (!(r.V > 0)) flag('shell-volume', `#${bid}: ${what} #${sid} umschließt V = ${r.V.toExponential(3)} mm³ (innen-außen vertauscht)`);
     };
@@ -689,7 +893,7 @@ export function checkStepStrict(text, opts = {}) {
       if (roots.size > 1) flag('shell-connected', `#${sid} (${se.type}): Schale zerfällt in ${roots.size} unverbundene Teile`);
     }
   }
-  return { violations, stats };
+  return { violations, stats, volumes };
 }
 
 // ---- CLI

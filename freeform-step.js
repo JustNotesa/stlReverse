@@ -17,6 +17,10 @@
 //   faces    : [{ surf, sameSense, loops: [{ outer, uses: [{ edge, fwd }] }] }]
 //   surf     : {type:'plane',o,n} | {type:'cylinder',o,a,R} | {type:'cone',apex,a,alpha,h0?}
 //             | {type:'sphere',c,R,axis?} | {type:'torus',c,a,Rm,r}
+//             | {type:'bspline_surface',du,dv,ctrl,knotsU,multsU,knotsV,multsV}
+//               B_SPLINE_SURFACE_WITH_KNOTS (Polynom, beidseitig geklemmt): ctrl[i][j] mit
+//               i = 0…nu−1 (u-Richtung), j = 0…nv−1 (v-Richtung); Knotenwerte aufsteigend,
+//               Vielfachheiten je Knoten (Summe je Richtung = nu+du+1 bzw. nv+dv+1).
 //   curve    : {type:'line',p,d} | {type:'circle',c,a,R,x}
 //             | {type:'bspline',degree,ctrl,knots,mults}
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +221,18 @@ export function writeFreeformStep(brep, opts = {}) {
       surfId = id++;
       entities.push(`#${surfId}=TOROIDAL_SURFACE('',#${placId},${toStep(s.Rm)},${toStep(s.r)});`);
       bump(surfaceCounts, 'TOROIDAL_SURFACE');
+    } else if (s.type === 'bspline_surface') {
+      // B_SPLINE_SURFACE_WITH_KNOTS: ctrl[i][j] (i = u-Index, j = v-Index) wie in
+      // ISO 10303-42 control_points_list; Polynom, beidseitig geklemmt.
+      const rows = (s.ctrl || []).map((row) => row.map((p) => addPoint(p)));
+      const list = rows.map((row) => `(${row.map((c) => `#${c}`).join(',')})`).join(',');
+      const mu = (s.multsU || []).join(',');
+      const mv = (s.multsV || []).join(',');
+      const ku = (s.knotsU || []).map(toStep).join(',');
+      const kv = (s.knotsV || []).map(toStep).join(',');
+      surfId = id++;
+      entities.push(`#${surfId}=B_SPLINE_SURFACE_WITH_KNOTS('',${s.du ?? 3},${s.dv ?? 3},(${list}),.UNSPECIFIED.,.F.,.F.,.F.,(${mu}),(${mv}),(${ku}),(${kv}),.UNSPECIFIED.);`);
+      bump(surfaceCounts, 'B_SPLINE_SURFACE_WITH_KNOTS');
     } else {
       const n = norm3(s.n || [0, 0, 1]);
       const placId = addAxis2(s.o, n, refDir(n, s.x));
