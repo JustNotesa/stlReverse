@@ -22,6 +22,8 @@
   --warn:#8a5600; --warn-soft:#fdf3e1;
   --err:#b42f2f; --err-soft:#fbe9e9;
   --viewer-frame:#d9dee6; --viewer-bg:#f2f4f8;     /* Canvas-Hintergrund bleibt in beiden Modi hell */
+  /* Schiene des Schalters im Zustand "aus" (WCAG 1.4.11: mind. 3:1 gegen --surface #ffffff → 3.90:1) */
+  --switch-off:#78828f;
   --shadow: 0 1px 2px rgba(16,24,40,.06);
   --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent);
   /* Merkmalsfarben: werden zur Laufzeit aus feature-colors.js gesetzt; Fallbacks: */
@@ -34,6 +36,8 @@
     --accent:#6e9cff; --on-accent:#0b1220; --accent-soft:#1c2a45;
     --ok:#4cc38a; --ok-soft:#15302a; --warn:#e0a84a; --warn-soft:#33281a; --err:#f07171; --err-soft:#3a1d1f;
     --viewer-frame:#2e3846; --shadow:none;
+    /* Schiene "aus" im Dunkelmodus (mind. 3:1 gegen --surface #1a2028 → 4.02:1) */
+    --switch-off:#6f7f95;
   }
 }
 [hidden]{display:none !important}
@@ -90,11 +94,14 @@ body > input[type="file"]:not(#file-input) { display: none !important; }
 .tag--beta { background: var(--warn-soft); color: var(--warn); }
 
 /* --- 4. Seitencontainer und Raster --------------------------------------- */
+/* Die Flächenvorlage folgt dem Zustand: leere Zeilen erzeugen sonst allein
+   durch den Zeilenabstand eine sichtbare Lücke (z. B. die Zeile "start"
+   oberhalb der Fehlerkarte). */
 main.layout {
   display: grid; gap: var(--gap); row-gap: var(--gap); grid-auto-rows: auto;
   max-width: 1440px; margin: 0 auto; padding: var(--gap);
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "start" "verdict" "options" "compare" "expert";
+  grid-template-areas: "verdict" "options" "compare" "expert";
 }
 #start-view    { grid-area: start; }
 #verdict-card  { grid-area: verdict; }
@@ -102,12 +109,31 @@ main.layout {
 #compare-panel { grid-area: compare; }
 #expert-panel  { grid-area: expert; }
 
+/* Leerzustand: nur Startbildschirm und Optionen belegen Zeilen. */
+body[data-state="empty"] main.layout {
+  grid-template-areas: "start" "options";
+}
+/* Inspect: Verdikt und Optionen sind ausgeblendet – Vergleich und
+   Expertenansicht stehen allein und über die volle Breite. */
+body[data-state="inspect"] main.layout {
+  grid-template-areas: "compare" "expert";
+}
+
 @media (min-width: 1060px) {
   main.layout {
     grid-template-columns: minmax(0, 1fr) 340px;
-    grid-template-areas: "start options" "verdict options" "compare options" "expert options";
+    grid-template-areas: "verdict options" "compare options" "expert options";
   }
   #options-panel { position: sticky; top: 104px; align-self: start; }
+
+  body[data-state="empty"] main.layout {
+    grid-template-areas: "start options";
+  }
+  /* Eine einzige Spalte über die volle Breite (siehe auch #compare-panel unten). */
+  body[data-state="inspect"] main.layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "compare" "expert";
+  }
 }
 
 /* --- 5. Kopfzeile -------------------------------------------------------- */
@@ -122,11 +148,13 @@ main.layout {
 
 .file-chip {
   display: flex; align-items: baseline; gap: 8px;
-  min-width: 0; max-width: 46ch; padding: 4px 10px;
+  /* Nicht auf "fisc…" zusammenschrumpfen: mindestens 16 Zeichen breit,
+     aber höchstens so breit wie der Kopfbereich. */
+  flex: 0 1 auto; min-width: min(16ch, 100%); max-width: 46ch; padding: 4px 10px;
   border-radius: 999px; background: var(--surface-2);
 }
 .file-chip__name {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  min-width: 8ch; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-weight: 600;
 }
 .file-chip__meta {
@@ -134,6 +162,15 @@ main.layout {
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* Schmale Fenster: erst die Metadaten ausblenden, damit der Dateiname Platz hat. */
+@media (max-width: 700px) {
+  .file-chip__meta { display: none; }
+}
+/* Sehr schmale Fenster: nur das Logo, der Markenname weicht. */
+@media (max-width: 520px) {
+  .brand span { display: none; }
+}
 
 /* --- 6. Statuszeile ------------------------------------------------------ */
 .statusbar {
@@ -319,9 +356,11 @@ details.formats > summary {
 details.formats > summary::-webkit-details-marker { display: none; }
 details.formats > summary:hover { border-color: var(--accent); }
 details.formats { position: relative; }
-/* Das Menü liegt als Overlay über der Kachel – es schiebt sie nicht nach unten. */
+/* Das Menü liegt als Overlay über der Kachel – es schiebt sie nicht nach unten.
+   z-index 5: bewusst unter dem klebenden Kopf (20) und der Statuszeile (19),
+   damit es beim Scrollen dahinter verschwindet. */
 .formats__menu {
-  position: absolute; top: calc(100% + 4px); right: 0; z-index: 25;
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 5;
   display: grid; gap: 2px; padding: 4px;
   min-width: 100%; width: max-content; max-width: min(340px, 90vw);
   background: var(--surface); border: 1px solid var(--border);
@@ -431,7 +470,10 @@ details.opt-adv > .opt:first-of-type { border-top: 0; }
 input[type="checkbox"].switch {
   appearance: none; -webkit-appearance: none; flex: none;
   width: 36px; height: 20px; margin: 2px 0 0; border: 0;
-  border-radius: 999px; background: var(--border);
+  /* Schiene "aus": eigenes Token, damit sie sich vom Kartenhintergrund abhebt
+     (WCAG 1.4.11, mind. 3:1). Der weiße Knopf liegt mit 3.90:1 (hell) bzw.
+     4.08:1 (dunkel) deutlich auf der Schiene. */
+  border-radius: 999px; background: var(--switch-off);
   position: relative; cursor: pointer; transition: background .15s ease;
 }
 input[type="checkbox"].switch::before {
@@ -454,6 +496,8 @@ input[type="checkbox"].switch:disabled { opacity: .45; cursor: not-allowed; }
   display: inline-flex; border: 1px solid var(--border);
   border-radius: var(--radius-s); overflow: hidden;
 }
+/* Der Ansichtsumschalter darf mit [hidden] verschwinden. */
+.seg[hidden] { display: none; }
 .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .seg label { padding: 6px 12px; font-size: .9rem; font-weight: 600; cursor: pointer; }
 .seg input:checked + label { background: var(--accent); color: var(--on-accent); }
@@ -493,9 +537,13 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
 .viewer-3d[data-state="loaded"]::after,
 .viewer-3d[data-state="imported"]::after { content: ''; }
 
-/* Platzhalter während der Analyse */
+/* Platzhalter während der Analyse: das alte Modell wird ausgeblendet,
+   der Hinweis liegt deckend darüber (opaker Viewer-Hintergrund, Text #5a6678 –
+   der Viewer bleibt in beiden Modi hell). */
+body[data-state="running"] .compare .viewer-3d > * { visibility: hidden; }
 body[data-state="running"] .compare .viewer-3d::after {
   content: 'wird analysiert …'; animation: pulse 1.4s ease-in-out infinite;
+  background: var(--viewer-bg); z-index: 1;
 }
 @keyframes pulse { from { opacity: .45; } to { opacity: 1; } }
 
@@ -615,6 +663,9 @@ body[data-state="inspect"] #verdict-card,
 body[data-state="inspect"] #options-panel,
 body[data-state="inspect"] #expert-panel,
 body[data-state="running"] #expert-panel { display: none; }
+/* Im Inspect-Zustand liegt der Vergleich über die volle Breite; das
+   Ein-Spalten-Template in Abschnitt 4 macht grid-column: 1 / -1 zur
+   Absicherung – es entsteht keine doppelte Wirkung. */
 body[data-state="inspect"] #compare-panel { grid-column: 1 / -1; }
 
 /* Im Fehlerfall gibt es keine Kennzahlen, keine Fakten und keine Aktionen. */
@@ -633,9 +684,9 @@ select:focus-visible,
 summary:focus-visible,
 [role="tab"]:focus-visible,
 label.btn:focus-visible { outline: none; box-shadow: var(--focus); }
-#file-input:focus-visible + label,
-#drop-zone:focus-within label.btn--primary,
-body:has(#file-input:focus-visible) label[for="file-input"] {
+/* Die Dateiwahl ist ein echter <button> – er wird bereits über
+   "button:focus-visible" / ".btn:focus-visible" abgedeckt. */
+#drop-zone:focus-within .btn--primary {
   outline: none; box-shadow: var(--focus);
 }
 
