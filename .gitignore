@@ -21,3 +21,6 @@ web-ext-artifacts/
 
 # Test-Exporte für den CAD-Import-Check (CST/Fusion)
 cst-test/
+
+# Freiform-Testausgaben
+tests/freeform/out/

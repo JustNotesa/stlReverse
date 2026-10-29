@@ -14,11 +14,13 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=4';
 // Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
-import { findArcBands, validateArcBands, applyArcBands, buildArcPlans } from './profile-arcs.js?v=3';
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop } from './profile-arcs.js?v=4';
 // Gravur (extrusion-bands.js): Schriftzüge (Wand-Streifen) → B-Spline-Kurven
 import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=1';
 // Gravur (extrusion-plans.js): Pläne der Extrusionsbänder (SURFACE_OF_LINEAR_EXTRUSION) + Rand-Aufweitung
 import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=1';
+// [freiform1] Einhängepunkt: Freiform-Pfad (fit-basierte Segmentierung → eigenes B-Rep → STEP)
+import { chooseFreeform } from './freeform-brep.js?v=1';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
@@ -396,6 +398,13 @@ export function findBendGroups(normalGroups) {
 // ============================================================================
 
 export function buildVolumeStepBrepV2(analysis) {
+  // [freiform1] Einhängepunkt: Freiform-Pfad versuchen (Schalter analysis.fitSegmentation:
+  // 'auto' | true | false). Der bisherige Weg läuft als Rückfall ( __ffLegacy ).
+  // Vorerst nur auf Wunsch (Standard aus): an echten Teilen wie dem Skoda-Haken scheitert der Versuch noch
+  // und kostet nur Zeit (+8 s); Etappe 2 macht ihn dort nützlich.
+  if (analysis && !analysis.__ffLegacy && (analysis.fitSegmentation === true || analysis.fitSegmentation === 'auto')) {
+    return chooseFreeform(analysis, buildVolumeStepBrepV2({ ...analysis, __ffLegacy: true }));
+  }
   // V2-Exporter: Nutzt echte Boundary-Loops aus normalGroups (wie Panel 3).
   // Jede normalGroup wird zu einer oder mehreren ADVANCED_FACE mit echten Polygon-Grenzen.
   const normalGroups = analysis?.normalGroups;
