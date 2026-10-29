@@ -355,6 +355,8 @@ export function initFullscreen() {
   // Escape schließt das Overlay — nur solange es offen ist.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || !overlayOpen()) return;
+    // Ein offenes Menü (details[open], z. B. „Weitere Formate“) schließt zuerst — das Overlay bleibt.
+    if (document.querySelector('details[open]')) return;
     setOverlay(false);
   });
 }
