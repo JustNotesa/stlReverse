@@ -191,11 +191,26 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Gravur als Extrusion (2026-10-29, `wt/gravur`)** — Schrift-/Logo-Wände zwischen zwei parallelen Ebenen
+  (extrusion-bands.js) → SURFACE_OF_LINEAR_EXTRUSION über kubischer B-Spline durch die Netzpunkte (spline-fit.js,
+  extrusion-plans.js); Deck-/Bodenfläche teilen dieselben Spline-Kanten; Prüfung/Anwenden über validateArcBands/applyArcBands.
+  Echte Kreise bleiben Zylinder, geschlossene Konturen in 3 Stücke, Ecken-Wächter. Schalter `analysis.extrusionBands`
+  (Standard an). NozzleBox 3537 → 1621 Flächen (AUS 3541 → 1625), OCP valid, BOP unverändert; Kabelhalter unverändert,
+  Skoda 18377 → 18369. step-strict prüft Extrusionen. Testkörper: `node tests/gravur-regression.mjs` (nicht in npm test).
+  Offen: CST-Test (B-Spline-Kanten neu dort), VCD-Logo Kabelhalter (Fächer-Wände, oben ≠ unten verschoben),
+  Unit-Test Ecken-Wächter, OCP-Volumen bei Spline-Wänden leicht zu groß (Tessellierung stimmt).
+- [x] **Freiform Etappe 1 (2026-10-29, `wt/freiform1`)** — neue Module freeform-*.js: fit-basierte Segmentierung
+  (Ebene/Zylinder/Kegel/Kugel/Torus), Snap (tangentiale Verrundungen, Rollkugel, Eckkugeln), Topologie, Ecken per LM,
+  Kanten LINE/CIRCLE oder B-Spline exakt auf beiden Flächen, SPHERICAL_/TOROIDAL_SURFACE. Testkörper (Rundquader r1,
+  Platte mit Torus-Loch, Halbkugel auf Zylinder, je gedreht) exakt ohne Facetten. Schalter `analysis.fitSegmentation`
+  (true/'auto'), **Standard aus**: am Skoda-Haken scheitert der Weg noch (98 % Facetten, +8 s). Tests: tests/freeform/*.test.mjs
+  (noch nicht in npm test). Etappe 2: Rückfall-Streifen als B-Spline-Fläche statt Facetten, Rollkugel-Löser über
+  Verrundungsketten, Ecken mit ≥ 4 Flächen (~800 am Skoda); Kegel-Weg ungetestet.
 - [x] **NozzleBox (Printables, lokal `samples/`) 8893 → 3537 Flächen (2026-10-29, `wt/nozzlebox`)** — (1) Pinch: Ränder,
   die sich in einer Ecke berühren, zerlegten die ganze ebene Fläche in Einzeldreiecke (Ablageboden 2764 Flächen, dazu
   76 Halbring-Wände facettiert) → splitAtPinches teilt nur den Stern um den Berührpunkt ab; (2) Bohrung mit unsauberen
   Rändern (D-Loch, boreFailWhy 'rims') darf in den Bogen-Pfad. Härtetest z1/z2, expect.maxFaces. Golden: dino 3897 → 3861.
-  Rest: Schrift-Gravur (~2100 Flächen, braucht B-Spline-Extrusion), ~500 Ösen-Facetten, Scharnier-Mantel (63).
+  Rest: Schrift-Gravur (→ erledigt, siehe Gravur), ~500 Ösen-Facetten, Scharnier-Mantel (63).
 - [x] **Release 0.2.2 (2026-10-28)** — erstmals per CLI signiert (`.dev/amo-sign.sh`, web-ext sign unlisted, Schlüssel aus ClaudeFirefox/AMO-Konto.env), GitHub-Release v0.2.2 mit signierter xpi, updates.json ergänzt.
 - [x] **Splitter-Flächen auf Profil-Bögen (2026-10-28, `wt/splitter`)** — findArcBands nahm breite Ebene + erste
   Bogen-Facetten als Schein-Band (Fit-Radius ~200 mm, Toleranz > Pfeilhöhe) → 0,05-mm-Streifen quer über Wand und Fase.
