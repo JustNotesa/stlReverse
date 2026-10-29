@@ -39,7 +39,7 @@ import { parseStl } from '../../analysis-core.js';
 import { indexMesh, segmentByFit } from '../../freeform-segment.js';
 import { buildTopology } from '../../freeform-topology.js';
 import { snapSurfaces } from '../../freeform-snap.js';
-import { sdist, normalAt, dot, cross, len, sub, add, mul } from '../../freeform-geom.js';
+import { sdist, normalAt, dot, cross, len, sub, add, mul, norm } from '../../freeform-geom.js';
 
 let failed = 0;
 const cases = [];
@@ -430,6 +430,441 @@ test('Snap ist deterministisch', () => {
       assert.deepEqual(s, b.surfs.get(id), `${b.file}: Region ${id} unterschiedlich`);
     }
     assert.deepEqual(again.log, b.log, `${b.file}: log unterschiedlich`);
+  }
+});
+
+// ── Rollkugel: synthetische Körper ──────────────────────────────────────────
+// Eine Verrundung vom Radius r ist eine Kugel, deren Mittelpunkt auf der
+// SPINE läuft = offset(S1,s1·r) ∩ offset(S2,s2·r). Geprüft wird, dass die
+// Verrundung nach dem Snap EXAKT tangential an ihren Stützen liegt.
+
+// Einheitsrichtung senkrecht zu a
+function perpUnit(a) {
+  const t = Math.abs(a[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  return norm(sub(t, mul(a, dot(t, a))));
+}
+
+// Rohrrahmen eines Torus bei Winkel phi: w = radial, q = Rohrmittelpunkt
+function tubeFrame(torus, phi) {
+  const e1 = perpUnit(torus.a);
+  const e2 = norm(cross(e1, torus.a));
+  const w = add(mul(e1, Math.cos(phi)), mul(e2, Math.sin(phi)));
+  return { w, q: add(torus.c, mul(w, torus.Rm)) };
+}
+
+// Punkt auf der Torusfläche, dessen Normale in Richtung dir zeigt
+function tubePoint(torus, phi, dir) {
+  const { w, q } = tubeFrame(torus, phi);
+  const dw = dot(dir, w);
+  const da = dot(dir, torus.a);
+  const n = Math.hypot(dw, da);
+  if (!(n > 1e-9)) return null;
+  return add(q, mul(add(mul(w, dw / n), mul(torus.a, da / n)), torus.r));
+}
+
+// Punktgitter je Fläche
+function planeGrid(pl, s = 20) {
+  const e1 = perpUnit(pl.n);
+  const e2 = norm(cross(e1, pl.n));
+  return (u, v) => add(pl.o, add(mul(e1, (u - 0.5) * s), mul(e2, (v - 0.5) * s)));
+}
+function cylGrid(cyl, len) {
+  const e1 = perpUnit(cyl.a);
+  const e2 = norm(cross(e1, cyl.a));
+  return (u, v) => {
+    const th = 2 * Math.PI * u;
+    return add(add(cyl.o, mul(cyl.a, (v - 0.5) * len)),
+      add(mul(e1, cyl.R * Math.cos(th)), mul(e2, cyl.R * Math.sin(th))));
+  };
+}
+function torusGrid(torus) {
+  return (u, v) => {
+    const phi = 2 * Math.PI * u;
+    const th = 2 * Math.PI * v;
+    const { w, q } = tubeFrame(torus, phi);
+    return add(q, add(mul(w, torus.r * Math.cos(th)), mul(torus.a, torus.r * Math.sin(th))));
+  };
+}
+function sphereGrid(sph) {
+  return (u, v) => {
+    const ph = 2 * Math.PI * u;
+    const th = Math.PI * v;
+    return add(sph.c, mul([Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)], sph.R));
+  };
+}
+
+// Netz + Regionen: je Region ein Punktgitter; d.extra liefert zusätzliche
+// Netzpunkte für die Ketten (d.extra → { name: Punkte })
+function buildBody(defs) {
+  const pts = [];
+  const tris = [];
+  const regions = [];
+  const mark = {};
+  for (const d of defs) {
+    const nu = d.nu;
+    const nv = d.nv;
+    const vo = pts.length;
+    const to = tris.length;
+    for (let i = 0; i < nu; i++) {
+      for (let j = 0; j < nv; j++) pts.push(d.fn(i / (nu - 1), j / (nv - 1)));
+    }
+    const idx = (i, j) => vo + i * nv + j;
+    for (let i = 0; i < nu - 1; i++) {
+      for (let j = 0; j < nv - 1; j++) {
+        tris.push([idx(i, j), idx(i + 1, j), idx(i + 1, j + 1)]);
+        tris.push([idx(i, j), idx(i + 1, j + 1), idx(i, j + 1)]);
+      }
+    }
+    regions.push({
+      id: d.id,
+      kind: 'analytic',
+      surf: d.surf,
+      tris: Array.from({ length: (nu - 1) * (nv - 1) * 2 }, (_, k) => to + k),
+      area: d.area || 1,
+    });
+    mark[d.name] = { vo, idx };
+  }
+  for (const d of defs) {
+    if (!d.extra) continue;
+    const groups = d.extra();
+    for (const key of Object.keys(groups)) {
+      const list = groups[key];
+      const vo = pts.length;
+      for (const p of list) pts.push(p);
+      mark[d.name][key] = { vo, n: list.length };
+    }
+  }
+  const mesh = {
+    P: Float64Array.from(pts.flat()),
+    tri: Int32Array.from(tris.flat()),
+    nV: pts.length,
+    T: tris.length,
+  };
+  return { mesh, regions, mark };
+}
+
+// Kettenpunkte (Vertex-Indizes) einer Zusatzgruppe
+function groupIdx(mark, name, key) {
+  const g = mark[name][key];
+  return Array.from({ length: g.n }, (_, i) => g.vo + i);
+}
+
+// ── Fall 1: Torusverrundung zwischen der Ebene z=0 und einer Kugelwand ────
+// Die Wand ist eine Kugel (Mittelpunkt (0,0,−300), R=301) und trifft die Ebene
+// im Kreis mit Radius √601. Die Verrundung ist ein Torus mit Kleinradius 1:
+// seine SPINE ist der Kreis Radius √603 in der Ebene z=1 auf der Kugel mit
+// R=302. Mit Rauschen (1e-3) in c/a/Rm.
+function syntheticTorusFillet() {
+  const PLANE = { type: 'plane', o: [0, 0, 0], n: [0, 0, 1] };
+  const WALL = { type: 'sphere', c: [0, 0, -300], R: 301 };
+  const r = 1;
+  const Rm = Math.sqrt(603);
+  const torus = {
+    type: 'torus',
+    c: [1.5e-3, -2e-3, 1 + 1e-3],
+    a: norm([1.2e-3, 0.5e-3, 1]),
+    Rm: Rm + 1.5e-3,
+    r,
+  };
+  const N = 24;
+  const defs = [
+    { name: 'plane', id: 1, nu: 6, nv: 6, surf: PLANE, fn: planeGrid(PLANE, 60) },
+    { name: 'torus', id: 2, nu: N, nv: 9, surf: torus, fn: torusGrid(torus) },
+    {
+      name: 'wall',
+      id: 3,
+      nu: N,
+      nv: 5,
+      surf: WALL,
+      fn: (u, v) => {
+        const ph = 2 * Math.PI * u;
+        const th = -0.04 + 0.08 * v; // Band um den höchsten Punkt der Kugel
+        return add(WALL.c, mul([Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)], WALL.R));
+      },
+    },
+  ];
+  defs[1].extra = () => {
+    const ebene = [];
+    const wand = [];
+    for (let i = 0; i < N; i++) {
+      const phi = (2 * Math.PI * i) / N;
+      ebene.push(tubePoint(torus, phi, [0, 0, -1]));
+      const { q } = tubeFrame(torus, phi);
+      wand.push(tubePoint(torus, phi, norm(sub(WALL.c, q))));
+    }
+    return { ebene, wand };
+  };
+  const { mesh, regions, mark } = buildBody(defs);
+  const chains = [
+    { L: 2, R: 1, mv: groupIdx(mark, 'torus', 'ebene') },
+    { L: 2, R: 3, mv: groupIdx(mark, 'torus', 'wand') },
+  ];
+  return { mesh, regions, chains, PLANE, WALL };
+}
+
+// ── Fall 2: Zylinderverrundung zwischen zwei nicht parallelen Ebenen ───────
+// Die Verrundung sitzt in der Kehle der Ebenen z=0 und x=0: ihre Achse ist
+// die Gerade x=1, z=1 (Richtung y), R=1. Mit Rauschen in o/a/R.
+function syntheticCylinderFillet() {
+  const P1 = { type: 'plane', o: [0, 0, 0], n: [0, 0, 1] };
+  const P2 = { type: 'plane', o: [0, 0, 0], n: [1, 0, 0] };
+  const cyl = {
+    type: 'cylinder',
+    o: [1.001, 1, 1.002],
+    a: norm([0.0008, 1, 0.0006]),
+    R: 1.0004,
+  };
+  const N = 24;
+  const defs = [
+    { name: 'p1', id: 1, nu: 6, nv: 6, surf: P1, fn: planeGrid(P1, 60) },
+    { name: 'p2', id: 2, nu: 6, nv: 6, surf: P2, fn: planeGrid(P2, 60) },
+    { name: 'cyl', id: 3, nu: N, nv: 5, surf: cyl, fn: cylGrid(cyl, 4) },
+  ];
+  defs[2].extra = () => {
+    // Berührlinien: ein Zylinder berührt eine Ebene längs einer Erzeugenden
+    // (die radiale Richtung zeigt zur Ebene)
+    const radial = (dir) => norm(sub(dir, mul(cyl.a, dot(dir, cyl.a))));
+    const unten = [];
+    const seite = [];
+    for (let i = 0; i < N; i++) {
+      const t = (i / (N - 1) - 0.5) * 3;
+      unten.push(add(add(cyl.o, mul(cyl.a, t)), mul(radial([0, 0, -1]), cyl.R)));
+      seite.push(add(add(cyl.o, mul(cyl.a, t)), mul(radial([-1, 0, 0]), cyl.R)));
+    }
+    return { unten, seite };
+  };
+  const { mesh, regions, mark } = buildBody(defs);
+  const chains = [
+    { L: 3, R: 1, mv: groupIdx(mark, 'cyl', 'unten') },
+    { L: 3, R: 2, mv: groupIdx(mark, 'cyl', 'seite') },
+  ];
+  return { mesh, regions, chains, P1, P2 };
+}
+
+// ── Fall 3: Eckkugel zwischen drei Ebenen und drei Zylinderverrundungen ────
+// Die drei Koordinatenebenen x=0, y=0, z=0 mit drei Kantenverrundungen
+// (Zylinder r=1, Achsen x=y, x=z, y=z) und der Eckkugel r=1 in der Ecke:
+// ihr Mittelpunkt liegt auf allen drei Achsen → (1,1,1).
+function syntheticCornerBall() {
+  const PX = { type: 'plane', o: [0, 0, 0], n: [1, 0, 0] };
+  const PY = { type: 'plane', o: [0, 0, 0], n: [0, 1, 0] };
+  const PZ = { type: 'plane', o: [0, 0, 0], n: [0, 0, 1] };
+  const CZ = { type: 'cylinder', o: [1, 1, -1], a: [0, 0, 1], R: 1 };
+  const CY = { type: 'cylinder', o: [1, -1, 1], a: [0, 1, 0], R: 1 };
+  const CX = { type: 'cylinder', o: [-1, 1, 1], a: [1, 0, 0], R: 1 };
+  const ball = { type: 'sphere', c: [1.0012, 0.9994, 1.0007], R: 1 };
+  const N = 20;
+  const defs = [
+    { name: 'px', id: 1, nu: 5, nv: 5, surf: PX, fn: planeGrid(PX, 8) },
+    { name: 'py', id: 2, nu: 5, nv: 5, surf: PY, fn: planeGrid(PY, 8) },
+    { name: 'pz', id: 3, nu: 5, nv: 5, surf: PZ, fn: planeGrid(PZ, 8) },
+    { name: 'cz', id: 4, nu: N, nv: 5, surf: CZ, fn: cylGrid(CZ, 4) },
+    { name: 'cy', id: 5, nu: N, nv: 5, surf: CY, fn: cylGrid(CY, 4) },
+    { name: 'cx', id: 6, nu: N, nv: 5, surf: CX, fn: cylGrid(CX, 4) },
+    { name: 'ball', id: 7, nu: N, nv: 11, surf: ball, fn: sphereGrid(ball) },
+  ];
+  // Berührlinien/-kreise (Kettenpunkte)
+  const linie = (a, b, c) => {
+    const out = [];
+    for (let i = 0; i < N; i++) out.push(add(a, mul(b, (i / (N - 1) - 0.5) * c)));
+    return out;
+  };
+  const kreis = (c, e1, e2, R) => {
+    const out = [];
+    for (let i = 0; i < N; i++) {
+      const th = (2 * Math.PI * i) / N;
+      out.push(add(c, add(mul(e1, R * Math.cos(th)), mul(e2, R * Math.sin(th)))));
+    }
+    return out;
+  };
+  defs[3].extra = () => ({
+    px: linie([0, 1, 0], [0, 0, 1], 3),   // Kante x=y ↔ Ebene x=0
+    py: linie([1, 0, 0], [0, 0, 1], 3),   // Kante x=y ↔ Ebene y=0
+  });
+  defs[4].extra = () => ({
+    px: linie([0, 0, 1], [0, 1, 0], 3),   // Kante x=z ↔ Ebene x=0
+    pz: linie([1, 0, 0], [0, 1, 0], 3),   // Kante x=z ↔ Ebene z=0
+  });
+  defs[5].extra = () => ({
+    py: linie([0, 0, 1], [1, 0, 0], 3),   // Kante y=z ↔ Ebene y=0
+    pz: linie([0, 1, 0], [1, 0, 0], 3),   // Kante y=z ↔ Ebene z=0
+  });
+  defs[6].extra = () => ({
+    cz: kreis([1, 1, 1], [1, 0, 0], [0, 1, 0], 1), // Kugel ↔ Kante x=y
+    cy: kreis([1, 1, 1], [1, 0, 0], [0, 0, 1], 1), // Kugel ↔ Kante x=z
+    cx: kreis([1, 1, 1], [0, 1, 0], [0, 0, 1], 1), // Kugel ↔ Kante y=z
+  });
+  const { mesh, regions, mark } = buildBody(defs);
+  const chains = [
+    { L: 4, R: 1, mv: groupIdx(mark, 'cz', 'px') },
+    { L: 4, R: 2, mv: groupIdx(mark, 'cz', 'py') },
+    { L: 5, R: 1, mv: groupIdx(mark, 'cy', 'px') },
+    { L: 5, R: 3, mv: groupIdx(mark, 'cy', 'pz') },
+    { L: 6, R: 2, mv: groupIdx(mark, 'cx', 'py') },
+    { L: 6, R: 3, mv: groupIdx(mark, 'cx', 'pz') },
+    { L: 7, R: 4, mv: groupIdx(mark, 'ball', 'cz') },
+    { L: 7, R: 5, mv: groupIdx(mark, 'ball', 'cy') },
+    { L: 7, R: 6, mv: groupIdx(mark, 'ball', 'cx') },
+  ];
+  return { mesh, regions, chains };
+}
+
+// ── Fall 4: Eckkugel zwischen Ebene, Kugelwand und Torusverrundung ─────────
+// Wie Fall 1 (Torus zwischen Ebene und Kugelwand), zusätzlich eine Kugel
+// r=1, deren Mittelpunkt auf dem Rohrkreis des Torus liegt: sie berührt die
+// Ebene, die Kugelwand und den Torus.
+function syntheticBallThreeSupports() {
+  const PLANE = { type: 'plane', o: [0, 0, 0], n: [0, 0, 1] };
+  const WALL = { type: 'sphere', c: [0, 0, -300], R: 301 };
+  const r = 1;
+  const Rm = Math.sqrt(603);
+  const torus = {
+    type: 'torus',
+    c: [1.2e-3, -1.5e-3, 1 + 0.8e-3],
+    a: norm([1e-3, 0.4e-3, 1]),
+    Rm: Rm + 1.2e-3,
+    r,
+  };
+  const ball = { type: 'sphere', c: [Rm + 1.5e-3, 0.8e-3, 1 - 1.1e-3], R: 1 };
+  const N = 24;
+  const defs = [
+    { name: 'plane', id: 1, nu: 6, nv: 6, surf: PLANE, fn: planeGrid(PLANE, 60) },
+    { name: 'torus', id: 2, nu: N, nv: 9, surf: torus, fn: torusGrid(torus) },
+    {
+      name: 'wall',
+      id: 3,
+      nu: N,
+      nv: 5,
+      surf: WALL,
+      fn: (u, v) => {
+        const ph = 2 * Math.PI * u;
+        const th = -0.04 + 0.08 * v;
+        return add(WALL.c, mul([Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)], WALL.R));
+      },
+    },
+    { name: 'ball', id: 4, nu: 16, nv: 11, surf: ball, fn: sphereGrid(ball) },
+  ];
+  defs[1].extra = () => {
+    const ebene = [];
+    const wand = [];
+    for (let i = 0; i < N; i++) {
+      const phi = (2 * Math.PI * i) / N;
+      ebene.push(tubePoint(torus, phi, [0, 0, -1]));
+      const { q } = tubeFrame(torus, phi);
+      wand.push(tubePoint(torus, phi, norm(sub(WALL.c, q))));
+    }
+    return { ebene, wand };
+  };
+  defs[3].extra = () => {
+    // Berührpunkt mit der Ebene, Berührkreis mit der Wand, Querschnitt am Torus
+    const ebene = [add(ball.c, [0, 0, -ball.R])];
+    const wand = [];
+    const u = norm(sub(ball.c, WALL.c));
+    const e1 = perpUnit(u);
+    const e2 = norm(cross(e1, u));
+    for (let i = 0; i < N; i++) {
+      const th = (2 * Math.PI * i) / N;
+      wand.push(add(WALL.c, add(mul(e1, WALL.R * Math.cos(th)), mul(e2, WALL.R * Math.sin(th)))));
+    }
+    const tor = [];
+    for (let i = 0; i < N; i++) {
+      const th = (2 * Math.PI * i) / N;
+      tor.push(add(ball.c, add(mul([1, 0, 0], ball.R * Math.cos(th)), mul([0, 0, 1], ball.R * Math.sin(th)))));
+    }
+    return { ebene, wand, tor };
+  };
+  const { mesh, regions, mark } = buildBody(defs);
+  const chains = [
+    { L: 2, R: 1, mv: groupIdx(mark, 'torus', 'ebene') },
+    { L: 2, R: 3, mv: groupIdx(mark, 'torus', 'wand') },
+    { L: 4, R: 1, mv: groupIdx(mark, 'ball', 'ebene') },
+    { L: 4, R: 3, mv: groupIdx(mark, 'ball', 'wand') },
+    { L: 4, R: 2, mv: groupIdx(mark, 'ball', 'tor') },
+  ];
+  return { mesh, regions, chains, PLANE, WALL };
+}
+
+// ── Prüfungen ────────────────────────────────────────────────────────────────
+
+// Rollkugel: Torus zwischen Ebene und Kugelwand exakt tangential
+test('Rollkugel: Torus zwischen Ebene und Kugelwand wird exakt tangential', () => {
+  const { mesh, regions, chains, PLANE, WALL } = syntheticTorusFillet();
+  const { surfs } = snapSurfaces({ mesh, regions, chains });
+  const t = surfs.get(2);
+  assert.ok(t, 'Torusregion fehlt in surfs');
+  assert.equal(t.type, 'torus');
+  assert.equal(t.r, 1, `Kleinradius ${t.r} statt 1`);
+  for (let i = 0; i < 50; i++) {
+    const phi = (2 * Math.PI * i) / 50;
+    // Berührkreis mit der Ebene
+    const pb = tubePoint(t, phi, [0, 0, -1]);
+    const dP = Math.abs(sdist(PLANE, pb));
+    assert.ok(dP <= 1e-9, `Ebene: |sdist| = ${dP.toExponential(3)} statt 0`);
+    const cP = Math.abs(dot(normalAt(t, pb), normalAt(PLANE, pb)));
+    assert.ok(1 - cP <= 1e-9, `Ebene: Normalen |cos| = ${cP}`);
+    // Berührkreis mit der Kugelwand
+    const { q } = tubeFrame(t, phi);
+    const ps = tubePoint(t, phi, norm(sub(WALL.c, q)));
+    const dW = Math.abs(sdist(WALL, ps));
+    assert.ok(dW <= 1e-9, `Wand: |sdist| = ${dW.toExponential(3)} statt 0`);
+    const cW = Math.abs(dot(normalAt(t, ps), normalAt(WALL, ps)));
+    assert.ok(1 - cW <= 1e-9, `Wand: Normalen |cos| = ${cW}`);
+  }
+});
+
+// Rollkugel: Zylinder zwischen zwei Ebenen exakt tangential
+test('Rollkugel: Zylinderverrundung zwischen zwei Ebenen bleibt exakt tangential', () => {
+  const { mesh, regions, chains, P1, P2 } = syntheticCylinderFillet();
+  const { surfs } = snapSurfaces({ mesh, regions, chains });
+  const c = surfs.get(3);
+  assert.ok(c, 'Zylinderregion fehlt in surfs');
+  assert.equal(c.type, 'cylinder');
+  for (const p of [P1, P2]) {
+    const an = Math.abs(dot(c.a, p.n));
+    assert.ok(an <= 1e-9, `Achse nicht parallel zur Ebene: |a·n| = ${an.toExponential(3)}`);
+    const d = Math.abs(Math.abs(sdist(p, c.o)) - c.R);
+    assert.ok(d <= 1e-9, `Abstand zur Ebene ${d.toExponential(3)} statt R = ${c.R}`);
+    // die Normalen an der Berührstelle sind parallel
+    const foot = add(c.o, mul(c.a, dot(sub(p.o, c.o), c.a)));
+    const q = sub(foot, mul(p.n, sdist(p, foot)));
+    const cs = Math.abs(dot(normalAt(c, q), normalAt(p, q)));
+    assert.ok(1 - cs <= 1e-9, `Normalen |cos| = ${cs}`);
+  }
+});
+
+// Rollkugel: Eckkugel zwischen drei Ebenen und drei Zylinderverrundungen
+test('Rollkugel: Eckkugel zwischen drei Ebenen und drei Zylinderverrundungen', () => {
+  const { mesh, regions, chains } = syntheticCornerBall();
+  const { surfs } = snapSurfaces({ mesh, regions, chains });
+  const s = surfs.get(7);
+  assert.ok(s, 'Kugelregion fehlt in surfs');
+  assert.equal(s.type, 'sphere');
+  const d = len(sub(s.c, [1, 1, 1]));
+  assert.ok(d <= 1e-9, `Mitte ${s.c.map((v) => v.toFixed(12))} statt (1,1,1) (Abstand ${d.toExponential(3)})`);
+  assert.equal(s.R, 1, `R = ${s.R} statt 1`);
+  // die Eckkugel liegt exakt auf den drei Achsen der Kantenverrundungen
+  for (const [cid, cidSurf] of byType(surfs, 'cylinder')) {
+    const dd = axisDist(s.c, cidSurf.o, cidSurf.a);
+    assert.ok(dd <= 1e-9, `Kugel: Abstand zur Achse ${cid} = ${dd.toExponential(3)}`);
+  }
+});
+
+// Rollkugel: Eckkugel zwischen Ebene, Kugelwand und Torusverrundung
+test('Rollkugel: Eckkugel zwischen Ebene, Kugelwand und Torusverrundung', () => {
+  const { mesh, regions, chains, PLANE, WALL } = syntheticBallThreeSupports();
+  const { surfs } = snapSurfaces({ mesh, regions, chains });
+  const b = surfs.get(4);
+  const t = surfs.get(2);
+  assert.ok(b && t, 'Regionen fehlen in surfs');
+  assert.equal(b.type, 'sphere');
+  assert.equal(t.type, 'torus');
+  // die Versatzflächen (SPINE der Verrundungen) — der Mittelpunkt liegt auf allen
+  const offPlane = { type: 'plane', o: [0, 0, 1], n: [0, 0, 1] };
+  const offWall = { type: 'sphere', c: [0, 0, -300], R: 302 };
+  const offTorus = { type: 'torus', c: t.c, a: t.a, Rm: t.Rm, r: 0 };
+  for (const [name, O] of [['Ebene', offPlane], ['Wand', offWall], ['Torus', offTorus]]) {
+    const d = Math.abs(sdist(O, b.c));
+    assert.ok(d <= 1e-10, `${name}: |sdist| = ${d.toExponential(3)} statt 0`);
   }
 });
 
