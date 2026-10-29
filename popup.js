@@ -1,10 +1,10 @@
 import { formatBytesDe, describeDetailLevel } from './utils.js?v=2';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=46';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=47';
 
-import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=31';
-import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=21';
-import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=4';
-import { initTabs, initViewToggle, initFullscreen, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=3';
+import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=32';
+import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=22';
+import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=5';
+import { initTabs, initViewToggle, initFullscreen, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=4';
 import { applyFeatureColorVars, buildFeatureLegend } from './feature-colors.js?v=1';
 import {
   setStatus, setExportEnabled,
