@@ -27,6 +27,18 @@
  *     kippen so nie (sonst passt das Region-Growing eine schiefe Ebene ein → Selbstdurchdringung)
  *   - Volumenänderung je Kollaps: mittlere Verschiebung der Fläche um a ≤ τ/10
  *   - keine Durchdringung: die neuen Dreiecke um b schneiden kein Dreieck der Umgebung (Raster)
+ *   - Spalten-Kollaps: Ring-Kanten einer Wand (Extrusion: Unterring + Oberring) werden nicht
+ *     einzeln, sondern als SPALTE kollabiert — alle parallelen Kanten einer Viereck-Kette
+ *     (coplanares Viereck ⇒ Kante gegenüber) wandern gemeinsam. Sonst dezimieren Ober- und
+ *     Unterring unabhängig: die Punkte stehen nicht mehr übereinander, die Wand zerfällt in
+ *     Fächer-Dreiecke und die Erkennung (Zylinder/Ebene) scheitert. Abschaltbar: opts.columns
+ *     = false (altes Halbkanten-Verhalten). Zähler: report.columnCollapses / columnBroken
+ *     Nur Spalten aus SCHARFEN Kanten (Ringe an Deck-/Fasenkanten; glatte Freiform bleibt beim
+ *     Einzel-Kollaps). Vorprüfung aller Züge streng; scheitert ein späterer Zug nach dem Anwenden,
+ *     bleibt die Spalte halb (columnBroken — dasselbe Ergebnis wie vor dem Spalten-Kollaps).
+ *     Gemessen 2026-10-30: Kabelhalter 218/233 → 142/151 Flächen (AN/AUS), NozzleBox und
+ *     Skoda-Haken unverändert. Gelockerte Nachprüfung (Ebenen-Treue verzerrter Dreiecke) wurde
+ *     verworfen: Kabelhalter 128/141, aber Härtetest z5 27 → 190 Flächen.
  *
  * Standard τ = 0,02 mm (gemessen 2026-10-27): der Härtetest (61 Körper) bleibt exakt wie ohne
  * Bereinigung; bei 0,05 mm verlieren die fein tessellierten Rundungen m64 (Kanten 0,037 mm) und
@@ -57,14 +69,15 @@ const vtxKey = (v) => `${fz(v[0])},${fz(v[1])},${fz(v[2])}`;
 
 /**
  * @param {{faces: Array<{normal:number[], vertices:number[][], area?:number}>}} mesh
- * @param {{minDetailMm?: number, trace?: Array}} [opts]  trace: Liste für Diagnose (je Kollaps ein Eintrag)
+ * @param {{minDetailMm?: number, trace?: Array, columns?: boolean}} [opts]
+ *        trace: Liste für Diagnose (je Kollaps ein Eintrag); columns: false = Spalten-Kollaps aus
  */
 export function cleanMesh(mesh, opts = {}) {
   const tau = opts.minDetailMm ?? DEFAULT_MIN_DETAIL_MM;
   const faces = mesh?.faces || [];
   const T = faces.length;
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-  const report = { minDetailMm: tau, inputTris: T, removedTris: 0, collapses: 0, shortBefore: 0, shortAfter: 0, minEdgeAfter: null, ms: 0 };
+  const report = { minDetailMm: tau, inputTris: T, removedTris: 0, collapses: 0, shortBefore: 0, shortAfter: 0, minEdgeAfter: null, columnCollapses: 0, columnBroken: 0, ms: 0 };
   if (!(tau > 0) || !T) return { mesh, report };
 
   // ---- Indiziertes Netz
@@ -384,6 +397,71 @@ export function cleanMesh(mesh, opts = {}) {
     for (const f of vTris[b]) for (let k = 0; k < 3; k++) touched[tri[f * 3 + k]] = report.collapses;
   };
 
+  // ---- Spalten-Kollaps: parallele Ring-Kanten einer Wand GEMEINSAM kollabieren
+  // Ein Viereck {a,b,x,y} aus zwei coplanaren Dreiecken (f auf a-b und Nachbar h):
+  // die Kante gegenüber a-b ist {x,y}. Ist sie selbst eine Mikro-Kante, gehört sie zur
+  // selben Spalte (Ring-Kante unten zu Ring-Kante oben) und wird mit kollabiert — sonst
+  // dezimieren Ober- und Unterring unabhängig, die Punkte stehen nicht mehr übereinander
+  // und die Wand zerfällt in Fächer-Dreiecke (Erkennung Zylinder/Ebene scheitert).
+  const COS_QUAD = Math.cos(0.05 * Math.PI / 180);
+  const third = (f, u, v) => {
+    for (let k = 0; k < 3; k++) { const w = tri[f * 3 + k]; if (w !== u && w !== v) return w; }
+    return -1;
+  };
+  // Partner-Kante von a-b: {from,to} = Kante gegenüber a-b im Viereck (from auf a-Seite)
+  const quadPartner = (a, b, f) => {
+    const ts = edgeTris.get(ek(a, b));
+    if (!ts || ts.length !== 2 || ts.indexOf(f) < 0) return null;
+    const nf = triNormal(f);
+    if (nf[3] < 1e-14) return null;
+    const x = third(f, a, b);
+    if (x < 0) return null;
+    for (let e = 0; e < 2; e++) {
+      // Nachbar über (a,x) bzw. (b,x)
+      const u = e === 0 ? a : b, v = x;
+      const l = edgeTris.get(ek(u, v));
+      if (!l || l.length !== 2) continue;
+      for (const h of l) {
+        if (h === f || !alive[h]) continue;
+        const nh = triNormal(h);
+        if (nh[3] < 1e-14) continue;
+        if ((nf[0] * nh[0] + nf[1] * nh[1] + nf[2] * nh[2]) / (nf[3] * nh[3]) < COS_QUAD) continue;   // coplanar?
+        const y = third(h, u, v);
+        if (y < 0 || y === a || y === b) continue;
+        // Partner: der Punkt aus {x,y}, der mit a (bzw. b) über eine Viereck-SEITE verbunden ist
+        const pA = e === 0 ? y : x, pB = e === 0 ? x : y;
+        if (pA === a || pA === b || pB === a || pB === b) continue;
+        if (dist(pA, pB) >= tau) continue;                       // Partner muss selbst Mikro-Kante sein
+        if (!edgeTris.has(ek(pA, pB))) continue;
+        return { from: pA, to: pB };
+      }
+    }
+    return null;
+  };
+  // Kette der Spalte: [[a,b],[d,c],…] — jeder Zug = von → nach (von auf a-Seite)
+  const column = (a, b) => {
+    const moves = [[a, b]];
+    const seen = new Set([a, b]);
+    let from = a, to = b;
+    for (let step = 0; step < 64; step++) {
+      const ts = edgeTris.get(ek(from, to));
+      if (!ts || ts.length !== 2) break;
+      let res = null;
+      for (const f of ts) {
+        const r = quadPartner(from, to, f);
+        if (!r) continue;
+        if (r.from === from || r.from === to || r.to === from || r.to === to) continue;
+        if (seen.has(r.from) || seen.has(r.to)) continue;        // bereits gelaufen
+        res = r; break;
+      }
+      if (!res) break;
+      moves.push([res.from, res.to]);
+      seen.add(res.from); seen.add(res.to);
+      from = res.from; to = res.to;
+    }
+    return moves;
+  };
+
   // ---- Iterieren: kürzeste Kanten zuerst, bis nichts mehr geht
   const shortEdges = () => {
     const out = [];
@@ -419,21 +497,47 @@ export function cleanMesh(mesh, opts = {}) {
       const isSharp = sharp.has(ek(a, b));
       // Richtung(en) nach Rang: es wandert der Punkt mit kleinerem Rang
       const dirs = [];
-      const allowed = (from, to, rf, rt) => {
+      const allowed = (from, to, rf, rt, sh) => {
         if (rf >= 2) return false;                       // Ecken / gesperrte Punkte wandern nie
-        if (rf === 1 && !isSharp) return false;          // Kantenpunkt nur entlang seiner Kante
+        if (rf === 1 && !sh) return false;               // Kantenpunkt nur entlang seiner Kante
         if (rf > rt) return false;
         return true;
       };
-      if (allowed(a, b, ra, rb)) dirs.push([a, b]);
-      if (allowed(b, a, rb, ra)) dirs.push([b, a]);
+      if (allowed(a, b, ra, rb, isSharp)) dirs.push([a, b]);
+      if (allowed(b, a, rb, ra, isSharp)) dirs.push([b, a]);
       if (dirs.length === 2 && ra !== rb) dirs.length = 1;   // nur bei gleichem Rang beide Richtungen
       let ok = false;
       for (const [from, to] of dirs) {
-        if (canCollapse(from, to)) {
+        if (!canCollapse(from, to)) continue;
+        // Spalte: parallele Ring-Kanten der Wand gemeinsam kollabieren (Ring oben zu Ring unten)
+        // Nur Spalten aus SCHARFEN Kanten (Ring-Kanten zwischen Wand und Deck-/Fasenfläche):
+        // auf glatten Freiform-Netzen (Breitenkreise einer Kugel, gekrümmte Streifen) sind
+        // koplanare Vierecke kein Zeichen einer Mantellinie — dort bleibt es beim Einzel-Kollaps
+        // (Skoda-Haken: sonst +3 Flächen; Golden sphere_full wich ab).
+        let col = (opts.columns !== false) ? column(from, to) : null;
+        if (col && col.length > 1 && !col.every(([p, q]) => sharp.has(ek(p, q)))) col = null;
+        if (!col || col.length === 1) {
           if (opts.trace) opts.trace.push({ from: repr[from], to: repr[to], len: l, rankFrom: rank(from), rankTo: rank(to) });
           doCollapse(from, to); did++; failedAt.delete(fk); ok = true; break;
         }
+        // Jeder weitere Zug der Spalte muss jetzt erlaubt und kollabierbar sein — sonst gar nichts
+        let good = true;
+        for (let i = 1; i < col.length; i++) {
+          const [p, q] = col[i];
+          if (!allowed(p, q, rank(p), rank(q), sharp.has(ek(p, q))) || !canCollapse(p, q)) { good = false; break; }
+        }
+        if (!good) continue;                              // Spalte verwerfen → andere Richtung versuchen
+        let applied = 0;
+        for (let i = 0; i < col.length; i++) {
+          const [p, q] = col[i];
+          if (i > 0 && (!edgeTris.has(ek(p, q)) || !canCollapse(p, q))) { report.columnBroken++; break; }
+          if (opts.trace) opts.trace.push({ from: repr[p], to: repr[q], len: dist(p, q), rankFrom: rank(p), rankTo: rank(q) });
+          doCollapse(p, q);
+          applied++;
+        }
+        did++; failedAt.delete(fk); ok = true;
+        if (applied >= 2) report.columnCollapses++;
+        break;
       }
       if (!ok) failedAt.set(fk, report.collapses);
     }
