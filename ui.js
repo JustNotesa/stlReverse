@@ -41,6 +41,8 @@ const nextFrame = () =>
   new Promise((resolve) => {
     const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 0);
     raf(resolve);
+    // Hintergrund-Tab: requestAnimationFrame ruht dort, die Analyse darf trotzdem nicht stehen bleiben.
+    setTimeout(resolve, 100);
   });
 
 // ── Status banner ───────────────────────────────────────────────────────────

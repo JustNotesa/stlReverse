@@ -9,7 +9,7 @@
  * (popup.js) bisher in `#step-watertight-status` geschrieben hat.
  */
 
-import { formatBytesDe } from './utils.js';
+import { formatBytesDe } from './utils.js?v=2';
 
 // Tipps der „Facettiert geblieben“-Box
 const TIP_SWEEP = 'im CAD als Sweep (Profil entlang einer Bahn) nachbauen';
