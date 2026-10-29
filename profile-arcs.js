@@ -102,24 +102,36 @@ const len = (a) => Math.hypot(a[0], a[1], a[2]);
 const norm = (a) => { const l = len(a); return l > 0 ? [a[0] / l, a[1] / l, a[2] / l] : [0, 0, 0]; };
 
 // 3x3-Determinante (M = [[m00,m01,m02],[m10,m11,m12],[m20,m21,m22]])
-const det3 = (m) =>
-  m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
-  m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-  m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+// Skalarform: der Aufbau der Matrizen Mj (Spalte → b) im Cramer-Löser war der
+// größte Allokationsposten des Exports (GC) — Ausdrücke/Operandfolge wie bisher.
+const det3s = (a00, a01, a02, a10, a11, a12, a20, a21, a22) =>
+  a00 * (a11 * a22 - a12 * a21) -
+  a01 * (a10 * a22 - a12 * a20) +
+  a02 * (a10 * a21 - a11 * a20);
 
-// 3x3-System M·x = b per Cramer — null bei singulärer Matrix
-const solve3 = (M, b) => {
-  const det = det3(M);
+// Matrix-Eingabe — dieselben Ausdrücke in derselben Reihenfolge wie det3s
+const det3 = (m) =>
+  det3s(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2]);
+
+// 3x3-System M·x = b per Cramer — null bei singulärer Matrix.
+// Spalte j wird durch b ersetzt; die Determinante entsteht direkt aus den
+// Skalaren (kein Zwischenmatrix-Aufbau) — Ausdrücke wie det3.
+const solve3s = (m00, m01, m02, m10, m11, m12, m20, m21, m22, b0, b1, b2) => {
+  const det = det3s(m00, m01, m02, m10, m11, m12, m20, m21, m22);
   if (!Number.isFinite(det) || det === 0) return null;
-  const x = [];
-  for (let j = 0; j < 3; j++) {
-    const Mj = M.map((row, i) => row.map((v, k) => (k === j ? b[i] : v)));
-    const dj = det3(Mj);
-    if (!Number.isFinite(dj)) return null;
-    x.push(dj / det);
-  }
-  return x;
+  const d0 = det3s(b0, m01, m02, b1, m11, m12, b2, m21, m22);
+  if (!Number.isFinite(d0)) return null;
+  const d1 = det3s(m00, b0, m02, m10, b1, m12, m20, b2, m22);
+  if (!Number.isFinite(d1)) return null;
+  const d2 = det3s(m00, m01, b0, m10, m11, b1, m20, m21, b2);
+  if (!Number.isFinite(d2)) return null;
+  return [d0 / det, d1 / det, d2 / det];
 };
+
+// Matrix-Eingabe — gleiche Semantik/Ergebnis wie solve3s (Array oder null)
+const solve3 = (M, b) =>
+  solve3s(M[0][0], M[0][1], M[0][2], M[1][0], M[1][1], M[1][2], M[2][0], M[2][1], M[2][2],
+    b[0], b[1], b[2]);
 
 // ── Rahmen (Achse + zwei Querachsen) ────────────────────────────────────────
 // Rechtshändig: e1 × e2 = d. e1 = normiert(d × ref), ref = Koordinatenachse mit dem
@@ -157,8 +169,12 @@ export function fitCircle2d(pts) {
   let scale = 0;
   for (const p of pts) scale = Math.max(scale, Math.hypot(p[0] - mx, p[1] - my));
   if (!(scale > 0) || !Number.isFinite(scale)) return null;
-  const nx = [], ny = [];
-  for (const p of pts) { nx.push((p[0] - mx) / scale); ny.push((p[1] - my) / scale); }
+  // nx/ny vorbelegt (Float64Array statt push): der Fit läuft je Export sehr oft
+  const nx = new Float64Array(n), ny = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    nx[i] = (p[0] - mx) / scale; ny[i] = (p[1] - my) / scale;
+  }
 
   // Kasa: x² + y² = a·x + b·y + k   (a = 2cx, b = 2cy, k = r² − cx² − cy²)
   let Sx = 0, Sy = 0, Sxx = 0, Sxy = 0, Syy = 0, Su = 0, Sxu = 0, Syu = 0;
@@ -167,13 +183,12 @@ export function fitCircle2d(pts) {
     Sx += x; Sy += y; Sxx += x * x; Sxy += x * y; Syy += y * y;
     Su += u; Sxu += x * u; Syu += y * u;
   }
-  const M = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, n]];
-  const b = [Sxu, Syu, Su];
-  const det = det3(M);
+  // Kasa-System direkt als Skalare (kein Matrix-/Vektor-Array je Fit)
+  const det = det3s(Sxx, Sxy, Sx, Sxy, Syy, Sy, Sx, Sy, n);
   // Im Schwerpunkt gilt |det| = n·(Sxx·Syy − Sxy²) → relative Schwelle = Kollinearität
   const detRef = n * Math.max(Sxx * Syy, 1e-30);
   if (!Number.isFinite(det) || Math.abs(det) <= 1e-10 * detRef) return null;   // kollinear
-  const sol = solve3(M, b);
+  const sol = solve3s(Sxx, Sxy, Sx, Sxy, Syy, Sy, Sx, Sy, n, Sxu, Syu, Su);
   if (!sol) return null;
   let cx = sol[0] / 2, cy = sol[1] / 2;
   const r2 = sol[2] + cx * cx + cy * cy;
@@ -193,9 +208,7 @@ export function fitCircle2d(pts) {
       g0 += jx * res; g1 += jy * res;
     }
     if (bad) return null;
-    const NN = [[m00, m01, -sjx], [m01, m11, -sjy], [-sjx, -sjy, n]];
-    const gg = [g0, g1, -sres];
-    const ds = solve3(NN, gg);
+    const ds = solve3s(m00, m01, -sjx, m01, m11, -sjy, -sjx, -sjy, n, g0, g1, -sres);
     if (!ds) break;                       // singulär: Kasa-Schätzung behalten
     cx -= ds[0]; cy -= ds[1]; r -= ds[2];
     if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(r) || !(r > 0)) return null;
@@ -482,9 +495,22 @@ const edgeKeyOf = (ka, kb) => (ka < kb ? ka + '|' + kb : kb + '|' + ka);
  * (Flächen, Loops, Punkte, Koordinaten): nur bei unveränderter Eingabe kommt
  * der gemerkte Index zurück, sonst wird neu gebaut. Der Index wird von keinem
  * Verbraucher verändert (nur gelesen) — deshalb darf er geteilt werden.
+ *
+ * Merkstelle UND Ersatz-Marke liegen im globalen Symbol-Register: profile-arcs.js
+ * wird als ZWEI Modul-Instanzen geladen (exporters.js mit '?v=5',
+ * extrusion-bands.js ohne '?v=') — je Instanz gäbe es sonst eine eigene
+ * WeakMap, und der Index müsste in der zweiten Instanz neu gebaut werden
+ * (~0,15 s je großem Export). Die Ersatz-Marke muss dasselbe Objekt sein, sonst
+ * gelten die beiden (identischen) Ersatz-Vertex-Schlüssel als verschieden.
+ * Der '.v1'-Suffix MUSS mit hochgezogen werden, sobald sich das Index-Format
+ * ändert (Eintragsfelder, Schlüsselformat, Einfügereihenfolge oder die Formel
+ * des Ersatz-Vertex-Schlüssels): eine alte, noch gecachte Instanz würde sonst
+ * einen inkompatiblen Index mitbenutzen.
  */
-const edgeIndexMemo = new WeakMap();        // fds → { a: Eintrag, b: Eintrag }
-const EDGE_VKEY_DEFAULT = {};               // Marke für den Ersatz-Vertex-Schlüssel (siehe vtxKeyOf)
+const EDGE_MEMO_KEY = Symbol.for('stlReverse.profileArcs.edgeIndexMemo.v1');
+const edgeIndexMemo = globalThis[EDGE_MEMO_KEY] || (globalThis[EDGE_MEMO_KEY] = new WeakMap());   // fds → { a: Eintrag, b: Eintrag }
+const EDGE_VKEY_KEY = Symbol.for('stlReverse.profileArcs.edgeVkeyDefault.v1');
+const EDGE_VKEY_DEFAULT = globalThis[EDGE_VKEY_KEY] || (globalThis[EDGE_VKEY_KEY] = {});          // Marke für den Ersatz-Vertex-Schlüssel (siehe vtxKeyOf)
 
 // Koordinaten-Vergleich: -0 und 0 sind gleich (der Vertex-Schlüssel macht sie
 // gleich), NaN gilt als gleich zu NaN.
