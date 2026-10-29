@@ -301,7 +301,7 @@ function angleAround(x, a, centre, pt) {
 }
 
 // 16 Stützpunkte auf der Kurve zwischen p und q (positiver Bogen bei Kreisen)
-function sampleCurve(curve, p, q) {
+export function sampleCurve(curve, p, q) {
   const out = [];
   if (curve.type === 'line') {
     const d = sub(q, p);
@@ -310,7 +310,8 @@ function sampleCurve(curve, p, q) {
   }
   // Kreis: Theta der Endpunkte in der (eventuell gespiegelten) Achse
   const thq = angleAround(curve.x, curve.a, curve.c, q);
-  const side = norm(cross(curve.x, curve.a));
+  // Umlaufrichtung: Winkel werden rechtshändig in (x, a×x) gemessen
+  const side = norm(cross(curve.a, curve.x));
   for (let i = 0; i < 16; i++) {
     const t = (thq * i) / 15;
     const ct = Math.cos(t);
@@ -518,17 +519,54 @@ export function evalBspline(c, u) {
 
 // ── Schnittkurve als B-Spline ───────────────────────────────────────────────
 
+// Sicherheitsreserve des B-Spline-Fits: Anteil der Toleranz, bis zu dem eine
+// Stufe schon als gut genug gilt (wenn noch eine feinere Stufe folgt)
+const FIT_RESERVE = 0.25;
+
 // Stützpunkt anhängen, wenn er nicht zu dicht am Vorgänger liegt
 function pushPoint(pts, p) {
   if (pts.length && len(sub(pts[pts.length - 1], p)) < 1e-7) return;
   pts.push(p);
 }
 
-// Schnittkurve A∩B: analytisch, sonst B-Spline durch projizierte Stützpunkte
+// Punkt auf der Polylinie bei Bogenlänge s (stückweise linear)
+function polyPointAt(poly, cum, s) {
+  const last = poly.length - 1;
+  if (s <= 0) return poly[0];
+  if (s >= cum[last]) return poly[last];
+  let i = 1;
+  while (i < last && cum[i] < s) i++;
+  const seg = cum[i] - cum[i - 1];
+  const t = seg > 1e-15 ? (s - cum[i - 1]) / seg : 0;
+  return add(poly[i - 1], mul(sub(poly[i], poly[i - 1]), t));
+}
+
+// größter Abstand der Kurve zu beiden Flächen (Prüfparameter je Span)
+function curveResidual(A, B, c) {
+  let m = 0;
+  for (let i = 0; i < c.params.length - 1; i++) {
+    const u0 = c.params[i];
+    const u1 = c.params[i +1];
+    for (let k = 1; k < 8; k++) {
+      const e = evalBspline(c, u0 + (u1 - u0) * (k / 8));
+      const err = Math.max(Math.abs(sdist(A, e)), Math.abs(sdist(B, e)));
+      if (err > m) m = err;
+    }
+  }
+  return m;
+}
+
+// Schnittkurve A∩B: analytisch, sonst B-Spline durch projizierte Stützpunkte.
+//
+// B-Spline-Teil: die Führungspunkte (Netzpunkte der Kette) liegen unregelmäßig,
+// rauschen und haben fast Doppel Punkte. Deshalb wird nicht durch sie hindurch
+// interpoliert, sondern gleichmäßig über die Bogenlänge der Polylinie
+// Q = [p, ...guides, q] marschiert: an n+1 äquidistanten Längen wird der
+// Polylinienpunkt auf beide Flächen projiziert (liegt exakt auf der Schnittkurve).
+// Das Gitter wird bei Verdopplung wiederverwendet (n → 2n enthält n).
 export function fitIntersectionCurve(A, B, p, q, guides, opts = {}) {
   const tol = opts.tol !== undefined ? opts.tol : 5e-7;
-  const maxShift = opts.maxShift !== undefined ? opts.maxShift : 0.5;
-  const maxPts = opts.maxPts !== undefined ? opts.maxPts : 64;
+  const maxPts = opts.maxPts !== undefined ? opts.maxPts : 129;
   const gs = guides && guides.length ? guides : null;
   const mid = gs ? gs[gs.length >> 1] : projectMulti([A, B], mul(add(p, q), 0.5)).x;
   const an = analyticCurve(A, B, p, q, mid);
@@ -538,46 +576,55 @@ export function fitIntersectionCurve(A, B, p, q, guides, opts = {}) {
     const d = sub(q, p);
     if (len(d) > 1e-9) return { curve: { type: 'line', p: [p[0], p[1], p[2]], d: norm(d) }, pts: [p, q] };
   }
-  // Stützpunkte sammeln
-  const pts = [p];
-  const seeds = gs ? gs : [0.25, 0.5, 0.75].map((t) => add(p, mul(sub(q, p), t)));
-  for (const g of seeds) {
-    const r = projectMulti([A, B], g);
-    if (!r.ok) return { fail: 'projectMulti' };
-    if (len(sub(r.x, g)) > maxShift) return { fail: 'shift' };
-    pushPoint(pts, r.x);
-  }
-  pushPoint(pts, q);
-  // Kurve bauen und an Zwischenparametern prüfen
-  for (let round = 0; round < 64; round++) {
-    const c = interpCubic(pts);
-    if (!c) return { fail: 'interp' };
-    // je Span den schlechtesten Zwischenparameter suchen
-    const bad = [];
-    let maxErr = -1;
-    for (let i = 0; i < c.params.length - 1; i++) {
-      const u0 = c.params[i];
-      const u1 = c.params[i +1];
-      let worst = null;
-      let worstErr = -1;
-      for (const f of [0.25, 0.5, 0.75]) {
-        const u = u0 + (u1 - u0) * f;
-        const e = evalBspline(c, u);
-        const err = Math.max(Math.abs(sdist(A, e)), Math.abs(sdist(B, e)));
-        if (err > worstErr) { worstErr = err; worst = e; }
+  // Polylinie Q = [p, ...Führungspunkte, q] mit Bogenlänge s ∈ [0, Ls]
+  const poly = [p];
+  if (gs) for (const g of gs) poly.push(g);
+  poly.push(q);
+  const cum = [0];
+  for (let i = 1; i < poly.length; i++) cum.push(cum[i - 1] + len(sub(poly[i], poly[i - 1])));
+  const Ls = cum[cum.length - 1];
+  if (!(Ls > 1e-12)) return { fail: 'projectMulti', detail: 'entartete Polylinie' };
+  const maxShift = opts.maxShift !== undefined ? opts.maxShift
+    : Math.min(0.5, Math.max(0.05, 0.5 * Ls));
+  // Marschieren: n = 4, 8, … Stützpunkte (n+1 Punkte insgesamt)
+  const NS = [4, 8, 16, 32, 64, 128];
+  let last = -1;
+  for (let i = 0; i < NS.length; i++) if (NS[i] + 1 <= maxPts) last = i;
+  if (last < 0) return { fail: 'maxPts', detail: maxPts };
+  const proj = new Map();                     // i/n → projizierter Punkt
+  for (let lvl = 0; lvl <= last; lvl++) {
+    const n = NS[lvl];
+    const pts = [p];
+    for (let i = 1; i < n; i++) {
+      const key = i / n;                      // exakt: n sind Zweierpotenzen
+      let x = proj.get(key);
+      if (!x) {
+        const x0 = polyPointAt(poly, cum, (i * Ls) / n);
+        const r = projectMulti([A, B], x0);
+        if (!r.ok) return { fail: 'projectMulti', detail: r.res };
+        const shift = len(sub(r.x, x0));
+        if (shift > maxShift) return { fail: 'shift', detail: shift };
+        x = r.x;
+        proj.set(key, x);
       }
-      if (worstErr > maxErr) maxErr = worstErr;
-      if (worstErr > tol) bad.push({ i, e: worst });
+      pushPoint(pts, x);
     }
-    if (maxErr <= tol) return { curve: c, pts };
-    if (pts.length + bad.length > maxPts) return { fail: 'maxPts' };
-    // projizierte Punkte einsetzen (von hinten, damit die Span-Indizes gültig bleiben)
-    for (let k = bad.length - 1; k >= 0; k--) {
-      const r = projectMulti([A, B], bad[k].e);
-      if (!r.ok) return { fail: 'projectMulti' };
-      if (len(sub(r.x, bad[k].e)) > 0.1) return { fail: 'shift' };
-      pts.splice(bad[k].i + 1, 0, r.x);
+    pushPoint(pts, q);
+    // Faltung: aufeinanderfolgende Stützpunkte müssen in Chordrichtung fortschreiten
+    for (let i = 1; i < pts.length - 1; i++) {
+      const d1 = sub(pts[i], pts[i - 1]);
+      const d2 = sub(pts[i + 1], pts[i]);
+      if (len(d1) > 1e-9 && len(d2) > 1e-9 && dot(d1, d2) <= 0) {
+        return { fail: 'fold', detail: i };
+      }
     }
+    const c = interpCubic(pts);
+    if (!c) return { fail: 'projectMulti', detail: 'Interpolation' };
+    const maxErr = curveResidual(A, B, c);
+    // Sicherheitsreserve (nur solange eine feinere Stufe folgt): die Kurve soll
+    // auch zwischen den Prüfparametern sicher innerhalb der Toleranz liegen
+    const need = (lvl === last) ? tol : tol * FIT_RESERVE;
+    if (maxErr <= need) return { curve: c, pts };
   }
-  return { fail: 'noConvergence' };
+  return { fail: 'maxPts', detail: maxPts };
 }
