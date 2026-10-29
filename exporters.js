@@ -396,7 +396,9 @@ export function findBendGroups(normalGroups) {
 export function buildVolumeStepBrepV2(analysis) {
   // [freiform1] Einhängepunkt: Freiform-Pfad versuchen (Schalter analysis.fitSegmentation:
   // 'auto' | true | false). Der bisherige Weg läuft als Rückfall ( __ffLegacy ).
-  if (analysis && !analysis.__ffLegacy && analysis.fitSegmentation !== false) {
+  // Vorerst nur auf Wunsch (Standard aus): an echten Teilen wie dem Skoda-Haken scheitert der Versuch noch
+  // und kostet nur Zeit (+8 s); Etappe 2 macht ihn dort nützlich.
+  if (analysis && !analysis.__ffLegacy && (analysis.fitSegmentation === true || analysis.fitSegmentation === 'auto')) {
     return chooseFreeform(analysis, buildVolumeStepBrepV2({ ...analysis, __ffLegacy: true }));
   }
   // V2-Exporter: Nutzt echte Boundary-Loops aus normalGroups (wie Panel 3).
