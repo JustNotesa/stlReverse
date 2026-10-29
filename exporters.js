@@ -6731,9 +6731,18 @@ export function buildVolumeStepBrepV2(analysis) {
     // und gemeinsam angewandt (gleiche Datenmaschine, nur andere Geometrie-Entities).
     const bo = { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() };
     const findAll = (useExt) => {
-      const ext = useExt ? validateArcBands(fds, findExtBands(fds, bo), { vtxKey }) : null;
+      // Gravur (extrusion-bands.js): das Bogen-Ergebnis VOR der Extrusions-Suche berechnen —
+      // es entscheidet, welche Stücke beim Bogen-Pfad bleiben (statt der geometrischen Schätzung
+      // der Kreis-Abdeckung: die sagte „profile-arcs deckt es“, profile-arcs baute aber nichts).
+      const arc0 = useExt ? validateArcBands(fds, findArcBands(fds, bo), { vtxKey }) : null;
+      const ext = useExt
+        ? validateArcBands(fds, findExtBands(fds, { ...bo, arcDet: arc0 }), { vtxKey })
+        : null;
       const claimed = new Set();
       if (ext) for (const b of ext.bands) for (const fi of b.facets) claimed.add(fi);
+      // Gravur (extrusion-bands.js): hat die Extrusions-Suche nichts beansprucht, gilt das
+      // bereits berechnete Bogen-Ergebnis (kein zweiter Suchlauf nötig).
+      if (useExt && ext && claimed.size === 0 && arc0) return arc0;
       const masked = claimed.size ? fds.map((fd, i) => (claimed.has(i) ? null : fd)) : fds;
       const arc = findArcBands(masked, bo);
       return validateArcBands(fds, mergeDets(arc, ext, vtxKey), { vtxKey });

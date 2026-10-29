@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Test der synthetischen Gravur-Körper (tests/gravur-bodies.mjs)
 // ─────────────────────────────────────────────────────────────────────────────
-import { GRAVUR_BODIES, buildGravurMesh, glyphPolylines } from './gravur-bodies.mjs';
+import { GRAVUR_BODIES, GLYPHS, buildGravurMesh, glyphPolylines, pathCurveRuns, fitCircleResidual } from './gravur-bodies.mjs';
 import { checkManifold, meshVolume, makeTransform } from './fixtures-v2/gen.mjs';
 import { readFileSync } from 'fs';
 import { SourceTextModule } from 'vm';
@@ -9,6 +9,11 @@ import { SourceTextModule } from 'vm';
 // Erwartete Zahl der scharfen Ecken je Glyphe: „S“ 4 (die beiden geraden Schnitte),
 // „8“ 0 (alles tangential), „O“ 0, „D“ 2 (Stiel), „mix“ 4.
 const ECKEN = { gravur_S_erhaben: 4, gravur_8_erhaben: 0, gravur_O_vertieft: 0, gravur_mix_erhaben: 6, gravur_S_gedreht: 4 };
+
+// Kreis-Fit-Schwelle: ein tangentieller Kurvenlauf darf NICHT in einen Kreis passen —
+// sonst darf der Exporter die Wand als Zylinder (CYLINDRICAL_SURFACE) ausgeben und der
+// Körper verfehlt seinen Zweck (SURFACE_OF_LINEAR_EXTRUSION über B-Spline-Kurven).
+const KREIS_REST = 0.02;   // mm
 
 const T0 = Date.now();
 
@@ -109,8 +114,30 @@ describe('Gravur-Körper (synthetische Schrift/Gravur)', () => {
     for (const e of GRAVUR_BODIES) {
       expect(e.info.contours).toBeGreaterThan(0);
       expect([e.name, e.info.corners]).toEqual([e.name, ECKEN[e.name]]);
-      expect(e.info.runs).toBeGreaterThanOrEqual(e.expect.minExtFaces);
+      // Achtung: info.runs (glatte Kurvenläufe) und expect.minExtFaces (Exporter-Flächen)
+      // sind verschiedene Zählgrößen — eine geschlossene Kontur wird vom Exporter in 3
+      // Flächen geteilt. Ein Vergleich der beiden ist daher nicht zulässig.
       expect(e.info.glyphArea).toBeGreaterThan(0);
+    }
+  });
+
+  test('kein Kurvenlauf passt in einen Kreis (S, 8, O, D, mix)', () => {
+    // Je Kontur: die tangentialen KURVENläufe (Geraden trennen die Kette) mit
+    // algebraischem Kreis-Fit (Kåsa) prüfen — der größte radiale Rest muss > 0.02 mm sein.
+    for (const key of ['S', '8', 'O', 'D', 'mix']) {
+      const spec = GLYPHS[key];
+      expect(spec).toBeTruthy();
+      for (const contour of spec.contours) {
+        const runs = pathCurveRuns(contour.cmds);
+        expect(runs.length).toBeGreaterThan(0);
+        for (const pts of runs) {
+          const res = fitCircleResidual(pts);
+          if (!(res > KREIS_REST)) {
+            throw new Error(`${key}: Kurvenlauf (${pts.length} Punkte) passt in einen Kreis `
+              + `— radialer Rest ${res.toFixed(5)} mm ≤ ${KREIS_REST} mm`);
+          }
+        }
+      }
     }
   });
 

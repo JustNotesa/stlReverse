@@ -139,16 +139,20 @@ function arcLength(P) {
 // Geraden bleiben ein Segment (keine Innenpunkte).
 export const CURVE_STEP = 0.12, CURVE_MIN = 4, CURVE_MAX = 48;
 
+// Ein einzelnes Stück abflachen (Startpunkt + Zwischenpunkte; Gerade = Start + Ende)
+export function flattenPiece(p, step = CURVE_STEP, maxSeg = CURVE_MAX, minSeg = CURVE_MIN) {
+  const out = [[p.P[0][0], p.P[0][1]]];
+  if (p.t === 'L') { out.push([p.P[1][0], p.P[1][1]]); return out; }
+  const n = Math.max(minSeg, Math.min(maxSeg, Math.ceil(arcLength(p.P) / step)));
+  for (let k = 1; k < n; k++) out.push(bezAt(p.P, k / n));
+  return out;
+}
+
 export function flattenPath(cmds, opts = {}) {
   const step = opts.step ?? CURVE_STEP;
   const maxSeg = opts.maxSegments ?? CURVE_MAX, minSeg = opts.minSegments ?? CURVE_MIN;
   const ps = pieces(cmds), raw = [];
-  for (const p of ps) {
-    raw.push([p.P[0][0], p.P[0][1]]);                       // Startpunkt des Stücks
-    if (p.t === 'L') { raw.push([p.P[1][0], p.P[1][1]]); continue; }
-    const n = Math.max(minSeg, Math.min(maxSeg, Math.ceil(arcLength(p.P) / step)));
-    for (let k = 1; k < n; k++) raw.push(bezAt(p.P, k / n));
-  }
+  for (const p of ps) raw.push(...flattenPiece(p, step, maxSeg, minSeg));
   // Aufeinanderfolgende gleiche Punkte entfernen (1e-9 mm Toleranz)
   const out = [];
   for (const p of raw) {
@@ -194,6 +198,80 @@ export function curveRuns(cmds) {
   return has.size;
 }
 
+// Tangentiale KURVENläufe eines Pfades: maximale Ketten von Bézier-Stücken, die tangential
+// aneinander anschließen. Ein gerades Stück (oder eine Knickstelle) trennt die Kette —
+// so wird der „S“-Bogen (Kreisbögen) von der Wirbelsäule getrennt geprüft.
+// Rückgabe: je Lauf die abgeflachten Punkte (ohne den doppelten Startpunkt des Folgestücks).
+export function pathCurveRuns(cmds) {
+  const ps = pieces(cmds), tg = pieceTangents(ps), n = ps.length;
+  const cont = [], isCurve = [];
+  for (let i = 0; i < n; i++) {
+    const prev = (i - 1 + n) % n;
+    cont.push(angleBetween(tg[prev][1], tg[i][0]) <= 1);     // Vorgänger → i tangential?
+    isCurve.push(ps[i].t !== 'L');
+  }
+  // zyklisch beginnen: an einer Stelle, an der die Kette nicht weiterläuft
+  let start = 0;
+  for (let i = 0; i < n; i++) if (!cont[i]) { start = i; break; }
+  const runs = [];
+  let cur = null;
+  for (let k = 0; k < n; k++) {
+    const i = (start + k) % n;
+    if (!isCurve[i] || !cont[i]) { cur = null; continue; }   // Gerade oder Knick → Kette endet
+    if (!cur) { cur = []; runs.push(cur); }
+    cur.push(ps[i]);
+  }
+  return runs.map((run) => {
+    const pts = [];
+    for (const p of run) {
+      const fp = flattenPiece(p);
+      for (let k = (pts.length ? 1 : 0); k < fp.length; k++) pts.push(fp[k]);
+    }
+    return pts;
+  });
+}
+
+// 3×3-Normalgleichungen lösen (Gauß mit Spaltenpivot) — null bei Singularität
+function solve3(A, b) {
+  const M = [[A[0][0], A[0][1], A[0][2], b[0]], [A[1][0], A[1][1], A[1][2], b[1]], [A[2][0], A[2][1], A[2][2], b[2]]];
+  for (let c = 0; c < 3; c++) {
+    let p = c;
+    for (let r = c + 1; r < 3; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    if (Math.abs(M[p][c]) < 1e-12) return null;
+    if (p !== c) { const t = M[p]; M[p] = M[c]; M[c] = t; }
+    for (let r = 0; r < 3; r++) {
+      if (r === c) continue;
+      const f = M[r][c] / M[c][c];
+      for (let k = c; k < 4; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  return [M[0][3] / M[0][0], M[1][3] / M[1][1], M[2][3] / M[2][2]];
+}
+
+// Algebraischer Kreis-Fit (Kåsa) über ebene Punkte: min Σ(|p|² + D·x + E·y + F)².
+// Rückgabe: der GRÖSSTE radiale Rest |‖p − Mittelpunkt‖ − r| (mm). Ein Lauf, der in einen
+// Kreis passt, liefert ≈ 0.
+export function fitCircleResidual(pts) {
+  const n = pts.length;
+  if (n < 3) return Infinity;
+  let Suu = 0, Suv = 0, Svv = 0, Su = 0, Sv = 0, Szx = 0, Szy = 0, Sz = 0;
+  for (const [x, y] of pts) {
+    const z = x * x + y * y;
+    Suu += x * x; Suv += x * y; Svv += y * y; Su += x; Sv += y;
+    Szx += z * x; Szy += z * y; Sz += z;
+  }
+  const sol = solve3([[Suu, Suv, Su], [Suv, Svv, Sv], [Su, Sv, n]], [-Szx, -Szy, -Sz]);
+  if (!sol) return Infinity;
+  const [D, E, F] = sol;
+  const cx = -D / 2, cy = -E / 2;
+  const r2 = cx * cx + cy * cy - F;
+  if (!(r2 > 0)) return Infinity;
+  const r = Math.sqrt(r2);
+  let mx = 0;
+  for (const [x, y] of pts) { const d = Math.abs(Math.hypot(x - cx, y - cy) - r); if (d > mx) mx = d; }
+  return mx;
+}
+
 // Orientierung: Außenkonturen CCW (Material links), Löcher CW.
 export function ensureOrientation(pts, ccw = true) {
   return (polyArea(pts) > 0) === ccw ? pts : pts.slice().reverse();
@@ -211,29 +289,60 @@ export function translatePath(cmds, dx, dy) {
 // ── Glyphen (Font-Outline-Art) ───────────────────────────────────────────────
 // Alle Glyphen sind ~8–10 mm hoch; die Strichbreite liegt je nach Stelle bei 0.8–1.4 mm.
 
-// „S“: EINE geschlossene Kontur aus vier Bogenstrecken (Kreisbögen als Bézier) und vier
-// geraden Teilstücken. Die Bögen treffen die schräge Mittelpartie tangential (4 tangentiale
-// Übergänge); die beiden Strichenden sind gerade geschnitten (scharfe Ecken à 90°).
+// „S“: EINE geschlossene Kontur aus 6 kubischen Bézier und 2 geraden Schnitten.
+// Die Bögen sind KEINE Kreisbögen: die Steuerpunkt-Abstände sind mit dem Faktor f ≠ 1 vom
+// Kreiswert (4/3)·tan(Δ/4)·r versehen → die Krümmung ändert sich längs jedes Stücks (bei
+// f = 1 wäre es exakt der Kreisbogen, und der Exporter dürfte die Wand als Zylinder
+// ausgeben). Die beiden „Wirbelsäulen“ (die Längsseiten der S-Mitte) sind je EIN langer
+// kubischer Bézier mit stark asymmetrischen Steuerpunkten: ihre Endtangenten sind um
+// 6° gegeneinander verdreht, die Kette biegt sich also sichtbar (ein reiner Strich wäre
+// entartet: alle 4 Punkte kollinear).
 function glyphS() {
   const R = 1.9, w = 1.4, h = w / 2, C1 = [3.0, 7.5], C2 = [3.0, 2.5];
   // Kreuztangente der beiden Kreise: senkrechte Komponente so, dass die gemeinsame
   // Tangentialgerade beide Kreise berührt (Bogen oben → Bogen unten).
   const ny = (R + R) / (C1[1] - C2[1]);
-  const n = [Math.sqrt(Math.max(0, 1 - ny * ny)), ny];         // linke Normale der Laufrichtung
-  const aT1 = Math.atan2(-n[1], -n[0]) + 2 * Math.PI;         // Tangentialpunkt am oberen Kreis (229°)
-  const aT2 = Math.atan2(n[1], n[0]);                         // Tangentialpunkt am unteren Kreis (49°)
-  const a0 = -20 * DEG, a1 = -160 * DEG;                      // Enden der Striche
+  const nx = Math.sqrt(Math.max(0, 1 - ny * ny));
+  const aT1 = Math.atan2(-ny, -nx) + 2 * Math.PI;            // Tangentialpunkt am oberen Kreis (229°)
+  const aT2 = Math.atan2(ny, nx);                            // Tangentialpunkt am unteren Kreis (49°)
+  const a0 = -20 * DEG, a1 = -160 * DEG;                     // Enden der Striche
+  const TILT = 6 * DEG;                                      // Verdrehung der Wirbelsäulen-Tangenten
   const P = (c, r, a) => [c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)];
+  const ccw = (a) => [-Math.sin(a), Math.cos(a)];            // CCW-Tangente am Winkel a
+  const cw = (a) => [Math.sin(a), -Math.cos(a)];              // CW-Tangente
+  const rot = (v, t) => [v[0] * Math.cos(t) - v[1] * Math.sin(t), v[0] * Math.sin(t) + v[1] * Math.cos(t)];
+  // Bogenstück (Kreis, Winkel b0→b1) → kubischer Bézier. f1/f2 steuern die Abstände der
+  // Steuerpunkte (1 = exakter Kreisbogen, ≠ 1 = veränderliche Krümmung).
+  const arc = (C, r, b0, b1, f1, f2, t0ov, t1ov) => {
+    const span = b1 - b0, dir = span < 0 ? cw : ccw;
+    const d = (4 / 3) * Math.tan(Math.abs(span) / 4) * r;
+    const A = P(C, r, b0), B = P(C, r, b1), t0 = t0ov || dir(b0), t1 = t1ov || dir(b1);
+    return ['C', A[0] + f1 * d * t0[0], A[1] + f1 * d * t0[1], B[0] - f2 * d * t1[0], B[1] - f2 * d * t1[1], B[0], B[1]];
+  };
+  // Bogen in n Stücke (Winkel gleichmäßig, Tangentenanschluss exakt)
+  const arcRun = (C, r, b0, b1, fs, t0ov, t1ov) => {
+    const out = [];
+    for (let k = 0; k < fs.length; k++) {
+      const s0 = b0 + (b1 - b0) * k / fs.length, s1 = b0 + (b1 - b0) * (k + 1) / fs.length;
+      out.push(arc(C, r, s0, s1, fs[k][0], fs[k][1], k === 0 ? t0ov : null, k === fs.length - 1 ? t1ov : null));
+    }
+    return out;
+  };
+  // Kubischer Bézier aus Start/Ende + Tangentenrichtungen + Steuerpunkt-Abständen
+  const cub = (A, t0, d0, B, t1, d1) => ['C', A[0] + d0 * t0[0], A[1] + d0 * t0[1], B[0] - d1 * t1[0], B[1] - d1 * t1[1], B[0], B[1]];
+  const Ro = R + h, Ri = R - h;                              // 2.6 / 1.2 (Außen- / Innenbogen)
+  const A1 = P(C1, Ro, aT1), A2 = P(C2, Ri, aT2);            // Enden der oberen Wirbelsäule
+  const B3 = P(C2, Ro, aT2), B4 = P(C1, Ri, aT1);            // Enden der unteren Wirbelsäule
   return [
-    ['M', ...P(C1, R + h, a0)],
-    ...arcCubics(C1[0], C1[1], R + h, a0, aT1),                // Außenbogen oben
-    ['L', ...P(C2, R - h, aT2)],                              // Außenkante der Mittelpartie
-    ...arcCubics(C2[0], C2[1], R - h, aT2, a1),               // Innenbogen unten
-    ['L', ...P(C2, R + h, a1)],                              // gerader Schnitt (Strichende)
-    ...arcCubics(C2[0], C2[1], R + h, a1, aT2),               // Außenbogen unten (rückwärts)
-    ['L', ...P(C1, R - h, aT1)],                              // Innenkante der Mittelpartie
-    ...arcCubics(C1[0], C1[1], R - h, aT1, a0),               // Innenbogen oben (rückwärts)
-    ['L', ...P(C1, R + h, a0)],                              // gerader Schnitt (Strichende)
+    ['M', ...P(C1, Ro, a0)],
+    ...arcRun(C1, Ro, a0, aT1, [[0.62, 0.95], [0.95, 0.58], [0.70, 0.88]], null, rot(ccw(aT1), -TILT)),
+    cub(A1, rot(ccw(aT1), -TILT), 3.0, A2, cw(aT2), 2.0),   // obere Wirbelsäule (ein langer Bézier)
+    ...arcRun(C2, Ri, aT2, a1, [[0.60, 0.92], [0.92, 0.55], [0.68, 0.90]]),
+    ['L', ...P(C2, Ro, a1)],                                 // gerader Schnitt (unteres Strichende)
+    ...arcRun(C2, Ro, a1, aT2, [[0.66, 0.94], [0.94, 0.60], [0.72, 0.88]]),
+    cub(B3, ccw(aT2), 3.0, B4, rot(cw(aT1), TILT), 2.0),     // untere Wirbelsäule
+    ...arcRun(C1, Ri, aT1, a0, [[0.58, 0.90], [0.90, 0.62], [0.70, 0.95]], rot(cw(aT1), TILT)),
+    ['L', ...P(C1, Ro, a0)],                                 // gerader Schnitt (oberes Strichende)
     ['Z'],
   ];
 }
@@ -381,10 +490,11 @@ function engravedBody(w, d, h, glyphs, depth) {
 }
 
 // ── Testkörper ───────────────────────────────────────────────────────────────
-// expect.minExtFaces: untere Schranke der SURFACE_OF_LINEAR_EXTRUSION-Flächen — so viele
-//   glatte Kurvenläufe (G1-Ketten mit Bézier) hat die Glyphe.
-// expect.maxFaces: obere Schranke der Flächenzahl — ebene Flächen der Platte +
-//   Glyphen-Deckflächen + 2 je Kurvenlauf + 10 Reserve.
+// expect.minExtFaces: untere Schranke der SURFACE_OF_LINEAR_EXTRUSION-Flächen —
+//   3 je geschlossener eckenfreier Kontur (der Extrusions-Detektor teilt einen geschlossenen
+//   glatten Loop in 3 Flächen) + 1 je offenem Kurvenlauf zwischen zwei Ecken.
+// expect.maxFaces: obere Schranke der Flächenzahl —
+//   die am Exporter gemessene Flächenzahl (AN = AUS) + 2 Reserve.
 function makeEntry({ name, desc, glyphs, w, d, h = 3, engraved = false, depth = 1, transform = null, expect }) {
   const height = engraved ? depth : 1;
   const body = engraved ? engravedBody(w, d, h, glyphs, depth) : raisedBody(w, d, h, glyphs, height);
@@ -431,35 +541,35 @@ function makeEntry({ name, desc, glyphs, w, d, h = 3, engraved = false, depth = 
   };
 }
 
+// ── Testkörper ───────────────────────────────────────────────────────────────
 export const GRAVUR_BODIES = [
   makeEntry({
     name: 'gravur_S_erhaben',
     desc: 'Platte 30×20×3, erhabenes „S“ (1 mm hoch, Strichbreite 1.4 mm)',
     glyphs: [{ key: 'S', dx: 12.0783, dy: 5 }],
     w: 30, d: 20,
-    // minExtFaces 2: zwei G1-Ketten mit Bézier (Außen- und Innenkette der S-Kontur);
-    //   die geraden Schnitte trennen sie. maxFaces 21: 6 ebene Plattenflächen + 1
-    //   Glyphen-Deckfläche + 2 Läufe × 2 + 10 Reserve.
-    expect: { minExtFaces: 2, maxFaces: 21 },
+    // „S“: 1 Kontur mit 4 scharfen Ecken (die 2 geraden Schnitte) → 2 offene Kurvenläufe
+    //   + 2 gerade Wandsegmente. minExtFaces 2 = 1 je offenem Lauf; maxFaces 13 = 11
+    //   vom Exporter gemessene Flächen (AN = AUS) + 2 Reserve.
+    expect: { minExtFaces: 2, maxFaces: 13 },
   }),
   makeEntry({
     name: 'gravur_8_erhaben',
     desc: 'Platte 30×20×3, erhabene „8“ (1 mm hoch, zwei Zähler als Löcher)',
     glyphs: [{ key: '8', dx: 15, dy: 10 }],
     w: 30, d: 20,
-    // minExtFaces 3: Außenkontur (1 C1-Spline) + 2 Zähler. maxFaces 25: 6 ebene
-    //   Plattenflächen + 3 Deckflächen (Glyphe + 2 Zählerböden) + 3 Läufe × 2 + 10.
-    expect: { minExtFaces: 3, maxFaces: 25 },
+    // „8“: 3 geschlossene eckenfreie Konturen (Außenkontur + 2 Zähler), keine Geraden.
+    //   minExtFaces 9 = 3 je Kontur; maxFaces 20 = 18 gemessene Flächen (AN = AUS) + 2 Reserve.
+    expect: { minExtFaces: 9, maxFaces: 20 },
   }),
   makeEntry({
     name: 'gravur_O_vertieft',
     desc: 'Platte 30×20×3, vertiefte „O“-Rille (1 mm tief, eckige Superellipsen-Konturen)',
     glyphs: [{ key: 'O', dx: 15, dy: 10 }],
     w: 30, d: 20, engraved: true, depth: 1,
-    // minExtFaces 2: Außen- und Innenkontur der Rille (je 4 Bézier, ein G1-Lauf).
-    //   maxFaces 22: 6 ebene Plattenflächen + 2 Deckflächen (Insel + Rillenboden) +
-    //   2 Läufe × 2 + 10.
-    expect: { minExtFaces: 2, maxFaces: 22 },
+    // „O“: 2 geschlossene eckenfreie Konturen (Rillen-Außenwand + Insel), keine Geraden.
+    //   minExtFaces 6 = 3 je Kontur; maxFaces 16 = 14 gemessene Flächen (AN = AUS) + 2 Reserve.
+    expect: { minExtFaces: 6, maxFaces: 16 },
   }),
   makeEntry({
     name: 'gravur_mix_erhaben',
@@ -467,10 +577,11 @@ export const GRAVUR_BODIES = [
       + 'quadratische und kubische Bézier) nebeneinander',
     glyphs: [{ key: 'D', dx: 6, dy: 5 }, { key: 'mix', dx: 22, dy: 5.5 }],
     w: 40, d: 20,
-    // minExtFaces 2: je Glyphe ein Lauf mit Bézier (D: der Bogen; mix: quadratische +
-    //   kubische Bézier, tangential aneinander). maxFaces 22: 6 ebene Plattenflächen +
-    //   2 Glyphen-Deckflächen + 2 Läufe × 2 + 10.
-    expect: { minExtFaces: 2, maxFaces: 22 },
+    // „D“: 2 scharfe Ecken → 1 offener Lauf (der Bogen) + 3 gerade Wandsegmente. „mix“:
+    //   4 scharfe Ecken → 1 offener Lauf (quadratische + kubische Bézier) + 5 gerade
+    //   Wandsegmente. minExtFaces 2 = 1 je offenem Lauf; maxFaces 20 = gemessen 18 (AN = AUS)
+    //   + 2 Reserve.
+    expect: { minExtFaces: 2, maxFaces: 20 },
   }),
   makeEntry({
     name: 'gravur_S_gedreht',
@@ -478,8 +589,9 @@ export const GRAVUR_BODIES = [
     glyphs: [{ key: 'S', dx: 12.0783, dy: 5 }],
     w: 30, d: 20,
     transform: { rot: [20, 35, 10], t: [5, -3, 12] },
-    // wie gravur_S_erhaben: 2 Läufe, 6 Plattenflächen + 1 Deckfläche → 21
-    expect: { minExtFaces: 2, maxFaces: 21 },
+    // wie gravur_S_erhaben: 2 offene Läufe → minExtFaces 2; maxFaces 13 = 11 gemessene
+    //   Flächen (AN = AUS) + 2 Reserve.
+    expect: { minExtFaces: 2, maxFaces: 13 },
   }),
 ];
 

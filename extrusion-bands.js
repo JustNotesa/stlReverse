@@ -51,6 +51,11 @@ export const EXT_DEFAULTS = {
   circleTolRel: 2e-3,  // × r
   maxArcPieces: 2,     // so viele Kreisstücke darf ein Stück haben, um im Bogen-Pfad zu bleiben
   arcMinSegs: 3,       // Mindestzahl Segmente je Kreisstück
+  arcAvgSegs: 8,       // Ø Segmente je Kreisstück — hat ein Stück MEHR Kreisstücke als
+                       // maxArcPieces, bleibt es nur beim Bogen-Pfad (profile-arcs), wenn der
+                       // Schnitt im Mittel gut genug ist: der Lauf „Rundung r0.5 → Bogen R10 →
+                       // Rundung r0.5“ (Kreisstücke 16/17/9 Segmente, Ø 14) bleibt bei den
+                       // Zylindern; Schriftkurven (viele kurze Stücke, Ø < 4) → Extrusions-Pfad.
   budgetMs: 2500,      // ms: Zeitbudget (Kettenverarbeitung stoppen)
   maxAxes: 6,          // Höchstzahl Achsen-Kandidaten je Lauf
   blocked: null,       // Set von Signaturen (Ecken-Schlüssel), die gesperrt sind
@@ -327,7 +332,8 @@ function turningAngles(pts) {
  *
  * fds:  Array ebener Flächen { outer, inner, normal, centroid }
  * opts: { ...EXT_DEFAULTS, vtxKey (Pflicht), blocked (Set von Signaturen),
- *         blockedGroups (Set von fd.group) }
+ *         blockedGroups (Set von fd.group),
+ *         arcDet (VALIDIERTES profile-arcs-Ergebnis: { bands }) }
  * → { bands, arcs, claimed, stats }
  */
 export function findExtBands(fds, opts) {
@@ -473,16 +479,49 @@ function processChain(ctx, chain, state, nextId) {
     const lo = loPolyline(ctx, runs, piece.idx, piece.cyclic);
     if (lo.pts.length < 3) continue;
     const lo2d = lo.pts.map((p) => { const l = toLocal(frame, p); return [l[0], l[1]]; });
-    if (piece.cyclic) {
+    // Bogen-Bänder von profile-arcs (opts.arcDet): das TATSÄCHLICHE Bogen-Ergebnis
+    // entscheidet, ob ein Stück beim Bogen-Pfad bleibt. Die geometrische Kreis-Schätzung
+    // unten ist nur der Notfall (ohne arcDet) — sie rät nur, was profile-arcs tun wird.
+    const arcBands = (o.arcDet && Array.isArray(o.arcDet.bands)) ? o.arcDet.bands : null;
+    if (arcBands) {
+      const F = new Set(piece.idx.map((k) => chain.facets[k]));
+      const touched = new Set();
+      let touching = 0;
+      for (const ab of arcBands) {
+        let hit = false;
+        for (const fi of (ab.facets || [])) {
+          if (!F.has(fi)) continue;
+          hit = true;
+          touched.add(fi);
+        }
+        if (hit) touching++;
+      }
+      const covered = touched.size;
+      const avgMin = (typeof o.arcAvgSegs === 'number') ? o.arcAvgSegs : EXT_DEFAULTS.arcAvgSegs;
+      // Das Stück bleibt beim Bogen-Pfad, wenn ALLE Facetten in Bogen-Bändern liegen und
+      // entweder nur wenige Bänder betroffen sind oder der Schnitt im Mittel gut genug ist.
+      const staysArc = covered === F.size && touching > 0 &&
+        (touching <= o.maxArcPieces || covered / touching >= avgMin);
+      if (staysArc) { state.stats.circleSkipped++; continue; }
+    } else if (piece.cyclic) {
       const K = fitCircle2d(lo2d);
       if (K && K.maxRes <= Math.max(o.circleTolAbs, o.circleTolRel * K.r)) {
         state.stats.circleSkipped++;
         continue;
       }
     } else {
+      // Greedy-Kreis-Abdeckung: die Kreisstücke mit ihren Segmentzahlen
       const cover = circleCover(lo2d, o);
-      const staysArc = cover.length <= o.maxArcPieces &&
-        cover.every((c) => (c.j - c.i) >= o.arcMinSegs);
+      const segsPer = cover.map((c) => c.j - c.i);
+      const avgSegs = segsPer.length
+        ? segsPer.reduce((a, b) => a + b, 0) / segsPer.length
+        : 0;
+      const avgMin = (typeof o.arcAvgSegs === 'number') ? o.arcAvgSegs : EXT_DEFAULTS.arcAvgSegs;
+      // Das Stück bleibt beim Bogen-Pfad (profile-arcs), wenn ALLE Kreisstücke lang
+      // genug sind UND entweder wenige Stücke vorliegen ODER der Schnitt im Mittel
+      // gut genug ist (Schriftkurven: viele kurze Stücke → Ø klein → Extrusions-Pfad).
+      const staysArc = segsPer.every((s) => s >= o.arcMinSegs) &&
+        (cover.length <= o.maxArcPieces || avgSegs >= avgMin);
       if (staysArc) { state.stats.circleSkipped++; continue; }
     }
 

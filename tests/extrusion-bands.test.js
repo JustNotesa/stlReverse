@@ -126,6 +126,36 @@ function tangentCurvesContour() {
   return { pts: c1.concat([P2], c2.slice(1, -1)), straightIdx: c1.length - 1 };
 }
 
+// (f) Taschen-Kontur wie im Fixture k1 (Kabelhalter): Rechteck 12×8, Unterseite als flacher
+//     Bogen R10 (12 Sehnen), alle vier Ecken senkrecht r=0.5 (16 Seg.). Der Lauf unten ist
+//     „Eckenrundung r0.5 → Bogen R10 → Eckenrundung r0.5“ (die beiden geraden Seiten sind
+//     Breaks → der Lauf ist ein OFFENES Stück). Die beiden oberen Eckbögen sind je ein
+//     einzelner Kreis (16 Seg.) → der Bogen-Pfad übernimmt sie.
+function archPocketContour() {
+  const x0 = 0, y0 = 0, w = 12, h = 8, f = 2, arcSeg = 12, rc = 0.5, seg = 16;
+  const Rb = ((w / 2) ** 2 + f * f) / (2 * f);          // 10 → der flache Bogen R10
+  const cx = x0 + w / 2, cy = y0 + Rb - f;
+  const ex = x0 + rc;
+  const ey = cy - Math.sqrt((Rb - rc) ** 2 - (ex - cx) ** 2);
+  const aT = Math.atan2(ey - cy, ex - cx);             // Tangentenpunkt am Bogen (links)
+  const pts = [];
+  const corner = (mx, my, a0, a1) => {
+    for (let k = 0; k <= seg; k++) {
+      const a = a0 + (a1 - a0) * k / seg;
+      pts.push([mx + rc * Math.cos(a), my + rc * Math.sin(a)]);
+    }
+  };
+  corner(ex, ey, Math.PI, aT + 2 * Math.PI);            // unten links: Seite → Bogen
+  for (let k = 1; k < arcSeg; k++) {                    // der flache Bogen (12 Sehnen)
+    const a = aT + (-Math.PI - 2 * aT) * k / arcSeg;
+    pts.push([cx + Rb * Math.cos(a), cy + Rb * Math.sin(a)]);
+  }
+  corner(x0 + w - rc, ey, Math.PI - aT, 2 * Math.PI);   // unten rechts: Bogen → Seite
+  corner(x0 + w - rc, y0 + h - rc, 0, Math.PI / 2);
+  corner(x0 + rc, y0 + h - rc, Math.PI / 2, Math.PI);
+  return pts;
+}
+
 // ── Platte mit erhabener Glyphe ────────────────────────────────────────────
 // Platte z = 0…3, Glyphenwand z = 3…4, Glyphen-Oberkappe bei z = 4,
 // Platten-Oberfläche bei z = 3 mit der Kontur als Innen-Loop.
@@ -382,5 +412,45 @@ describe('extrusion-bands.js — Extrusionsbänder (Schrift als Spline-Wand)', (
     const merged = mergeDets(fakeArc, extDet, vtxKey);
     expect(merged.bands.length).toBe(det.bands.length);   // 1 Bogen-Band + (n−1) Extrusions-Bänder
     expect(merged.stats.ext.collisionWithArcs).toBe(1);
+  });
+
+  test('11: offener Lauf (Rundung r0.5 → Bogen R10 → Rundung r0.5) → bleibt beim Bogen-Pfad', () => {
+    const fds = glyphPlate(archPocketContour());
+    const det = run(fds);
+    // Der Lauf unten ist von drei guten Kreisstücken bedeckt (16 / 17 / 9 Segmente, Ø 14) —
+    // der Bogen-Pfad (profile-arcs) macht daraus drei echte Zylinder, der Extrusions-Pfad
+    // würde daraus EINEN Spline machen (falsch).
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.circleSkipped).toBeGreaterThanOrEqual(1);
+    // Gegenprobe: mit einem strengen arcAvgSegs wandert der Lauf in den Extrusions-Pfad
+    const strict = run(fds, { arcAvgSegs: 100 });
+    expect(strict.stats.circleSkipped).toBeLessThan(det.stats.circleSkipped);
+    expect(strict.bands.length).toBe(1);
+  });
+
+  test('12: arcDet entscheidet nach dem TATSÄCHLICHEN Bogen-Ergebnis, nicht nach der Kreis-Schätzung', () => {
+    const contour = archPocketContour();
+    const fds = glyphPlate(contour);
+    // (a) ohne arcDet: die geometrische Regel schickt den offenen Lauf zum Bogen-Pfad
+    const geo = run(fds);
+    expect(geo.bands.length).toBe(0);
+    expect(geo.stats.circleSkipped).toBeGreaterThanOrEqual(1);
+    // der Lauf, den die geometrische Regel an profile-arcs gab (Gegenprobe arcAvgSegs)
+    const strict = run(fds, { arcAvgSegs: 100 });
+    expect(strict.bands.length).toBe(1);
+    const runFacets = new Set(strict.bands[0].facets);
+    // (b) arcDet OHNE Bänder: profile-arcs hat dort nichts gebaut → der Lauf MUSS in den
+    //     Extrusions-Pfad (sonst bleiben die Wände als ~50 flache Facetten stehen)
+    const none = run(fds, { arcDet: { bands: [] } });
+    expect(none.bands.length).toBeGreaterThanOrEqual(1);
+    expect(none.bands.some((b) => b.facets.length === runFacets.size &&
+      b.facets.every((fi) => runFacets.has(fi)))).toBe(true);
+    // (c) arcDet, dessen 2 Bänder den Lauf (und die übrigen Stücke) abdecken: alle Stücke
+    //     bleiben beim Bogen-Pfad → 0 Bänder
+    const wall = Array.from({ length: contour.length }, (_, i) => i);
+    const two = { bands: [{ facets: wall.slice(0, 40) }, { facets: wall.slice(40) }] };
+    const kept = run(fds, { arcDet: two });
+    expect(kept.bands.length).toBe(0);
+    expect(kept.stats.circleSkipped).toBeGreaterThanOrEqual(1);
   });
 });
