@@ -31,7 +31,7 @@ import {
   makeFrame, toLocal, axisCandidates, fitCircle2d, buildEdgeIndex, buildChains,
   edgeCanonKey,
 } from './profile-arcs.js';
-import { interpolateCubic, spanDeviation, nearestParam, evalSpline } from './spline-fit.js';
+import { interpolateCubic, spanDeviation, nearestParam, evalSpline } from './spline-fit.js?v=1';
 
 /** Vorgaben der Extrusionsband-Suche. */
 export const EXT_DEFAULTS = {
