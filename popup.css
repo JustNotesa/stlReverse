@@ -409,16 +409,18 @@ details.formats { position: relative; }
   margin: 0 0 6px; color: var(--muted); font-size: var(--fs-micro);
   letter-spacing: .04em; text-transform: uppercase;
 }
-ul.chips {
+/* Chips nur im Verdikt-Bereich (.facts) und auf dem Startbildschirm (.start). */
+.facts ul.chips, .start ul.chips {
   list-style: none; padding: 0; margin: 0 0 6px;
   display: flex; flex-wrap: wrap; gap: 6px;
 }
-ul.chips > li {
+
+.facts ul.chips > li, .start ul.chips > li {
   padding: 3px 10px; border-radius: 999px;
   background: var(--surface-2); color: var(--muted); font-size: .85rem;
 }
-ul.chips.chips--ok > li   { background: var(--ok-soft); color: var(--ok); }
-ul.chips.chips--info > li { background: var(--surface-2); color: var(--muted); }
+.facts ul.chips.chips--ok > li   { background: var(--ok-soft); color: var(--ok); }
+.facts ul.chips.chips--info > li { background: var(--surface-2); color: var(--muted); }
 
 .note {
   margin-top: 12px; padding: 10px 12px;
@@ -467,7 +469,7 @@ ul.chips.chips--info > li { background: var(--surface-2); color: var(--muted); }
   }
   .facts h3.micro { margin: 0; }
   .facts ul.chips { display: contents; margin: 0; }
-  ul.chips > li { padding: 2px 9px; font-size: .82rem; }
+  .facts ul.chips > li, .start ul.chips > li { padding: 2px 9px; font-size: .82rem; }
 }
 
 /* --- 12. Startbildschirm ------------------------------------------------- */
@@ -574,7 +576,7 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
    „Vorher / Nachher“ bei 1440x900 vollständig ohne Scrollen sichtbar. */
 @media (min-width: 640px) {
   .compare .viewer-3d { height: clamp(300px, calc(100vh - 535px), 720px); }
-  #compare-panel[data-view="step"] .viewer-3d { height: clamp(320px, calc(100vh - 485px), 800px); }
+  #compare-panel[data-view="step"] .viewer-3d { height: clamp(320px, calc(100vh - 535px), 800px); }
 }
 .expert .viewer-3d { height: clamp(240px, 38vh, 460px); }
 
