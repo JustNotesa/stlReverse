@@ -1,4 +1,4 @@
-import { buildVerdict, tubeRejectNote } from '../verdict.js';
+import { buildVerdict, tubeRejectNote, filletTileText } from '../verdict.js';
 
 /**
  * Wortgleiche Kopie der heutigen String-Logik aus popup.js (`setStepWatertightStatus`),
@@ -263,9 +263,12 @@ describe('verdict.js', () => {
     });
   });
 
-  describe('buildVerdict – am Lochrand/Mantel übernommene Rundungen', () => {
-    // Wascher mit verrundetem Lochrand: die Rundungsbänder gehen in der Bohrungs-/Mantel-
-    // Umwandlung auf (Chamfer-Zone) — der Export meldet das als `rimFilletsAbsorbed`.
+  describe('buildVerdict – Lochrand-Rundungen und echte Fasen', () => {
+    // Washer mit verrundetem Lochrand: die Randbänder gehen in der Bohrungs-/Mantel-Umwandlung
+    // auf (Chamfer-Zone). Der Export meldet je Zone, was sie war:
+    //   `rimFilletsToChamfer` = Rundung (Normalen streuen) → als Fase (Kegel) geschrieben
+    //   `rimChamfersKept`     = echte Fase (Normalen gleich)  → bleibt Kegel
+    // Beides ist KEINE entfernte Verrundung — eine Rundung wurde in eine Fase umgewandelt.
     const rimReport = (extra) => ({
       watertight: true,
       faceCount: 6,
@@ -276,25 +279,60 @@ describe('verdict.js', () => {
       ...extra
     });
 
-    test('(a) rimFilletsAbsorbed zählt als entfernt (Kachel: „6 entfernt“)', () => {
-      const v = buildVerdict(rimReport({ rimFilletsAbsorbed: 6 }), null, { defeature: true });
-      expect(v.roundsRemoved).toBe(6);
-      expect(v.filletsRemoved).toBe(6);
-      expect(v.converted.some((c) => c.includes('6 Randbänder (Rundung/Fase) am Loch/Mantel übernommen'))).toBe(true);
-    });
-
-    test('(b) ohne das Feld bleibt der Zähler 0', () => {
-      const v = buildVerdict(rimReport(), null);
+    test('(a) rimFilletsToChamfer: eigener Chip + Kachel „2 → Fase“, zählt nicht als entfernt', () => {
+      const v = buildVerdict(rimReport({ rimFilletsToChamfer: 2 }), null, { defeature: true });
+      expect(v.rimToChamfer).toBe(2);
       expect(v.roundsRemoved).toBe(0);
       expect(v.filletsRemoved).toBe(0);
-      expect(v.converted.some((c) => c.includes('Lochrand/Mantel'))).toBe(false);
+      expect(v.converted).toContain('2 Lochrand-Rundungen als Fase (Kegel) geschrieben');
+      expect(filletTileText(v)).toBe('2 → Fase');
     });
 
-    test('(c) rawText und rawDetail bleiben mit und ohne das Feld gleich', () => {
+    test('(b) rimChamfersKept: eigener Chip — echte Fasen zählen NICHT als Verrundung', () => {
+      const v = buildVerdict(rimReport({ rimChamfersKept: 2 }), null, { defeature: true });
+      expect(v.rimChamfersKept).toBe(2);
+      expect(v.roundsRemoved).toBe(0);
+      expect(v.filletsRemoved).toBe(0);
+      expect(v.converted).toContain('2 Fasen als echte Kegel');
+      expect(filletTileText(v)).toBe('keine gezählt');
+    });
+
+    test('(c) ohne die Felder bleiben alle Zähler 0', () => {
+      const v = buildVerdict(rimReport(), null, { defeature: true });
+      expect(v.rimToChamfer).toBe(0);
+      expect(v.rimChamfersKept).toBe(0);
+      expect(v.roundsRemoved).toBe(0);
+      expect(v.filletsRemoved).toBe(0);
+      expect(filletTileText(v)).toBe('keine gezählt');
+      expect(v.converted.some((c) => c.includes('Lochrand'))).toBe(false);
+    });
+
+    test('(d) rawText und rawDetail bleiben mit und ohne die Felder gleich', () => {
       const ohne = buildVerdict(rimReport(), null);
-      const mit = buildVerdict(rimReport({ rimFilletsAbsorbed: 6 }), null);
+      const mit = buildVerdict(rimReport({ rimFilletsToChamfer: 2, rimChamfersKept: 2 }), null);
       expect(mit.rawText).toBe(ohne.rawText);
       expect(mit.rawDetail).toBe(ohne.rawDetail);
+    });
+
+    test('(e) Lochrand-Rundungen stehen NICHT im „scharf gemacht:“-Text', () => {
+      const v = buildVerdict(rimReport({ rimFilletsToChamfer: 2, bandsDefeatured: 1 }), null, { defeature: true });
+      const scharf = v.converted.find((c) => c.startsWith('scharf gemacht:'));
+      expect(scharf).toBeTruthy();
+      expect(scharf).not.toContain('Lochrand');
+      expect(v.converted.filter((c) => c.includes('Lochrand'))).toHaveLength(1);
+    });
+
+    test('(f) Singular: „1 Lochrand-Rundung …“ / „1 Fase als echter Kegel“', () => {
+      const v = buildVerdict(rimReport({ rimFilletsToChamfer: 1, rimChamfersKept: 1 }), null, { defeature: true });
+      expect(v.converted).toContain('1 Lochrand-Rundung als Fase (Kegel) geschrieben');
+      expect(v.converted).toContain('1 Fase als echter Kegel');
+      expect(filletTileText(v)).toBe('1 → Fase');
+    });
+
+    test('(g) Kachel verbindet „entfernt“ / „→ Fase“ / „bleiben rund“ mit Komma', () => {
+      const v = buildVerdict(rimReport({ bandsDefeatured: 3, rimFilletsToChamfer: 2, arcCylinders: 1 }), null, { defeature: true });
+      expect(v.roundsRemoved).toBe(3);
+      expect(filletTileText(v)).toBe('3 entfernt, 2 → Fase, 1 bleiben rund');
     });
   });
 
