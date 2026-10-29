@@ -74,3 +74,599 @@
 // Nicht in Etappe 1: Formschrägen-Wände als B-Spline-Regelfläche (Etappe 2), Schärfen kleiner
 // Verrundungen im AN-Modus (Etappe 3), mehrere Schalen/Hohlräume (→ bisheriger Weg).
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Umsetzung (Etappe 1) — Orchestrator
+//
+// Ablauf je Runde: Arbeitsregionen → Topologie → Snap → Orientierung → Ecken →
+// Kanten → Flächen. Jeder Fehler nennt die schuldige Region; sie wird zur Fassade
+// (jedes Dreieck eine eigene Ebene) und die Runde läuft erneut (höchstens 8 Runden).
+// ─────────────────────────────────────────────────────────────────────────────
+import { trianglesFromGroups, indexMesh, segmentByFit } from './freeform-segment.js';
+import { buildTopology, checkTopology } from './freeform-topology.js';
+import {
+  normalAt, projectMulti, fitIntersectionCurve,
+  sub, mul, dot, cross, len, norm,
+} from './freeform-geom.js';
+import { snapSurfaces } from './freeform-snap.js';
+import { writeFreeformStep } from './freeform-step.js';
+
+// ---- Grenzwerte (Etappe 1) ----
+const ROUNDS_MAX = 8;            // höchstens 8 Runden
+const SEG_ANGLE_DEG = 12;        // Segmentierwinkel
+const SENSE_MIN = 0.8;           // |flächengewichtetes Vorzeichen| je Region
+const COLLAPSE_EPS = 1e-6;       // Kante fällt weg (Punktkontakt)
+const FIT_TOL = 5e-7;            // Toleranz der Schnittkurve (B-Spline)
+const EDGE_MAX_SHIFT = 0.5;      // größte Verschiebung eines Stützpunkts
+const VERT_TOL = 1e-9;           // Rest der Eckprojektion (mm) — Ecken liegen exakt auf allen Flächen (ACIS 1e-6)
+
+const now = () => (globalThis.performance && globalThis.performance.now)
+  ? globalThis.performance.now() : Date.now();
+
+function deepCopy(o) {
+  if (Array.isArray(o)) return o.map(deepCopy);
+  if (o && typeof o === 'object') {
+    const r = {};
+    for (const k of Object.keys(o)) r[k] = deepCopy(o[k]);
+    return r;
+  }
+  return o;
+}
+
+// Netzpunkt
+const ptOf = (mesh, mv) => [mesh.P[3 * mv], mesh.P[3 * mv + 1], mesh.P[3 * mv + 2]];
+
+// Fläche in Kurzform (nur für das Debug-Protokoll)
+const f4 = (x) => (Number.isFinite(x) ? x.toFixed(4) : 'NaN');
+function surfDesc(s) {
+  if (!s) return '-';
+  const v = (a) => `[${(a || []).map(f4).join(',')}]`;
+  switch (s.type) {
+    case 'plane': return `Ebene o=${v(s.o)} n=${v(s.n)}`;
+    case 'cylinder': return `Zylinder o=${v(s.o)} a=${v(s.a)} R=${f4(s.R)}`;
+    case 'cone': return `Kegel apex=${v(s.apex)} a=${v(s.a)} alpha=${f4(s.alpha)}`;
+    case 'sphere': return `Kugel c=${v(s.c)} R=${f4(s.R)}`;
+    case 'torus': return `Torus c=${v(s.c)} a=${v(s.a)} Rm=${f4(s.Rm)} r=${f4(s.r)}`;
+    default: return String(s.type);
+  }
+}
+
+// Schwerpunkt eines Dreiecks
+function centroidOf(mesh, t) {
+  const { P, tri } = mesh;
+  const i0 = tri[3 * t], i1 = tri[3 * t + 1], i2 = tri[3 * t + 2];
+  return [
+    (P[3 * i0] + P[3 * i1] + P[3 * i2]) / 3,
+    (P[3 * i0 + 1] + P[3 * i1 + 1] + P[3 * i2 + 1]) / 3,
+    (P[3 * i0 + 2] + P[3 * i1 + 2] + P[3 * i2 + 2]) / 3,
+  ];
+}
+
+// Fläche eines Polygons, projiziert auf die Richtung n (Vorzeichen: Umlaufrichtung)
+function polyArea(pts, n) {
+  let ax = 0, ay = 0, az = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    ax += a[1] * b[2] - a[2] * b[1];
+    ay += a[2] * b[0] - a[0] * b[2];
+    az += a[0] * b[1] - a[1] * b[0];
+  }
+  return 0.5 * (ax * n[0] + ay * n[1] + az * n[2]);
+}
+
+// Täter unter den Kandidaten: erst die Nicht-Ebenen, dann die kleinste Fläche
+function pickCulprit(cands) {
+  let best = null;
+  for (const c of cands) {
+    if (!c) continue;
+    const nonPlane = c.surf && c.surf.type !== 'plane';
+    if (!best) { best = c; continue; }
+    const bNon = best.surf && best.surf.type !== 'plane';
+    if (nonPlane && !bNon) { best = c; continue; }
+    if (nonPlane === bNon && c.area < best.area) best = c;
+  }
+  return best;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Freiform-B-Rep bauen: normalGroups → { step, report, brep } | null
+//
+// opts: { tol (Segmentier-Toleranz, default 0.02), debug: { log: [] } }
+// ─────────────────────────────────────────────────────────────────────────────
+export function buildFreeformBrep(normalGroups, opts = {}) {
+  const o = opts || {};
+  const dbg = (o.debug && typeof o.debug === 'object') ? o.debug : null;
+  const log = dbg ? (dbg.log || (dbg.log = [])) : null;
+  try {
+    return buildInner(normalGroups, o, log);
+  } catch (e) {
+    if (log) log.push(`Ausnahme: ${e && e.message ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+function buildInner(normalGroups, opts, log) {
+  const t0 = now();
+  // 1) Netz: nur EINE dichte, mannigfaltige Schale
+  const mesh = indexMesh(trianglesFromGroups(normalGroups));
+  if (!mesh || !mesh.manifold || mesh.components !== 1) {
+    if (log) log.push('Netz: nicht manifold oder mehrere Komponenten — Freiform-Pfad nicht möglich');
+    return null;
+  }
+  // 2) Fit-basierte Segmentierung
+  const seg = segmentByFit(mesh, { tol: opts.tol ?? 0.02, angleDeg: SEG_ANGLE_DEG });
+  if (log) {
+    const byType = {};
+    for (const r of seg.regions) byType[r.type] = (byType[r.type] || 0) + 1;
+    log.push(`Segmentierung: ${seg.regions.length} Regionen ${JSON.stringify(byType)}`);
+    log.push(seg.regions.map((r) => `#${r.id} ${r.type} ${r.area.toFixed(1)}mm² ${r.tris.length}D`).join(', '));
+    log.push(seg.regions.filter((r) => r.surf)
+      .map((r) => `#${r.id} ${r.type} ${surfDesc(r.surf)}`).join(' | '));
+  }
+  const demoted = new Set();
+  for (let round = 0; round < ROUNDS_MAX; round++) {
+    const res = runRound(mesh, seg, demoted, round, opts, log);
+    if (res.hard) return null;
+    if (res.failures.length) {
+      if (!res.culprits.size) {
+        if (log) log.push(`Runde ${round}: Fehler ohne schuldige Region → Abbruch`);
+        return null;
+      }
+      const before = demoted.size;
+      for (const c of res.culprits) demoted.add(c);
+      if (demoted.size === before) {
+        if (log) log.push(`Runde ${round}: keine neue Region zur Fassade → Abbruch`);
+        return null;
+      }
+      continue;
+    }
+    // Erfolg → STEP
+    const { step } = writeFreeformStep(res.brep);
+    const ms = Math.round((now() - t0) * 10) / 10;
+    const report = {
+      faceCount: res.brep.faces.length,
+      watertight: true,
+      shells: 1,
+      solids: 1,
+      openShells: 0,
+      voids: 0,
+      fallbackStage: 0,
+      boresConverted: 0,
+      mantlesConverted: 0,
+      tubesConverted: 0,
+      bandsDefeatured: 0,
+      filletsDefeatured: 0,
+      cornersDefeatured: 0,
+      freeform: {
+        used: true,
+        rounds: round + 1,
+        demoted: demoted.size,
+        faces: res.facesByType,
+        edges: res.edgesByType,
+        ms,
+      },
+    };
+    return { step, report, brep: res.brep };
+  }
+  if (log) log.push(`Nach ${ROUNDS_MAX} Runden noch Fehler → Abbruch`);
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Eine Runde: Arbeitsregionen, Topologie, Snap, Geometrie
+// ─────────────────────────────────────────────────────────────────────────────
+function runRound(mesh, seg, demoted, round, opts, log) {
+  const { tri, nV, T, N, A } = mesh;
+  const failures = [];
+  const culprits = new Set();
+  const fail = (cands, reason) => {
+    failures.push(reason);
+    const c = pickCulprit(cands);
+    if (c) culprits.add(c.src);
+    if (log) {
+      log.push(`Runde ${round}: ${reason}${c
+        ? ` → Täter: Region ${c.id} (${c.type}, ${c.area.toFixed(1)} mm²)`
+        : ' → kein Täter'}`);
+    }
+  };
+
+  // ── a) Arbeitsregionen: demotierte und Facetten-Regionen werden Dreieck für Dreieck
+  const regions = [];
+  const byId = new Map();
+  const wLabel = new Int32Array(T);
+  const forceVertex = new Uint8Array(nV);
+  for (const r of seg.regions) {
+    if (r.type === 'facet' || demoted.has(r.id)) {
+      for (const t of r.tris) {
+        const wr = { id: regions.length, kind: 'facet', tris: [t], area: A[t], src: r.id, type: 'facet' };
+        regions.push(wr); byId.set(wr.id, wr); wLabel[t] = wr.id;
+        for (let k = 0; k < 3; k++) forceVertex[tri[3 * t + k]] = 1;
+      }
+    } else {
+      const wr = {
+        id: regions.length, kind: 'analytic', surf: deepCopy(r.surf),
+        tris: r.tris.slice(), area: r.area, src: r.id, type: r.type,
+      };
+      regions.push(wr); byId.set(wr.id, wr);
+      for (const t of r.tris) wLabel[t] = wr.id;
+    }
+  }
+
+  // ── b) Topologie
+  const topo = buildTopology(mesh, wLabel, { forceVertex });
+  const terrs = checkTopology(topo);
+  if (terrs.length) {
+    if (log) log.push(`Runde ${round}: Topologiefehler: ${terrs.slice(0, 4).join(' | ')}`);
+    return { hard: true };
+  }
+
+  // ── c) Snap: tangentiale Paare exakt zusammenführen
+  let snap = null;
+  try {
+    snap = snapSurfaces({ mesh, regions: byId, chains: topo.chains }, {});
+  } catch (e) {
+    snap = null;
+  }
+  const surfs = (snap && snap.surfs && typeof snap.surfs.get === 'function') ? snap.surfs : null;
+  for (const wr of regions) {
+    if (wr.kind !== 'analytic') continue;
+    let s = surfs ? surfs.get(wr.id) : null;
+    if (!s || !s.type) s = surfs ? surfs.get(wr.src) : null;
+    if (s && s.type) wr.surf = deepCopy(s);
+  }
+
+  // ── d) Orientierung je analytischer Region (flächengewichtet)
+  for (const wr of regions) {
+    if (wr.kind !== 'analytic') continue;
+    let acc = 0;
+    for (const t of wr.tris) {
+      const d = dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], normalAt(wr.surf, centroidOf(mesh, t)));
+      acc += A[t] * (d > 0 ? 1 : d < 0 ? -1 : 0);
+    }
+    const s = wr.area > 0 ? acc / wr.area : 0;
+    wr.sense = s;
+    if (!(Math.abs(s) >= SENSE_MIN)) {
+      fail([wr], `Orientierung Region ${wr.id} (${wr.type}) = ${s.toFixed(3)} (zu schwach)`);
+    } else wr.sameSense = s > 0;
+  }
+
+  // ── e) Ecken: Projektion auf alle anliegenden analytischen Flächen
+  const incident = new Map();                 // Netzecke → Regionen
+  for (let t = 0; t < T; t++) {
+    const id = wLabel[t];
+    for (let k = 0; k < 3; k++) {
+      const mv = tri[3 * t + k];
+      let s = incident.get(mv);
+      if (!s) { s = new Set(); incident.set(mv, s); }
+      s.add(id);
+    }
+  }
+  const edgeLen = new Float64Array(nV);      // mittlere Kantenlänge je Netzecke
+  const edgeCnt = new Float64Array(nV);
+  for (let t = 0; t < T; t++) {
+    for (let k = 0; k < 3; k++) {
+      const i = tri[3 * t + k], j = tri[3 * t + (k + 1) % 3];
+      const l = len(sub(ptOf(mesh, j), ptOf(mesh, i)));
+      edgeLen[i] += l; edgeCnt[i]++;
+      edgeLen[j] += l; edgeCnt[j]++;
+    }
+  }
+  const nv = topo.vertices.length;
+  const X = new Array(nv);
+  let worstRes = 0;
+  for (let vi = 0; vi < nv; vi++) {
+    const mv = topo.vertices[vi].mv;
+    const p = ptOf(mesh, mv);
+    const ids = incident.get(mv) || new Set();
+    const S = [];
+    for (const id of ids) {
+      const wr = regions[id];
+      if (wr.kind === 'analytic' && wr.surf) S.push(wr.surf);
+    }
+    if (!S.length) { X[vi] = p; continue; }   // nur Facetten → Netzecke bleibt
+    const meanEdge = edgeCnt[mv] > 0 ? edgeLen[mv] / edgeCnt[mv] : 0;
+    const maxShift = Math.min(0.5, Math.max(0.05, 3 * meanEdge));
+    const r = projectMulti(S, p);
+    const shift = len(sub(r.x, p));
+    if (r.res > worstRes) worstRes = r.res;
+    // projectMulti verlangt selbst Rest ≤ 1e-10 mm — das ist für GEFITTETE Flächen
+    // (Genauigkeit ~1e-5 mm) nicht erreichbar: tangentiale Paare (Kugel auf Zylinderachse)
+    // schneiden sich nie exakt. Deshalb gilt der Rest ≤ VERT_TOL (2e-5 mm, weit unter der
+    // STEP-Unsicherheit 1e-4 mm) als Erfolg; ein echter Widerspruch (kein Schnittpunkt)
+    // liefert einen Rest in Größenordnung der Fit-Toleranz und wird abgewiesen.
+    const projOK = r.ok || (Number.isFinite(r.res) && r.res <= VERT_TOL);
+    if (!projOK || shift > maxShift) {
+      const cands = [...ids].map((id) => regions[id]).filter((w) => w.kind === 'analytic');
+      fail(cands, `Ecke ${vi} (Netz ${mv} bei ${p.map((x) => x.toFixed(3)).join(',')}): `
+        + `Projektion res=${r.res.toExponential(2)} mm, `
+        + `Verschiebung ${shift.toExponential(2)} mm (Grenze ${maxShift.toFixed(3)}), `
+        + `Flächen ${cands.map((c) => c.type).join('/')}`);
+      X[vi] = p;
+      continue;
+    }
+    X[vi] = r.x;
+  }
+  if (log) log.push(`Runde ${round}: ${regions.length} Regionen, ${nv} Ecken, `
+    + `größter Projektionsrest ${worstRes.toExponential(2)} mm`);
+
+  // ── f) Zusammenfallen: Kante mit |X[start] − X[end]| < 1e-6 fällt weg
+  const parent = new Int32Array(nv);
+  for (let i = 0; i < nv; i++) parent[i] = i;
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+  const collapsed = new Set();
+  for (const ch of topo.chains) {
+    const a = topo.vOfMesh[ch.mv[0]], b = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
+    if (a < 0 || b < 0) continue;
+    const pa = X[find(a)], pb = X[find(b)];
+    if (pa && pb && len(sub(pa, pb)) < COLLAPSE_EPS) {
+      collapsed.add(ch.id);
+      union(a, b);
+    }
+  }
+  // leere Schleifen → Fehler
+  for (const lp of topo.loops) {
+    const uses = lp.uses.filter((u) => !collapsed.has(u.chain));
+    if (!uses.length) {
+      const wr = regions[lp.region];
+      fail(wr && wr.kind === 'analytic' ? [wr] : [],
+        `Schleife ${lp.region} wurde durch das Zusammenfallen leer`);
+    }
+  }
+
+  // ── Vertreterecke (Union-Find) und ihre Punkte
+  const vIndex = new Map();
+  const vertices = [];
+  for (let i = 0; i < nv; i++) {
+    const r = find(i);
+    if (vIndex.has(r)) continue;
+    vIndex.set(r, vertices.length);
+    vertices.push(X[r] ? X[r].slice() : [0, 0, 0]);
+  }
+  const vIdx = (vi) => (vi >= 0 && vi < nv) ? vIndex.get(find(vi)) : undefined;
+
+  // ── g) Facetten-Ebenen
+  const facetSurf = new Map();                // Region → { surf, sameSense }
+  for (const wr of regions) {
+    if (wr.kind !== 'facet') continue;
+    const t = wr.tris[0];
+    const c = [tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]];
+    const pa = vertices[vIdx(topo.vOfMesh[c[0]])] || ptOf(mesh, c[0]);
+    const pb = vertices[vIdx(topo.vOfMesh[c[1]])] || ptOf(mesh, c[1]);
+    const pc = vertices[vIdx(topo.vOfMesh[c[2]])] || ptOf(mesh, c[2]);
+    const nv2 = cross(sub(pb, pa), sub(pc, pa));
+    const nl = len(nv2);
+    const nrm = nl > 0 ? mul(nv2, 1 / nl) : [0, 0, 0];
+    const agree = dot(nrm, [N[3 * t], N[3 * t + 1], N[3 * t + 2]]);
+    if (!(nl > 1e-12) || agree < 0.5) {
+      fail(analyticTouching(mesh, wr, wLabel, regions, incident),
+        `Facette ${t}: Ebene entartet oder gegen die Netznormale (${agree.toFixed(3)})`);
+      continue;
+    }
+    facetSurf.set(wr.id, { surf: { type: 'plane', o: pa.slice(), n: nrm }, sameSense: true });
+  }
+
+  // ── h) Kanten: Schnittkurve zwischen den beiden anliegenden Flächen
+  const edges = [];
+  const edgeOf = new Map();                   // Kette → Kantenindex
+  const surfOfRegion = (id) => {
+    const wr = regions[id];
+    if (!wr) return null;
+    if (wr.kind === 'analytic') return wr.surf;
+    const fs = facetSurf.get(wr.id);
+    return fs ? fs.surf : null;
+  };
+  for (const ch of topo.chains) {
+    if (collapsed.has(ch.id)) continue;
+    const A2 = surfOfRegion(ch.L), B2 = surfOfRegion(ch.R);
+    const vi0 = topo.vOfMesh[ch.mv[0]], vi1 = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
+    if (!A2 || !B2 || vi0 < 0 || vi1 < 0) {
+      fail([regions[ch.L], regions[ch.R]], `Kette ${ch.id}: Fläche oder Ecke fehlt`);
+      continue;
+    }
+    const v0 = vIdx(vi0), v1 = vIdx(vi1);
+    if (v0 === v1) {
+      fail([regions[ch.L], regions[ch.R]], `Kette ${ch.id}: beide Enden sind dieselbe Ecke`);
+      continue;
+    }
+    const p = vertices[v0], q = vertices[v1];
+    const guides = ch.mv.slice(1, -1).map((mv) => ptOf(mesh, mv));
+    const res = fitIntersectionCurve(A2, B2, p, q, guides, { tol: FIT_TOL, maxShift: EDGE_MAX_SHIFT });
+    if (res.fail) {
+      fail([regions[ch.L], regions[ch.R]],
+        `Kette ${ch.id} (${regions[ch.L].type}/${regions[ch.R].type}): Schnittkurve ${res.fail}`);
+      continue;
+    }
+    edgeOf.set(ch.id, edges.length);
+    edges.push({ v0, v1, curve: res.curve });
+  }
+
+  // ── i) Flächen (mit Platzierungshinweisen für den STEP-Schreiber)
+  const faces = [];
+  const facesByType = { plane: 0, cylinder: 0, cone: 0, sphere: 0, torus: 0, facet: 0 };
+  for (const wr of regions) {
+    const loopIdx = topo.regionLoops.get(wr.id) || [];
+    const loops = [];
+    for (const li of loopIdx) {
+      const lp = topo.loops[li];
+      const uses = [];
+      const chains = [];
+      for (const u of lp.uses) {
+        if (collapsed.has(u.chain)) continue;
+        const ei = edgeOf.get(u.chain);
+        if (ei === undefined) continue;
+        uses.push({ edge: ei, fwd: !!u.fwd });
+        chains.push(u.chain);
+      }
+      if (!uses.length) continue;             // (bereits als Fehler gemeldet)
+      loops.push({ uses, chains });
+    }
+    if (!loops.length) continue;
+    let surf = null, sameSense = true, kind = wr.kind;
+    if (wr.kind === 'analytic') {
+      surf = wr.surf;
+      sameSense = !!wr.sameSense;
+      placementHint(wr, surf, mesh);
+    } else {
+      const fs = facetSurf.get(wr.id);
+      if (!fs) continue;                       // (bereits als Fehler gemeldet)
+      surf = fs.surf;
+      sameSense = true;
+      kind = 'facet';
+    }
+    // Außenrand: bei Ebenen der größte projizierte Flächeninhalt, bei gekrümmten
+    // Flächen nur bei genau einem Rand
+    if (surf.type === 'plane') {
+      let big = -1, bigA = -1;
+      loops.forEach((lp, i) => {
+        const pts = loopPoints(mesh, topo, lp.chains, vIdx, vertices);
+        const a = Math.abs(polyArea(pts, surf.n));
+        if (a > bigA) { bigA = a; big = i; }
+      });
+      loops.forEach((lp, i) => { lp.outer = (i === big); });
+    } else {
+      const one = loops.length === 1;
+      loops.forEach((lp) => { lp.outer = one; });
+    }
+    for (const lp of loops) delete lp.chains;
+    faces.push({ surf, sameSense, loops, kind });
+    facesByType[kind === 'facet' ? 'facet' : surf.type] = (facesByType[kind === 'facet' ? 'facet' : surf.type] || 0) + 1;
+  }
+  const edgesByType = { line: 0, circle: 0, bspline: 0 };
+  for (const e of edges) {
+    const t = e.curve?.type || 'line';
+    edgesByType[t] = (edgesByType[t] || 0) + 1;
+  }
+
+  if (failures.length) return { failures, culprits, hard: false };
+
+  return {
+    failures, culprits, hard: false,
+    brep: { vertices, edges, faces },
+    facesByType, edgesByType,
+  };
+}
+
+// Analytische Regionen, die eine Facette berühren (Kandidaten für den Täter)
+function analyticTouching(mesh, wr, wLabel, regions, incident) {
+  const out = new Set();
+  const { tri, nV } = mesh;
+  const t = wr.tris[0];
+  // Nachbardreiecke über die Kanten
+  for (let k = 0; k < 3; k++) {
+    const i = tri[3 * t + k], j = tri[3 * t + (k + 1) % 3];
+    const lo = i < j ? i : j, hi = i < j ? j : i;
+    const faces = mesh.edgeFaces.get(lo * nV + hi);
+    if (!faces) continue;
+    for (const f of faces) {
+      if (f === t) continue;
+      const o = regions[wLabel[f]];
+      if (o && o.kind === 'analytic') out.add(o);
+    }
+  }
+  // Regionen an den Ecken
+  for (let k = 0; k < 3; k++) {
+    const mv = tri[3 * t + k];
+    const ids = incident.get(mv) || new Set();
+    for (const id of ids) {
+      const o = regions[id];
+      if (o && o.kind === 'analytic') out.add(o);
+    }
+  }
+  return [...out];
+}
+
+// Punkte einer Schleife (Eckpunkte der B-Rep-Ecken, dazwischen die Netzpunkte)
+function loopPoints(mesh, topo, chainIds, vIdx, vertices) {
+  const pts = [];
+  for (const cid of chainIds) {
+    const ch = topo.chains[cid];
+    if (!ch) continue;
+    for (const mv of ch.mv) {
+      const vi = topo.vOfMesh[mv];
+      if (vi >= 0) {
+        const p = vertices[vIdx(vi)];
+        if (p) pts.push(p);
+      } else pts.push(ptOf(mesh, mv));
+    }
+  }
+  return pts;
+}
+
+// Platzierungshinweise für den STEP-Schreiber: Bezugsrichtung x (Parametrisierungsnaht)
+// auf die abgewandte Seite der Region legen, Achse/Höhe der Fläche setzen
+function placementHint(wr, surf, mesh) {
+  if (!surf) return;
+  const { A } = mesh;
+  if (surf.type === 'cylinder' || surf.type === 'cone' || surf.type === 'torus') {
+    // mittlere radiale Richtung (flächengewichtet) → x zeigt davon weg
+    const base = surf.type === 'cone' ? surf.apex : (surf.type === 'torus' ? surf.c : surf.o);
+    let rx = 0, ry = 0, rz = 0;
+    for (const t of wr.tris) {
+      const c = centroidOf(mesh, t);
+      const w = sub(c, base);
+      const h = dot(w, surf.a);
+      const rad = sub(w, mul(surf.a, h));
+      const wgt = A[t];
+      rx += rad[0] * wgt; ry += rad[1] * wgt; rz += rad[2] * wgt;
+    }
+    const m = norm([rx, ry, rz]);
+    if (len(m) > 1e-9) surf.x = mul(m, -1);
+    if (surf.type === 'cone') {
+      // mittlere axiale Höhe der Eckpunkte (Abstand Spitze → Platzierungsebene)
+      let sum = 0, cnt = 0;
+      const seen = new Set();
+      for (const t of wr.tris) {
+        for (let k = 0; k < 3; k++) {
+          const mv = mesh.tri[3 * t + k];
+          if (seen.has(mv)) continue;
+          seen.add(mv);
+          sum += dot(sub(ptOf(mesh, mv), surf.apex), surf.a);
+          cnt++;
+        }
+      }
+      if (cnt) surf.h0 = sum / cnt;
+    }
+  } else if (surf.type === 'sphere') {
+    // mittlere Auswärtsnormale der Region → Achse ⟂ dazu, x = −m
+    let mx = 0, my = 0, mz = 0;
+    for (const t of wr.tris) {
+      const w = A[t];
+      mx += mesh.N[3 * t] * w; my += mesh.N[3 * t + 1] * w; mz += mesh.N[3 * t + 2] * w;
+    }
+    const m = norm([mx, my, mz]);
+    if (len(m) > 1e-9) {
+      const helper = Math.abs(m[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+      const ax = norm(cross(m, helper));
+      surf.axis = ax;
+      const proj = sub(m, mul(ax, dot(m, ax)));
+      const pj = norm(proj);
+      surf.x = len(pj) > 1e-9 ? mul(pj, -1) : mul(m, -1);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Freiform-Pfad wählen (Schalter analysis.fitSegmentation: 'auto' | true | false)
+// ─────────────────────────────────────────────────────────────────────────────
+export function chooseFreeform(analysis, legacy) {
+  const mode = analysis?.fitSegmentation ?? 'auto';
+  if (mode === false) return legacy;
+  const groups = analysis?.normalGroups || [];
+  let T = 0;
+  for (const g of groups) T += Math.floor((g?.vertices?.length || 0) / 3);
+  // 'auto': nur der bisherige Weg, solange er nicht auffällig viele Flächen liefert
+  if (mode === 'auto' && !(legacy && legacy.report
+    && legacy.report.faceCount >= 5000 && legacy.report.faceCount >= 0.1 * T)) return legacy;
+  const ff = buildFreeformBrep(groups, {});
+  if (!ff) {
+    if (legacy?.report) legacy.report.freeform = { used: false, tried: true };
+    return legacy;
+  }
+  // 'auto': nur nehmen, wenn deutlich weniger Flächen
+  if (mode === 'auto' && legacy?.report && ff.report.faceCount > 0.6 * legacy.report.faceCount) {
+    legacy.report.freeform = { used: false, tried: true, faceCount: ff.report.faceCount };
+    return legacy;
+  }
+  return ff;
+}
