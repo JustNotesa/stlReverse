@@ -143,11 +143,16 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
 
   // ── Rundungen: weg (scharf gemacht) vs. erhalten (echte Teil-Zylinder/-Kegel) ──
   // `coneBandsDefeatured` steckt schon in `bandsDefeatured` — nicht doppelt zählen.
-  // `rimFilletsAbsorbed`: Rundungen am Lochrand, die in die Bohrungs-/Mantel-Umwandlung
-  // aufgingen (Chamfer-Zone) — sie wurden ebenfalls scharf gemacht, sonst zählt die Kachel
-  // „keine gezählt“, obwohl Facetten verschwunden sind.
-  const roundsRemoved = finite(report.bandsDefeatured) + finite(report.cornersDefeatured) + finite(report.filletsDefeatured) + finite(report.rimFilletsAbsorbed);
+  // Lochrand-Rundungen zählen hier NICHT: sie werden in der Bohrungs-/Mantel-Umwandlung als
+  // Fase (Kegel) geschrieben — dafür gibt es `rimToChamfer` (Rundung → Fase). Sie wurden also
+  // nicht „scharf gemacht“, sondern in eine Fase umgewandelt.
+  const roundsRemoved = finite(report.bandsDefeatured) + finite(report.cornersDefeatured) + finite(report.filletsDefeatured);
   const roundsKept = finite(report.arcCylinders) + finite(report.arcCones);
+  // Randbänder am Lochrand: `rimFilletsToChamfer` = Rundungen, die als Fase (Kegel) geschrieben
+  // wurden; `rimChamfersKept` = echte Fasen, die als Kegel erhalten bleiben (Fasen sind keine
+  // Verrundungen).
+  const rimToChamfer = finite(report.rimFilletsToChamfer);
+  const rimChamfersKept = finite(report.rimChamfersKept);
 
   // ── Überwiegend facettiert? ─────────────────────────────────────────────────
   // Heißt: der Körper ist geschlossen, aber seine Flächen sind (fast) nur Dreiecke —
@@ -183,9 +188,11 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
   if (finite(report.bandsDefeatured))   rounds.push(`${report.bandsDefeatured} ${report.bandsDefeatured === 1 ? 'Rundungsband' : 'Rundungsbänder'} an Deckflächen`);
   if (finite(report.cornersDefeatured)) rounds.push(`${report.cornersDefeatured} gerundete Profilecke${report.cornersDefeatured === 1 ? '' : 'n'}`);
   if (finite(report.filletsDefeatured)) rounds.push(`${report.filletsDefeatured} Kanten-Verrundung${report.filletsDefeatured === 1 ? '' : 'en'}`);
-  const rimRounds = finite(report.rimFilletsAbsorbed);
-  if (rimRounds > 0) rounds.push(`${rimRounds} ${rimRounds === 1 ? 'Randband (Rundung/Fase)' : 'Randbänder (Rundung/Fase)'} am Loch/Mantel übernommen`);
   if (rounds.length) converted.push(`scharf gemacht: ${rounds.join(', ')}`);
+  // Randbänder am Lochrand — eigene Chips, NICHT im „scharf gemacht:“-Text: eine Rundung wurde
+  // als Fase (Kegel) geschrieben, eine echte Fase blieb Kegel (Fasen sind keine Verrundungen).
+  if (rimToChamfer > 0) converted.push(`${rimToChamfer} ${rimToChamfer === 1 ? 'Lochrand-Rundung' : 'Lochrand-Rundungen'} als Fase (Kegel) geschrieben`);
+  if (rimChamfersKept > 0) converted.push(`${rimChamfersKept} ${rimChamfersKept === 1 ? 'Fase' : 'Fasen'} als echte${rimChamfersKept === 1 ? 'r' : ''} Kegel`);
 
   const info = [];
   if (cleanNote) info.push(cleanNote);
@@ -240,6 +247,8 @@ export function buildVerdict(report, analysis, { defeature = true } = {}) {
     filletsRemoved: roundsRemoved,
     roundsRemoved,
     roundsKept,
+    rimToChamfer,
+    rimChamfersKept,
     mostlyFaceted,
     defeature: !!defeature,
     freeformUsed: !!report.freeform?.used,
@@ -264,6 +273,25 @@ function verdictEdgePhrases(v) {
   if (v.nonManifoldEdges)   parts.push(`${v.nonManifoldEdges} non-manifold-Kante${v.nonManifoldEdges === 1 ? '' : 'n'}`);
   if (v.orientationDefects) parts.push(`${v.orientationDefects} fehlorientierte Kante${v.orientationDefects === 1 ? '' : 'n'}`);
   return parts;
+}
+
+/**
+ * Text der Kachel „Verrundungen“ — ehrlich getrennt:
+ *   „<r> entfernt“  = Bänder/Profilecken/Kanten-Verrundungen, die wirklich entfernten Rundungen
+ *   „<n> → Fase“   = Lochrand-Rundungen, die als Fase (Kegel) geschrieben wurden
+ *   „<k> bleiben rund“ = erhaltene Teil-Zylinder/-Kegel
+ * Echte Fasen (`rimChamfersKept`) zählen NICHT als Verrundung — sie tauchen hier nicht auf.
+ */
+export function filletTileText(v) {
+  const roundsRemoved = finite(v.roundsRemoved ?? v.filletsRemoved);
+  const roundsKept = finite(v.roundsKept);
+  const rimToChamfer = finite(v.rimToChamfer);
+  if (!v.defeature) return roundsKept > 0 ? `aus – ${roundsKept} bleiben rund` : 'aus';
+  const parts = [];
+  if (roundsRemoved > 0) parts.push(`${roundsRemoved} entfernt`);
+  if (rimToChamfer > 0) parts.push(`${rimToChamfer} → Fase`);
+  if (roundsKept > 0) parts.push(`${roundsKept} bleiben rund`);
+  return parts.length ? parts.join(', ') : 'keine gezählt';
 }
 
 function setKpi(doc, id, text, tone = '') {
@@ -361,22 +389,13 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
     setKpi(doc, 'kpi-watertight', 'Nein', 'err');
   }
   setKpi(doc, 'kpi-size', v.size ? `${fmtDim(v.size.w)} × ${fmtDim(v.size.d)} × ${fmtDim(v.size.h)}` : '–');
-  // Verrundungen ehrlich zählen: weg (scharf gemacht) und erhalten (bleiben rund)
-  const roundsRemoved = finite(v.roundsRemoved ?? v.filletsRemoved);
-  const roundsKept = finite(v.roundsKept);
-  let filletsText;
-  if (!v.defeature) {
-    filletsText = roundsKept > 0 ? `aus – ${roundsKept} bleiben rund` : 'aus';
-  } else if (roundsRemoved > 0) {
-    filletsText = `${roundsRemoved} entfernt` + (roundsKept > 0 ? `, ${roundsKept} bleiben rund` : '');
-  } else {
-    filletsText = roundsKept > 0 ? `${roundsKept} bleiben rund` : 'keine gezählt';
-  }
+  // Verrundungen ehrlich zählen: weg (scharf gemacht), als Fase geschrieben, erhalten (bleibt rund)
+  const filletsText = filletTileText(v);
   setKpi(doc, 'kpi-fillets', filletsText);
   const filletsLi = $(doc, 'kpi-fillets');
   if (filletsLi) {
     if (filletsText === 'keine gezählt') {
-      filletsLi.setAttribute('title', 'Rundungen an Lochrändern und Mänteln werden beim Schärfen nicht einzeln gezählt.');
+      filletsLi.setAttribute('title', 'Echte Fasen zählen nicht als Verrundung — sie stehen als Chip unter „Was umgewandelt wurde“.');
     } else {
       filletsLi.removeAttribute('title');
     }
