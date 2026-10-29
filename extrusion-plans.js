@@ -38,7 +38,7 @@
 //   extGeomSamples(geom, n)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { arcSamples, edgeCanonKey } from './profile-arcs.js?v=4';
+import { arcSamples, edgeCanonKey } from './profile-arcs.js?v=5';
 import {
   interpolateCubic, evalSpline, derivSpline, splineSamples,
   spanDeviation, translateSpline, nearestParam,
