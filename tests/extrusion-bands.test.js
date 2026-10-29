@@ -453,4 +453,14 @@ describe('extrusion-bands.js — Extrusionsbänder (Schrift als Spline-Wand)', (
     expect(kept.bands.length).toBe(0);
     expect(kept.stats.circleSkipped).toBeGreaterThanOrEqual(1);
   });
+
+  test('13: zyklischer Kreis + arcDet OHNE Bänder → KEIN Extrusionsband (der Kreis bleibt Kreis)', () => {
+    // profile-arcs hat den Ring verworfen (seine Gates) → arcDet ist leer. Trotzdem darf
+    // der Ring KEIN Extrusionsband werden: ein Kreis ist geometrisch ein Kreis, kein Spline.
+    const fds = glyphPlate(circleContour(48, 5));
+    const det = run(fds, { arcDet: { bands: [] } });
+    expect(det.bands.length).toBe(0);
+    expect(det.stats.circleSkipped).toBeGreaterThanOrEqual(1);
+    expect(det.arcs.size).toBe(0);
+  });
 });
