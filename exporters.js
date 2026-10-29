@@ -47,6 +47,11 @@ export const STEP_UNCERTAINTY_MM = '1.E-04';
 // 0.08…0.06·R), eine gedellte Wand kann seinen Fit nicht bestehen.
 const boreFailWhy = new WeakMap();
 
+// Cache-Schlüssel für den Vertex-Key (siehe buildVolumeStepBrepV2): das Cache-Eintragsobjekt
+// hängt als Symbol-Property direkt am Punkt-Array — Property-Zugriff ist rund 4x schneller
+// als WeakMap.get (die ~40 % der Exportzeit in toFixed gingen beim Schlüssel-Holen drauf).
+const VK = Symbol('vtxKey');
+
 export function buildOutlinesDxf(outlines) {
   const lines = [];
   const planeOrder = ['XY', 'YZ', 'ZX'];
@@ -686,12 +691,17 @@ export function buildVolumeStepBrepV2(analysis) {
   // Schlüssel je Punkt-Array merken: Defeaturing/Verschmelzen fragen dieselben Punkte tausendfach
   // ab (eBike: ~40 % der Exportzeit in toFixed). Die Koordinaten werden mitgeprüft, damit ein
   // nachträglich verändertes Array nie einen veralteten Schlüssel liefert.
-  const vkCache = new WeakMap();
+  // Der Cache-Eintrag hängt als Symbol-Property (VK) am Punkt-Array statt in einer WeakMap —
+  // das Lesen ist deutlich billiger. vkOwner ist die Eigentümer-Kennung dieses Export-Calls:
+  // dieselben Punkt-Arrays werden über mehrere Export-Calls hinweg wiederverwendet (Defeature
+  // an/aus auf denselben Gruppen), ein Eintrag eines fremden Calls darf nie benutzt werden.
+  const vkOwner = {};                                    // Eigentümer-Kennung dieses Export-Calls
   const vtxKey = (v) => {
-    const c = vkCache.get(v);
-    if (c && c.x === v[0] && c.y === v[1] && c.z === v[2]) return c.k;
+    const c = v ? v[VK] : undefined;
+    if (c && c.o === vkOwner && c.x === v[0] && c.y === v[1] && c.z === v[2]) return c.k;
     const k = `${fixZero(v[0], VKEY_DP)},${fixZero(v[1], VKEY_DP)},${fixZero(v[2], VKEY_DP)}`;
-    if (v && typeof v === 'object') vkCache.set(v, { x: v[0], y: v[1], z: v[2], k });
+    // Nur erweiterbare Objekte tragen den Cache — eingefrorene Arrays werden nicht zwischengespeichert.
+    if (v && typeof v === 'object' && Object.isExtensible(v)) v[VK] = { o: vkOwner, x: v[0], y: v[1], z: v[2], k };
     return k;
   };
   const edgeKeyFn = (a, b) => {
@@ -703,11 +713,11 @@ export function buildVolumeStepBrepV2(analysis) {
   const VID_M = 67108864;                                    // 2^26 Punkte → Schlüssel < 2^52
   const vidOf = new Map(), vidKeys = [];
   const vid = (p) => {
-    const k = vtxKey(p), c = vkCache.get(p);                  // Nummer im vtxKey-Cache-Eintrag merken
-    if (c && c.k === k && c.i !== undefined) return c.i;
+    const k = vtxKey(p), c = p[VK];                          // Nummer im vtxKey-Cache-Eintrag merken
+    if (c && c.o === vkOwner && c.k === k && c.i !== undefined) return c.i;
     let i = vidOf.get(k);
     if (i === undefined) { i = vidKeys.length; vidOf.set(k, i); vidKeys.push(k); }
-    if (c && c.k === k) c.i = i;
+    if (c && c.o === vkOwner && c.k === k) c.i = i;
     return i;
   };
   const edgeNum = (a, b) => { const ia = vid(a), ib = vid(b); return ia < ib ? ia * VID_M + ib : ib * VID_M + ia; };
