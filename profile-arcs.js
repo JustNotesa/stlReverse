@@ -472,7 +472,7 @@ const edgeKeyOf = (ka, kb) => (ka < kb ? ka + '|' + kb : kb + '|' + ka);
  * opts.skipCircleRim: Loops mit circleRim (analytischer Kreis-Rand) nicht indizieren.
  * → Map edgeKey → [{ fi, li, i, a, b }]
  */
-function buildEdgeIndex(fds, opts) {
+export function buildEdgeIndex(fds, opts) {
   const o = { ...ARC_DEFAULTS, ...opts };
   const vkey = vtxKeyOf(o);
   const index = new Map();
@@ -507,7 +507,7 @@ function buildEdgeIndex(fds, opts) {
  *             chains: [{ cyclic, facets, sides }] }
  * `taken` = Set bereits belegter fi (Band einer früheren Achse) → übersprungen.
  */
-function buildChains(fds, d, frame, index, taken, opts) {
+export function buildChains(fds, d, frame, index, taken, opts) {
   const o = { ...ARC_DEFAULTS, ...opts };
   const vkey = vtxKeyOf(o);
   const levelTol = o.levelTol;
