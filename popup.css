@@ -5,7 +5,7 @@
    6 Statuszeile · 7 Knöpfe · 8 Karten · 9 Verdikt · 10 Kennzahlen ·
    11 Fakten/Hinweise · 12 Startbildschirm · 13 Optionen · 14 Vergleich ·
    15 Viewer · 16 Expertenbereich · 17 Drop-Overlay · 18 Zustände ·
-   19 Fokus · 20 Bewegung
+   19 Fokus · 20 Bewegung · 21 Vollbild
    ========================================================================== */
 
 /* --- 1. Design-Tokens (ui-spec.md, Abschnitt 5) --------------------------- */
@@ -429,6 +429,47 @@ ul.chips.chips--info > li { background: var(--surface-2); color: var(--muted); }
 .note--warn strong, .note--warn b { color: var(--warn); }
 .note--err { background: var(--err-soft); color: var(--text); border-left: 4px solid var(--err); }
 
+/* --- 9b/10b Kompaktes Verdikt (ab 860 px Breite) -------------------------- */
+/* Ab dieser Breite ist genug Platz, um die Karte flach zu halten: die Aktionen
+   stehen nebeneinander, die Fakten fließen in eine einzige umbrechende Reihe.
+   Darunter bleiben die schmalen Layouts unverändert. */
+@media (min-width: 860px) {
+  .verdict__head { align-items: center; }
+  .verdict__icon { width: 32px; height: 32px; font-size: 1rem; }
+
+  /* Aktionen: Hauptknopf links, „Weitere Formate“ daneben, Hinweis darunter. */
+  .verdict__actions {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 6px 10px;
+    min-width: 0;
+  }
+  #step-export-button {
+    grid-column: 1; grid-row: 1;
+    min-height: 40px; padding: 0 16px; font-size: var(--fs);
+  }
+  /* Das Menü bleibt ein Overlay über der Kachel (position: relative). */
+  .verdict__actions details.formats {
+    grid-column: 2; grid-row: 1;
+    justify-self: start; min-width: 0;
+  }
+  #export-file-hint { grid-column: 1 / -1; grid-row: 2; margin: 0; }
+
+  .kpis { margin-top: 10px; }
+  .kpis > li { padding: 6px 10px; }
+  .kpi__value { font-size: 1.05rem; }
+
+  /* Fakten: Überschrift und Chips beider Gruppen in einer fließenden Reihe. */
+  .facts {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: 6px 8px; margin-top: 10px;
+  }
+  .facts h3.micro { margin: 0; }
+  .facts ul.chips { display: contents; margin: 0; }
+  ul.chips > li { padding: 2px 9px; font-size: .82rem; }
+}
+
 /* --- 12. Startbildschirm ------------------------------------------------- */
 .start { min-width: 0; }
 .start .uploader, #drop-zone {
@@ -491,6 +532,12 @@ input[type="checkbox"].switch:disabled { opacity: .45; cursor: not-allowed; }
   display: flex; flex-wrap: wrap; align-items: center;
   gap: 8px 16px; margin-bottom: 10px;
 }
+/* Ab 640 px Breite wird die Leiste flacher und der Bedienhinweis am Ende
+   der Karte trägt kaum noch Höhe bei. */
+@media (min-width: 640px) {
+  .compare__bar { margin-bottom: 6px; }
+  #compare-panel > p.micro { margin-top: 6px; }
+}
 .compare__bar h2 { margin-right: auto; }
 .seg {
   display: inline-flex; border: 1px solid var(--border);
@@ -523,6 +570,12 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
 .viewer-3d canvas { display: block; width: 100% !important; height: 100% !important; }
 .compare .viewer-3d { height: clamp(280px, 46vh, 620px); }
 #compare-panel[data-view="step"] .viewer-3d { height: clamp(320px, 62vh, 760px); }
+/* Ab 640 px Breite folgt die Höhe dem Fenster. So bleibt die Karte
+   „Vorher / Nachher“ bei 1440x900 vollständig ohne Scrollen sichtbar. */
+@media (min-width: 640px) {
+  .compare .viewer-3d { height: clamp(300px, calc(100vh - 490px), 720px); }
+  #compare-panel[data-view="step"] .viewer-3d { height: clamp(320px, calc(100vh - 440px), 800px); }
+}
 .expert .viewer-3d { height: clamp(240px, 38vh, 460px); }
 
 /* Hinweise im Viewer (der Canvas bleibt in beiden Modi hell) */
@@ -697,3 +750,36 @@ label.btn:focus-visible { outline: none; box-shadow: var(--focus); }
     transition: none !important;
   }
 }
+
+/* --- 21. Vollbild der Vergleichsansicht ---------------------------------- */
+/* Zwei Zustände: die native Vollbildansicht der Engine (:fullscreen) und –
+   falls die Engine sie verweigert – ein Overlay über der ganzen Seite
+   (.is-fullscreen). Beide teilen sich dieselben Regeln. */
+#compare-panel:fullscreen,
+#compare-panel.is-fullscreen {
+  display: flex; flex-direction: column; gap: 8px;
+  width: 100%; height: 100%; margin: 0;
+  border-radius: 0; overflow: auto;
+  /* Die Engine setzt im Vollbild Rahmen und Hintergrund mit !important –
+     eigene Angaben müssen dasselbe Gewicht haben, sonst wird alles schwarz. */
+  background: var(--surface) !important;
+  padding: var(--gap) !important;
+}
+/* Overlay-Rückfallebene: füllt das Fenster unabhängig von der Höhe. */
+#compare-panel.is-fullscreen {
+  position: fixed; inset: 0; z-index: 1000; height: auto;
+}
+#compare-panel:fullscreen .compare__grid,
+#compare-panel.is-fullscreen .compare__grid {
+  flex: 1 1 auto; min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+#compare-panel:fullscreen figure.vw,
+#compare-panel.is-fullscreen figure.vw { min-height: 0; height: 100%; }
+/* Die clamp()-Höhen der Viewer dürfen im Vollbild nicht greifen. */
+#compare-panel:fullscreen .viewer-3d,
+#compare-panel.is-fullscreen .viewer-3d { height: auto !important; min-height: 0; }
+/* Im Hintergrund (Overlay) nichts scrollen. */
+body.fs-open { overflow: hidden; }
+/* Der Vollbild-Knopf bleibt in der Leiste sichtbar und schrumpft nicht. */
+#fullscreen-toggle { flex: none; }
