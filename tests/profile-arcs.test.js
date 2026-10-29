@@ -4,7 +4,7 @@ import {
   ARC_DEFAULTS, findArcBands, fitCircle2d, makeFrame, toLocal, axisCandidates,
   validateArcBands, applyArcBands, edgeCanonKey, oneCircle,
   arcGeometry, arcSamples, bandSurface, buildArcPlans, expandArcLoop,
-  fitCoaxial2d, stackLevels,
+  fitCoaxial2d, stackLevels, insertRulings,
 } from '../profile-arcs.js';
 
 const vtxKey = (p) => p.map((x) => (+x.toFixed(4) || 0).toFixed(4)).join(',');
@@ -1552,5 +1552,229 @@ describe('profile-arcs.js — Band-Erkennung', () => {
     expect(axes[0][2]).toBeCloseTo(1, 9);
     // zählbare Punkte nur 4 (Außen-Loop) + 16 im circleRim-Loop → unter capMinPts → keine Achse
     expect(axisCandidates([mkFace(4, 16)], { vtxKey }).length).toBe(0);
+  });
+});
+
+// ── insertRulings: Mantellinien in verdrehte Ringe einfügen ─────────────────
+// Zylinder-Wand zwischen zwei Deckflächen. Der obere Ring ist um twistDeg gegen
+// den unteren verdreht → die Wand ist ein Zickzack aus Dreiecken und KEINE
+// Seitenkante ist eine Mantellinie. insertRulings setzt dann Punkte AUF DEN KREIS
+// und trianguliert die Wand neu (Reißverschluss zwischen unterem und oberem
+// Punktzug).
+function ringWall(opts = {}) {
+  const {
+    r = 2.75, n = 48, zLo = 0, zHi = 5, twistDeg = 0, spanDeg = 360, group = null,
+  } = opts;
+  const closed = spanDeg >= 360;
+  const segs = Math.round(n * spanDeg / 360);
+  const cnt = closed ? n : segs + 1;
+  const spanRad = spanDeg * Math.PI / 180;
+  const tw = twistDeg * Math.PI / 180;
+  const lo = [], hi = [];
+  for (let i = 0; i < cnt; i++) {
+    const a = closed ? (2 * Math.PI * i / n) : (spanRad * i / segs);
+    lo.push([r * Math.cos(a), r * Math.sin(a), zLo]);
+    hi.push([r * Math.cos(a + tw), r * Math.sin(a + tw), zHi]);
+  }
+  const fds = [];
+  for (let i = 0; i < segs; i++) {
+    const j = closed ? (i + 1) % n : i + 1;
+    fds.push(face([lo[i], lo[j], hi[j]]));
+    fds.push(face([lo[i], hi[j], hi[i]]));
+  }
+  // Deckflächen: unten rückwärts (−z), oben vorwärts (+z)
+  fds.push(face(lo.slice().reverse(), [0, 0, -1]));
+  fds.push(face(hi.slice(), [0, 0, 1]));
+  if (group) for (const fd of fds) fd.group = group;
+  return { fds, lo, hi, nWall: 2 * segs };
+}
+
+// Flächeninhalt einer Fläche (Dreieck oder Fächer um L[0])
+const triArea = (a, b, c) => 0.5 * len3(cross3(sub3(b, a), sub3(c, a)));
+const faceArea = (fd) => {
+  const L = fd.outer;
+  if (L.length === 3) return triArea(L[0], L[1], L[2]);
+  let s = 0;
+  for (let i = 1; i + 1 < L.length; i++) s += triArea(L[0], L[i], L[i + 1]);
+  return s;
+};
+
+// gerichtete Kanten aller Flächen (a→b) als Map
+const dirEdges = (fds) => {
+  const m = new Map();
+  for (const fd of fds) {
+    for (const L of [fd.outer, ...(fd.inner || [])]) {
+      if (!L || !L.length) continue;
+      for (let i = 0; i < L.length; i++) {
+        const a = vtxKey(L[i]), b = vtxKey(L[(i + 1) % L.length]);
+        if (a === b) continue;
+        const k = a + '>' + b;
+        m.set(k, (m.get(k) || 0) + 1);
+      }
+    }
+  }
+  return m;
+};
+
+describe('insertRulings', () => {
+  // Wand + Deckflächen der Testkörper
+  const R = 2.75, ZLO = 0, ZHI = 5, N = 48;
+
+  // Punkte, die es in der Eingabe noch nicht gab (neu eingefügte Mantellinien-Punkte)
+  const addedPoints = (input, result) => {
+    const old = new Set(input.flatMap((fd) => fd.outer.map(vtxKey)));
+    const seen = new Map();
+    for (const fd of result) {
+      for (const p of fd.outer) {
+        const k = vtxKey(p);
+        if (!old.has(k) && !seen.has(k)) seen.set(k, p);
+      }
+    }
+    return [...seen.values()];
+  };
+
+  // Winkel (rad) eines Punktes um die z-Achse
+  const angOf = (p) => Math.atan2(p[1], p[0]);
+
+  // gerichtete Kanten: jede Kante genau einmal in jeder Richtung?
+  const unbalanced = (fds) => {
+    const de = dirEdges(fds);
+    let n = 0;
+    for (const [k, c] of de) {
+      const [a, b] = k.split('>');
+      if (de.get(b + '>' + a) !== c) n++;
+    }
+    return n;
+  };
+
+  test('1: unverdrehter Vollring (R2.75, 48 Seg., z 0…5) → Eingabe unverändert, inserted = 0', () => {
+    const { fds } = ringWall({ twistDeg: 0 });
+    const res = insertRulings(fds, { vtxKey });
+    // ohne Verdrehung ist jede Seitenkante eine Mantellinie → nichts zu tun
+    expect(res.fds).toBe(fds);                        // gleiche Referenz, kein Kopieren
+    expect(res.stats.inserted).toBe(0);
+    expect(res.stats.stacks).toBe(0);
+  });
+
+  test('2: um 2° verdrehter Vollring → Mantellinien-Punkte auf dem Kreis, geschlossenes Netz', () => {
+    const { fds, nWall } = ringWall({ twistDeg: 2 });
+    const res = insertRulings(fds, { vtxKey });
+    expect(res.fds).not.toBe(fds);
+    expect(res.stats.stacks).toBeGreaterThanOrEqual(1);
+    expect(res.stats.inserted).toBeGreaterThan(0);
+
+    // die neuen Wandflächen (Mantellinien-Triangulierung)
+    const newWall = res.fds.filter((fd) => fd.rulingRetri === true);
+    expect(newWall.length).toBeGreaterThan(0);
+    expect(newWall.every((fd) => fd.outer.length === 3)).toBe(true);
+    // die übrigen Flächen sind die (bearbeiteten) Deckflächen
+    const caps = res.fds.filter((fd) => fd.rulingRetri !== true);
+    expect(caps.length).toBe(2);
+    expect(caps.every((c) => c.rulingRetri === undefined)).toBe(true);
+
+    // die eingefügten Punkte: auf dem Kreis, auf ihrer Ebene, in der Deckfläche
+    const added = addedPoints(fds, res.fds);
+    expect(added.length).toBe(res.stats.inserted);
+    for (const p of added) {
+      expect(Math.abs(Math.hypot(p[0], p[1]) - R)).toBeLessThan(1e-9);
+      expect([ZLO, ZHI].some((z) => Math.abs(p[2] - z) < 1e-9)).toBe(true);
+      const cap = caps.find((c) => Math.abs(c.outer[0][2] - p[2]) < 1e-9);
+      expect(cap).toBeTruthy();
+      expect(cap.outer.some((q) => vtxKey(q) === vtxKey(p))).toBe(true);
+    }
+
+    // das Netz bleibt geschlossen: jede Kante genau einmal in jeder Richtung
+    expect(unbalanced(res.fds)).toBe(0);
+    for (const [, c] of dirEdges(res.fds)) expect(c).toBe(1);
+
+    // Flächeninhalt der Wand: die neu triangulierte Wand deckt dieselbe Fläche.
+    // Eine relative Änderung von 1e-6 ist hier prinzipiell nicht erreichbar: die
+    // eingefügten Punkte machen den oberen Ring zu einem feineren Polygon
+    // (52 statt 48 Ecken) → die Mantelfläche wächst um ~1.7e-5 (relativ).
+    // Beide Flächen liegen knapp unter dem analytischen Zylindermantel 2π·r·h.
+    const aOld = fds.slice(0, nWall).reduce((s, fd) => s + faceArea(fd), 0);
+    const aNew = newWall.reduce((s, fd) => s + faceArea(fd), 0);
+    expect(Math.abs(aNew - aOld) / aOld).toBeLessThan(1e-4);
+    expect(aNew).toBeGreaterThan(aOld);              // feineres Polygon → größere Fläche
+    const cyl = 2 * Math.PI * R * (ZHI - ZLO);
+    expect(Math.abs(aNew - cyl) / cyl).toBeLessThan(1e-3);
+    expect(Math.abs(aOld - cyl) / cyl).toBeLessThan(1e-3);
+
+    // die Eingabe wurde nicht verändert
+    expect(fds.length).toBe(nWall + 2);
+    expect(fds[0].outer.length).toBe(3);
+    expect(fds[nWall].outer.length).toBe(N);
+    expect(fds[nWall + 1].outer.length).toBe(N);
+  });
+
+  test('3: offener Bogen (120°) um 2° verdreht → Schnitte nur am offenen Ende, innerhalb des Bogens', () => {
+    const { fds } = ringWall({ twistDeg: 2, spanDeg: 120 });
+    const res = insertRulings(fds, { vtxKey });
+    expect(res.fds).not.toBe(fds);
+    expect(res.stats.inserted).toBeGreaterThan(0);
+
+    const newWall = res.fds.filter((fd) => fd.rulingRetri === true);
+    expect(newWall.length).toBeGreaterThan(0);
+    const added = addedPoints(fds, res.fds);
+    expect(added.length).toBe(res.stats.inserted);
+
+    // alle eingefügten Punkte liegen INNERHALB des Bogens (0°…120°)
+    const span = 120 * Math.PI / 180;
+    for (const p of added) {
+      const a = angOf(p);
+      expect(a).toBeGreaterThan(-1e-9);
+      expect(a).toBeLessThan(span + 1e-9);
+    }
+    // die Schnitte liegen an den offenen Enden: einer im ersten, einer im
+    // letzten Segment des Bogens (7.5° breite Segmente)
+    const seg = 7.5 * Math.PI / 180;
+    const angs = added.map(angOf).sort((x, y) => x - y);
+    expect(angs[0]).toBeLessThan(seg);
+    expect(angs[angs.length - 1]).toBeGreaterThan(span - seg);
+
+    // die Wand bleibt ein Teilstück: es entstehen keine neuen offenen Kanten
+    expect(unbalanced(res.fds)).toBe(unbalanced(fds));
+
+    // die Deckflächen enthalten die Punkte ihrer Ebene
+    const caps = res.fds.filter((fd) => fd.rulingRetri !== true);
+    expect(caps.length).toBe(2);
+    for (const p of added) {
+      const cap = caps.find((c) => Math.abs(c.outer[0][2] - p[2]) < 1e-9);
+      expect(cap).toBeTruthy();
+      expect(cap.outer.some((q) => vtxKey(q) === vtxKey(p))).toBe(true);
+      expect(Math.abs(Math.hypot(p[0], p[1]) - R)).toBeLessThan(1e-9);
+    }
+  });
+
+  test('4a: gesperrte Gruppe (opts.blockedGroups) → die Wand bleibt unverändert', () => {
+    const { fds } = ringWall({ twistDeg: 2, group: 'wand' });
+    const res = insertRulings(fds, { vtxKey, blockedGroups: new Set(['wand']) });
+    expect(res.fds).toBe(fds);
+    expect(res.stats.inserted).toBe(0);
+    expect(res.stats.stacks).toBe(0);
+  });
+
+  test('4b: schräge Deckfläche (10° von der Achse) → der Stapel wird übersprungen', () => {
+    const { fds } = ringWall({ twistDeg: 2 });
+    // die obere Deckfläche steht nicht mehr senkrecht zur Achse
+    fds[fds.length - 1].normal = [Math.sin(10 * Math.PI / 180), 0, Math.cos(10 * Math.PI / 180)];
+    const res = insertRulings(fds, { vtxKey });
+    expect(res.fds).toBe(fds);                        // unverändert
+    expect(res.stats.skipped).toBeGreaterThanOrEqual(1);
+    expect(res.stats.inserted).toBe(0);
+  });
+
+  test('5: Determinismus — zwei Aufrufe auf derselben Eingabe liefern gleiche Koordinaten', () => {
+    const { fds } = ringWall({ twistDeg: 2 });
+    const a = insertRulings(fds, { vtxKey });
+    const b = insertRulings(fds, { vtxKey });
+    expect(a.stats).toEqual(b.stats);
+    expect(a.fds.length).toBe(b.fds.length);
+    for (let i = 0; i < a.fds.length; i++) {
+      expect(a.fds[i].outer.length).toBe(b.fds[i].outer.length);
+      for (let k = 0; k < a.fds[i].outer.length; k++) {
+        expect(a.fds[i].outer[k]).toEqual(b.fds[i].outer[k]);
+      }
+    }
   });
 });
