@@ -191,6 +191,16 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **UI-Überarbeitung „Maker-Ablauf+“ (2026-10-29, `wt/ui-neu`)** — zwei Entwürfe (Maker-Ablauf / CAD-Werkbank), Jury,
+  Umsetzung durch MiniMax, zwei unabhängige Prüfrunden. Ergebnis-Karte (Verdikt, STEP-Download ohne Scrollen, Kennzahlen,
+  „Facettiert geblieben“ mit Grund), Optionen-Spalte mit Erklärsätzen, neue Schalter „Gravur als Extrusion“ (an) und
+  „Freiform-Erkennung“ (aus), Vorher/Nachher-Viewer (Vergleich | Nur STEP), Expertenansicht mit Reitern, hell/dunkel, ab 700 px,
+  Tastaturbedienung. Neue Module verdict.js, layout.js, feature-colors.js (+ tests/verdict.test.js). STEP-Ausgabe unverändert.
+  Screenshots tests/screenshots/ui-neu-*.png.
+- [ ] **UI Etappe 2:** Verrundungs-Zähler im Report fehlt, wenn Rundungen in Bohrung/Mantel aufgehen (Washer: „keine gezählt“,
+  obwohl 39 → 6 Flächen); Karte bei „überwiegend facettiert“ nicht grün (body[data-quality=faceted]), Tausenderpunkt im
+  Facetten-Text; Viewer bei schmalem Fenster weiter nach oben + Vollbild-Knopf (User-Frage offen); leere Grid-Reihen im
+  Fehlerzustand; veraltete E2E-Tests (tests/e2e, #plane-table usw.).
 - [x] **Kleinteile NozzleBox (2026-10-29, `wt/kleinteile`)** — (1) Ösen: Lochringe im STL gegeneinander verdreht
   (keine Mantellinie) → `insertRulings` (profile-arcs.js) setzt Punkte exakt auf den Kreis an Schnittwinkeln und
   trianguliert die Wand neu; Gravur-Ablauf läuft ohne/mit Mantellinien, weniger Flächen gewinnt. (2) Scharnier-Knöchel:
