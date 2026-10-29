@@ -815,6 +815,9 @@ async function checkBody(body, occt) {
   const MATCH_KEY = { 'AN': 'onMatch', 'AN+B': 'onBMatch', 'v2': 'isoMatch' };
   for (const [tag, r] of [['AN', on], ['AN+B', onB], ['v2', iso]]) {
     if (!r || !(r.exported && r.occt && r.otris.length)) continue;
+    // Netz-Prüfling (z5): geprüft wird die AUS-Seite (Flächenzahl, Bögen); die AN-Schärfung einer
+    // Profil-Rundung MIT Fasen bildet variantsFor nicht ab → AN-Geometrie frei (Pflichten oben gelten).
+    if (body.expect.anFree && tag !== 'v2') { out.notes.push(`${tag}: Geometrie frei (anFree)`); continue; }
     if (tag === 'v2' && hasBends) {
       // v2 isoliert: die Gruppen-Kopien tragen keine Primitive → keine Biegungs-Erkennung → der
       // Lauf schärft die Biegungen (anders als der AN-Lauf). Frei, nur die Pflichten oben.
