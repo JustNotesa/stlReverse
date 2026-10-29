@@ -281,18 +281,47 @@ export function initFullscreen() {
 
   const canNative = !!document.fullscreenEnabled && typeof panel.requestFullscreen === 'function';
 
+  // Rückfall-Timer: Manche Hosts (eingebettete Browser-Panes) lassen das
+  // Promise von requestFullscreen() dauerhaft offen — es wird weder erfüllt
+  // noch abgelehnt, und fullscreenchange kommt nie. Dann bliebe der Klick
+  // ohne Wirkung. Der Timer prüft nach 1,5 s, ob das echte Vollbild läuft,
+  // und schaltet sonst das Overlay ein.
+  let fsFallbackTimer = null;
+
+  const clearFsFallback = () => {
+    if (fsFallbackTimer !== null) {
+      clearTimeout(fsFallbackTimer);
+      fsFallbackTimer = null;
+    }
+  };
+
   if (canNative) {
     // Nach jedem Wechsel (Knopf, Escape der Engine, Tabwechsel) den Zustand
     // am Knopf nachziehen.
     document.addEventListener('fullscreenchange', () => {
-      setState(document.fullscreenElement === panel);
+      const nativeOn = document.fullscreenElement === panel;
+      // Das native Vollbild läuft (oder ein anderes Element blockiert) —
+      // der Rückfall-Timer darf nicht mehr nachlaufen.
+      clearFsFallback();
+      if (nativeOn && overlayOpen()) {
+        // Beide Modi gleichzeitig sind ausgeschlossen: Overlay weg.
+        panel.classList.remove('is-fullscreen');
+        document.body?.classList.remove('fs-open');
+      }
+      setState(nativeOn);
       notifyResize();
     });
   }
 
   btn.addEventListener('click', () => {
+    // Offenes Overlay hat Vorrang — für beide Wege gleich.
+    if (overlayOpen()) {
+      clearFsFallback();
+      setOverlay(false);
+      return;
+    }
     if (!canNative) {
-      setOverlay(!overlayOpen());
+      setOverlay(true);
       return;
     }
     if (document.fullscreenElement === panel) {
@@ -302,13 +331,23 @@ export function initFullscreen() {
     if (document.fullscreenElement) return;   // ein anderes Element ist bereits im Vollbild
     try {
       const p = panel.requestFullscreen();
+      // Rückfall absichern, bevor auf das Promise gewartet wird.
+      clearFsFallback();
+      fsFallbackTimer = setTimeout(() => {
+        fsFallbackTimer = null;
+        if (document.fullscreenElement !== panel && !overlayOpen()) {
+          setOverlay(true);
+        }
+      }, 1500);
       if (p && typeof p.catch === 'function') {
         p.catch((err) => {
+          clearFsFallback();
           if (err && err.name === 'AbortError') return;   // Nutzer hat abgebrochen
           setOverlay(true);                               // Engine verweigert → Overlay
         });
       }
     } catch (_) {
+      clearFsFallback();
       setOverlay(true);
     }
   });
