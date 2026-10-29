@@ -460,7 +460,8 @@ test('indexMesh: entartete Dreiecke und −0 werden geschweißt', () => {
 // ── Echte Freiform-Netze: Regionen-Zählung (Original + starre Drehung) ───────
 // Die Zählung muss für das Original und seine starre Drehung gleich sein —
 // dafür sorgen die Saat-Reihenfolge (Fläche mit Toleranz, dann drehungs-
-// unabhängiger Sekundärschlüssel) und die vertagten Saaten.
+// unabhängiger Sekundärschlüssel), die vertagten Saaten und die Nach-
+// bearbeitung (Regionen-Wettbewerb, Verschmelzung).
 const FF_CASES = [
   ['ff_rundquader_r1', { plane: 6, cylinder: 12, sphere: 8 }],
   ['ff_platte_loch_torus', { plane: 6, cylinder: 1, torus: 1 }],
@@ -490,26 +491,6 @@ for (const [name, want] of FF_CASES) {
     });
   }
 }
-
-// ── Diagnose: Kandidaten je Saat (nur Entwicklungswerkzeug) ───────────────────
-test('Diagnose Varianten', () => {
-  for (const name of ['ff_platte_loch_torus']) {
-    const buf = readFileSync(new URL(`./stl/${name}.stl`, import.meta.url));
-    const raw = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-    const mesh = indexMesh(raw.faces.map((f) => f.vertices));
-    let count = 0;
-    segmentByFit(mesh, {
-      trace: (s, cands, best) => {
-        if (!cands.some((c) => c.area > 20)) return;
-        count++;
-        if (count > 8) return;
-        const line = cands.map((c) => `${c.hood}/${c.type}:n${c.len}:a${c.area.toFixed(1)}:r${c.rms.toExponential(1)}`).join(' ');
-        const b = best ? `${best.type}:n${best.mem.length}:a${best.area.toFixed(1)}` : 'none';
-        console.log(`  ${name} S${s} A${mesh.A[s].toFixed(1)} [${line}] => ${b}`);
-      },
-    });
-  }
-});
 
 // ── Laufzeit ─────────────────────────────────────────────────────────────────
 

@@ -778,12 +778,264 @@ function seedOrder(mesh) {
   return order;
 }
 
+// ── Nachbearbeitung: Wettbewerb, Verschmelzung, Schluss-Fit ─────────────────
+// Wettbewerb: ein Dreieck an der Grenze zweier Regionen wechselt zu der
+// Region, deren Modell es besser trifft (kleinere maximale Vertexabweichung).
+// Verschmelzung: benachbarte Regionen gleichen Typs mit übereinstimmender
+// Fläche werden zu einer Region (neu gefittet).
+
+// maximale Vertexabweichung eines Dreiecks vom Modell
+function triDev(mesh, m, f) {
+  const { P, tri } = mesh;
+  let d = 0;
+  for (let k = 0; k < 3; k++) {
+    const i = tri[3 * f + k];
+    const dd = m.dist(P[3 * i], P[3 * i + 1], P[3 * i + 2]);
+    if (dd > d) d = dd;
+  }
+  return d;
+}
+
+// Komponenten einer Dreiecksmenge (Zusammenhang über gemeinsame Kanten)
+function edgeComps(mesh, tris) {
+  const inSet = new Set(tris);
+  const seen = new Set();
+  const comps = [];
+  for (const s of tris) {
+    if (seen.has(s)) continue;
+    seen.add(s);
+    const comp = [s];
+    const stack = [s];
+    while (stack.length) {
+      const f = stack.pop();
+      for (const [g] of mesh.adj[f]) {
+        if (inSet.has(g) && !seen.has(g)) { seen.add(g); comp.push(g); stack.push(g); }
+      }
+    }
+    comps.push(comp);
+  }
+  return comps;
+}
+
+// Winkel zweier Richtungen (parallel auch bei Gegenrichtung)
+const angAxes = (a, b) => {
+  const d = Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
+  return Math.acos(Math.min(1, d));
+};
+const pdist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+// Abstand eines Punktes von einer Ebene
+const planeDist = (s, p) =>
+  Math.abs((p[0] - s.o[0]) * s.n[0] + (p[1] - s.o[1]) * s.n[1] + (p[2] - s.o[2]) * s.n[2]);
+
+// Abstand zweier paralleler Achsen (Punkte auf den Achsen + Richtung)
+function axisGap(p1, a1, p2, a2) {
+  const dx = p2[0] - p1[0], dy = p2[1] - p1[1], dz = p2[2] - p1[2];
+  const h = dx * a2[0] + dy * a2[1] + dz * a2[2];
+  return Math.hypot(dx - a2[0] * h, dy - a2[1] * h, dz - a2[2] * h);
+}
+
+// Flächenschwerpunkt einer Region (Dreiecksschwerpunkte, flächengewichtet)
+function regionCentroid(mesh, tris) {
+  const { P, tri, A } = mesh;
+  let cx = 0, cy = 0, cz = 0, w = 0;
+  for (const f of tris) {
+    const i0 = tri[3 * f], i1 = tri[3 * f + 1], i2 = tri[3 * f + 2];
+    const a = A[f];
+    cx += a * (P[3 * i0] + P[3 * i1] + P[3 * i2]) / 3;
+    cy += a * (P[3 * i0 + 1] + P[3 * i1 + 1] + P[3 * i2 + 1]) / 3;
+    cz += a * (P[3 * i0 + 2] + P[3 * i1 + 2] + P[3 * i2 + 2]) / 3;
+    w += a;
+  }
+  if (!(w > 0)) return null;
+  return [cx / w, cy / w, cz / w];
+}
+
+// Passen zwei Regionen gleichen Typs geometrisch zusammen?
+function canMerge(a, b, tol, ca, cb) {
+  if (a.type !== b.type) return false;
+  const sa = a.model && a.model.surf, sb = b.model && b.model.surf;
+  if (!sa || !sb) return false;
+  switch (a.type) {
+    case 'plane': {
+      if (angAxes(sa.n, sb.n) > 0.5 * Math.PI / 180) return false;
+      if (!ca || !cb) return false;
+      return planeDist(sb, ca) < tol && planeDist(sa, cb) < tol;
+    }
+    case 'cylinder':
+      return angAxes(sa.a, sb.a) <= 0.5 * Math.PI / 180
+        && axisGap(sa.o, sa.a, sb.o, sb.a) < tol
+        && Math.abs(sa.R - sb.R) < tol;
+    case 'sphere':
+      return pdist(sa.c, sb.c) < tol && Math.abs(sa.R - sb.R) < tol;
+    case 'torus':
+      return angAxes(sa.a, sb.a) <= 0.5 * Math.PI / 180
+        && pdist(sa.c, sb.c) < tol
+        && Math.abs(sa.Rm - sb.Rm) < tol && Math.abs(sa.r - sb.r) < tol;
+    case 'cone':
+      return angAxes(sa.a, sb.a) <= 0.5 * Math.PI / 180
+        && pdist(sa.apex, sb.apex) < tol
+        && Math.abs(sa.alpha - sb.alpha) < 0.5 * Math.PI / 180;
+    default: return false;
+  }
+}
+
+// Nachbearbeitung der Segmentierung → { regions, label }
+function refineRegions(mesh, regions, models, opts) {
+  const { tol, okTri, fit } = opts;
+  const { adj, A, T } = mesh;
+  const recs = [];
+  const owner = new Int32Array(T).fill(-1);
+  for (let i = 0; i < regions.length; i++) {
+    const rec = { type: regions[i].type, model: models[i], tris: regions[i].tris.slice(), dead: false };
+    recs.push(rec);
+    for (const f of rec.tris) owner[f] = i;
+  }
+
+  // ── Nachbearbeitung: Wettbewerb und Verschmelzung, bis nichts mehr wechselt
+  // Wettbewerb: ein Dreieck an der Grenze zweier Regionen wechselt zu der
+  // Region, deren Modell es besser trifft (kleinere maximale Vertexabweichung).
+  // Eine Region aus nur EINEM Dreieck trägt ihr Modell nicht (eine Ebene passt
+  // drei Punkte immer, ein Zylinder durch drei Punkte ist beliebig) — ihr
+  // Dreieck wandert daher zur Nachbarregion, die es annimmt.
+  // Verschmelzung: benachbarte Regionen gleichen Typs mit übereinstimmender
+  // Fläche werden zu einer Region (neu gefittet).
+  const eps = 0.01 * tol;          // Gleichheit der Abweichungen (Rauschen)
+  for (let round = 0; round < 4; round++) {
+    let changed = false;
+
+    // ── 1. Wettbewerb: bis zu 3 Runden ──────────────────────────────────────
+    for (let sweep = 0; sweep < 3; sweep++) {
+      const moves = [];
+      for (let ri = 0; ri < recs.length; ri++) {
+        const r = recs[ri];
+        if (r.dead || !r.model || !r.tris.length) continue;
+        const held = r.tris.length > 1;
+        for (const f of r.tris) {
+          const own = held ? triDev(mesh, r.model, f) : Infinity;
+          let to = -1, best = Infinity, bestN = -1;
+          for (const [g] of adj[f]) {
+            const gi = owner[g];
+            if (gi < 0 || gi === ri) continue;
+            const s = recs[gi];
+            if (s.dead || !s.model || !s.tris.length) continue;
+            if (!okTri(s.model, f)) continue;
+            const d = triDev(mesh, s.model, f);
+            // bei gleicher Abweichung gewinnt die Region mit mehr Dreiecken:
+            // ihr Modell ist besser belegt
+            if (d < best - eps || (Math.abs(d - best) <= eps && s.tris.length > bestN)) {
+              best = d; bestN = s.tris.length; to = gi;
+            }
+          }
+          if (to < 0) continue;
+          if (!okTri(r.model, f)) { moves.push(f, to); continue; }   // passt nicht mehr
+          if (best < own - eps) { moves.push(f, to); continue; }    // bessere Fläche
+          if (best <= own + eps && bestN > r.tris.length) moves.push(f, to);
+        }
+      }
+      if (!moves.length) break;
+      changed = true;
+      // Bewegungen anwenden
+      const touched = new Set();
+      for (let k = 0; k < moves.length; k += 2) {
+        const f = moves[k], to = moves[k + 1];
+        const from = owner[f];
+        if (from < 0 || from === to) continue;
+        const fr = recs[from];
+        const i = fr.tris.indexOf(f);
+        if (i >= 0) fr.tris.splice(i, 1);
+        recs[to].tris.push(f);
+        owner[f] = to;
+        touched.add(from); touched.add(to);
+      }
+      // leere Regionen ausscheiden (ihr Modell wäre ohne Dreiecke wertlos)
+      for (const ri of touched) {
+        const r = recs[ri];
+        if (!r.dead && !r.tris.length) { r.dead = true; r.model = null; }
+      }
+      // Regionen, die auseinanderfallen, teilen
+      for (const ri of touched) {
+        const r = recs[ri];
+        if (r.dead || r.tris.length < 2) continue;
+        const comps = edgeComps(mesh, r.tris);
+        if (comps.length < 2) continue;
+        comps.sort((x, y) => (y.length - x.length) || (x[0] - y[0]));
+        r.tris = comps[0];
+        for (let ci = 1; ci < comps.length; ci++) {
+          const tris = comps[ci];
+          let type = r.type, m = null;
+          if (tris.length >= 3) {
+            m = fit(mesh, tris, type, tol);
+            if (m && !tris.every((f) => okTri(m, f))) m = null;
+          }
+          if (!m) { type = 'plane'; m = fit(mesh, tris, 'plane', tol); }
+          if (!m) { type = 'facet'; m = null; }
+          recs.push({ type, model: m, tris: tris.slice(), dead: false });
+          const ni = recs.length - 1;
+          for (const f of tris) owner[f] = ni;
+        }
+      }
+      // geänderte Regionen nachfitten (nur übernehmen, wenn alle passen)
+      for (const ri of touched) {
+        const r = recs[ri];
+        if (r.dead || !r.model || !r.tris.length) continue;
+        const m = fit(mesh, r.tris, r.type, tol);
+        if (m && r.tris.every((f) => okTri(m, f))) r.model = m;
+      }
+    }
+
+    // ── 2. Verschmelzung: gleiche Flächen zusammenführen ────────────────────
+    for (let mr = 0; mr < 12; mr++) {
+      const cents = recs.map((r) => (r.dead || !r.tris.length ? null : regionCentroid(mesh, r.tris)));
+      let merged = false;
+      for (let f = 0; f < T; f++) {
+        for (const [g] of adj[f]) {
+          if (g < f) continue;
+          const ri = owner[f], rj = owner[g];
+          if (ri < 0 || rj < 0 || ri === rj) continue;
+          if (recs[ri].dead || recs[rj].dead) continue;
+          if (!canMerge(recs[ri], recs[rj], tol, cents[ri], cents[rj])) continue;
+          const tris = recs[ri].tris.concat(recs[rj].tris);
+          const m = fit(mesh, tris, recs[ri].type, tol);
+          if (!m || !tris.every((x) => okTri(m, x))) continue;
+          for (const x of recs[rj].tris) owner[x] = ri;
+          recs[ri].tris = tris; recs[ri].model = m;
+          recs[rj].tris = []; recs[rj].model = null; recs[rj].dead = true;
+          merged = true;
+        }
+      }
+      if (!merged) break;
+      changed = true;
+    }
+
+    if (!changed) break;
+  }
+
+  // ── 3. Schluss-Fit: jede Region mit ihrem Modell neu fitten ──────────────
+  for (const r of recs) {
+    if (r.dead || !r.model || !r.tris.length) continue;
+    const m = fit(mesh, r.tris, r.type, tol);
+    if (m && r.tris.every((f) => okTri(m, f))) r.model = m;
+  }
+
+  // Ergebnis neu aufbauen (fortlaufende Ids, Label konsistent)
+  const out = [];
+  const newLabel = new Int32Array(T).fill(-1);
+  for (const r of recs) {
+    if (r.dead || !r.tris.length) continue;
+    const id = out.length;
+    let area = 0;
+    for (const f of r.tris) { newLabel[f] = id; area += A[f]; }
+    out.push({ id, type: r.type, surf: r.model ? r.model.surf : null, tris: r.tris, area });
+  }
+  return { regions: out, label: newLabel };
+}
+
 export function segmentByFit(mesh, opts = {}) {
   const tol = opts.tol ?? 0.02;
   const angleDeg = opts.angleDeg ?? 12;
   const timeBudgetMs = opts.timeBudgetMs ?? 4000;
   const trim = opts.trim !== false;
-  const trace = typeof opts.trace === 'function' ? opts.trace : null;
   if (!mesh || !mesh.T) return { label: new Int32Array(0), regions: [] };
   const { P, tri, T, N, A, adj } = mesh;
   const ncos = Math.cos(angleDeg * Math.PI / 180);
@@ -920,6 +1172,7 @@ export function segmentByFit(mesh, opts = {}) {
   };
 
   // Region eintragen
+  const models = [];
   const addRegion = (r) => {
     const id = regions.length;
     for (const f of r.mem) label[f] = id;
@@ -930,6 +1183,7 @@ export function segmentByFit(mesh, opts = {}) {
       tris: r.mem,
       area: r.area,
     });
+    models.push(r.model || null);
   };
 
   // Modell-Suche zu einer Saat: Nachbarschaften 24/10/4, je alle Modelltypen.
@@ -937,18 +1191,15 @@ export function segmentByFit(mesh, opts = {}) {
   // beste Modell (Fläche, dann Restfehler, dann Rang) zählt.
   const trySeed = (s) => {
     let best = null;
-    const cands = [];
     for (const n of [24, 10, 4]) {
       const hood = seedHood(s, n);
       for (const type of TYPES) {
         if (type === 'torus' && hood.length < 6) continue;
         const r = grow(hood, type);
         if (!r) continue;
-        cands.push({ hood: n, type: r.type, len: r.mem.length, area: r.area, rms: r.rms });
         if (betterCand(r, best)) best = r;
       }
     }
-    if (trace) trace(s, cands, best);
     return best;
   };
 
@@ -992,7 +1243,10 @@ export function segmentByFit(mesh, opts = {}) {
       const id = regions.length;
       label[f] = id;
       regions.push({ id, type: 'facet', surf: null, tris: [f], area: A[f] });
+      models.push(null);
     }
   }
-  return { label, regions };
+  // Nachbearbeitung: Wettbewerb, Verschmelzung, Schluss-Fit
+  const refined = refineRegions(mesh, regions, models, { tol, okTri, fit: fitModelInternal });
+  return { label: refined.label, regions: refined.regions };
 }
