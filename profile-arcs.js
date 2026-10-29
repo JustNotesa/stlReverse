@@ -474,6 +474,128 @@ const edgeKeyOf = (ka, kb) => (ka < kb ? ka + '|' + kb : kb + '|' + ka);
 
 // ── Kanten-Index ────────────────────────────────────────────────────────────
 /**
+ * Merkstelle für buildEdgeIndex: je Export wird derselbe Index ~19-mal aus
+ * DEMSELBEN fds-Array gebaut (Bogen-Suche, Validierung, Gravur) — der Index
+ * hängt aber nur an den Daten, am Vertex-Schlüssel und an skipCircleRim.
+ * Deshalb je fds-Array merken (höchstens ein Eintrag je skipCircleRim-Flag).
+ * Vor der Wiederverwendung wird ein Schnappschuss der Eingabe EXAKT geprüft
+ * (Flächen, Loops, Punkte, Koordinaten): nur bei unveränderter Eingabe kommt
+ * der gemerkte Index zurück, sonst wird neu gebaut. Der Index wird von keinem
+ * Verbraucher verändert (nur gelesen) — deshalb darf er geteilt werden.
+ */
+const edgeIndexMemo = new WeakMap();        // fds → { a: Eintrag, b: Eintrag }
+const EDGE_VKEY_DEFAULT = {};               // Marke für den Ersatz-Vertex-Schlüssel (siehe vtxKeyOf)
+
+// Koordinaten-Vergleich: -0 und 0 sind gleich (der Vertex-Schlüssel macht sie
+// gleich), NaN gilt als gleich zu NaN.
+const edgeNumEq = (a, b) => (a === b) || (Number.isNaN(a) && Number.isNaN(b));
+
+// Schnappschuss der Eingabe: je Fläche das Objekt und das inn-Array, je Loop
+// Array/Länge/circleRim, je Punkt das Objekt und seine drei Koordinaten.
+function edgeIndexSnapshot(list) {
+  const fdIds = [], innerIds = [], innerLens = [];
+  const loopIds = [], loopLens = [], loopRim = [];
+  const ptIds = [], coords = [];
+  for (let fi = 0; fi < list.length; fi++) {
+    const fd = list[fi];
+    fdIds.push(fd || null);
+    if (!fd) { innerIds.push(null); innerLens.push(-1); continue; }
+    const inner = fd.inner || null;
+    innerIds.push(inner);
+    innerLens.push(inner ? inner.length : -1);
+    const loopCount = 1 + (inner ? inner.length : 0);
+    for (let li = 0; li < loopCount; li++) {
+      const L = li === 0 ? fd.outer : inner[li - 1];
+      loopIds.push(L || null);
+      loopLens.push(L ? L.length : -1);
+      loopRim.push(L && L.circleRim ? 1 : 0);
+      if (!L) continue;
+      for (let i = 0; i < L.length; i++) {
+        const p = L[i];
+        ptIds.push(p || null);
+        if (p) coords.push(+p[0], +p[1], +p[2]);
+        else coords.push(NaN, NaN, NaN);
+      }
+    }
+  }
+  return {
+    fdIds, innerIds, innerLens, loopIds, loopLens, loopRim, ptIds,
+    coords: Float64Array.from(coords),
+  };
+}
+
+// Prüft den Schnappschuss gegen die aktuelle Eingabe (Flächen, Loops, Punkte,
+// Koordinaten) — bei jeder Abweichung wird der Index neu gebaut.
+function edgeIndexSame(list, snap) {
+  if (list.length !== snap.fdIds.length) return false;
+  const { fdIds, innerIds, innerLens, loopIds, loopLens, loopRim, ptIds, coords } = snap;
+  let lp = 0, pp = 0;                       // Zeiger auf Loop bzw. Punkt im Schnappschuss
+  for (let fi = 0; fi < list.length; fi++) {
+    const fd = list[fi];
+    if ((fd || null) !== fdIds[fi]) return false;
+    if (!fd) continue;
+    const inner = fd.inner || null;
+    if (inner !== innerIds[fi]) return false;
+    if ((inner ? inner.length : -1) !== innerLens[fi]) return false;
+    const loopCount = 1 + (inner ? inner.length : 0);
+    for (let li = 0; li < loopCount; li++) {
+      const L = li === 0 ? fd.outer : inner[li - 1];
+      if ((L || null) !== loopIds[lp]) return false;
+      if ((L ? L.length : -1) !== loopLens[lp]) return false;
+      if (((L && L.circleRim) ? 1 : 0) !== loopRim[lp]) return false;
+      if (L) {
+        for (let i = 0; i < L.length; i++) {
+          const p = L[i];
+          if ((p || null) !== ptIds[pp]) return false;
+          if (p) {
+            const c = pp * 3;
+            if (!edgeNumEq(+p[0], coords[c]) ||
+                !edgeNumEq(+p[1], coords[c + 1]) ||
+                !edgeNumEq(+p[2], coords[c + 2])) return false;
+          }
+          pp++;
+        }
+      }
+      lp++;
+    }
+  }
+  return lp === loopIds.length && pp === ptIds.length;
+}
+
+// Index frisch bauen: Fläche aufsteigend, Loop 0 = außen dann die Innen-Loops,
+// Kante i aufsteigend — genau die Reihenfolge des alten forEach-Aufbaus.
+function edgeIndexBuild(list, vkey, skipCircleRim) {
+  const index = new Map();
+  for (let fi = 0; fi < list.length; fi++) {
+    const fd = list[fi];
+    if (!fd) continue;
+    const inner = fd.inner || [];
+    const loopCount = 1 + inner.length;
+    for (let li = 0; li < loopCount; li++) {
+      const L = li === 0 ? fd.outer : inner[li - 1];
+      if (!L || !L.length) continue;
+      if (skipCircleRim && L.circleRim) continue;            // analytischer Kreis-Rand
+      const n = L.length;
+      // Vertex-Schlüssel je Punkt EINMAL statt je Kante zweimal (b bei i ist a
+      // bei i+1) — der Schlüssel hängt nur an den Koordinaten, das Ergebnis ist
+      // identisch.
+      const keys = new Array(n);
+      for (let i = 0; i < n; i++) keys[i] = vkey(L[i]);
+      for (let i = 0; i < n; i++) {
+        const ka = keys[i];
+        const kb = (i + 1 < n) ? keys[i + 1] : keys[0];
+        if (ka === kb) continue;
+        const key = edgeKeyOf(ka, kb);
+        let arr = index.get(key);
+        if (!arr) { arr = []; index.set(key, arr); }
+        arr.push({ fi, li, i, a: L[i], b: L[(i + 1) % n] });
+      }
+    }
+  }
+  return index;
+}
+
+/**
  * Alle Kanten aller Flächen: je Fläche fi und Loop li (0 = outer, k = inner[k−1]) die
  * Kante i (a = L[i], b = L[(i+1)%n]); Kanten mit gleichem vtxKey(a) = vtxKey(b)
  * werden übersprungen.
@@ -483,25 +605,19 @@ const edgeKeyOf = (ka, kb) => (ka < kb ? ka + '|' + kb : kb + '|' + ka);
 export function buildEdgeIndex(fds, opts) {
   const o = { ...ARC_DEFAULTS, ...opts };
   const vkey = vtxKeyOf(o);
-  const index = new Map();
-  (fds || []).forEach((fd, fi) => {
-    if (!fd) return;
-    const loops = [fd.outer, ...(fd.inner || [])];
-    loops.forEach((L, li) => {
-      if (!L || !L.length) return;
-      if (o.skipCircleRim && L.circleRim) return;             // analytischer Kreis-Rand
-      const n = L.length;
-      for (let i = 0; i < n; i++) {
-        const a = L[i], b = L[(i + 1) % n];
-        const ka = vkey(a), kb = vkey(b);
-        if (ka === kb) continue;
-        const key = edgeKeyOf(ka, kb);
-        let arr = index.get(key);
-        if (!arr) { arr = []; index.set(key, arr); }
-        arr.push({ fi, li, i, a, b });
-      }
-    });
-  });
+  const list = fds || [];
+  const skip = !!o.skipCircleRim;
+  if (!fds || typeof fds !== 'object') return edgeIndexBuild(list, vkey, skip);
+  // Schlüssel-Identität: eine gelieferte vtxKey-Funktion gilt nur für sich;
+  // der Ersatz aus vtxKeyOf ist fest (reine Koordinaten-Funktion) → Marke.
+  const vkeyId = (typeof o.vtxKey === 'function') ? o.vtxKey : EDGE_VKEY_DEFAULT;
+  let slots = edgeIndexMemo.get(fds);
+  if (!slots) { slots = { a: null, b: null }; edgeIndexMemo.set(fds, slots); }
+  const hit = skip ? slots.b : slots.a;
+  if (hit && hit.vkeyId === vkeyId && edgeIndexSame(list, hit.snap)) return hit.index;
+  const index = edgeIndexBuild(list, vkey, skip);
+  const entry = { vkeyId, index, snap: edgeIndexSnapshot(list) };
+  if (skip) slots.b = entry; else slots.a = entry;
   return index;
 }
 
@@ -538,22 +654,29 @@ export function buildChains(fds, d, frame, index, taken, opts) {
     if (!(len(nd) > 0)) continue;
     if (Math.abs(dot(nd, d)) >= o.capCos) continue;        // steht senkrecht zur Achse
 
-    // Höhen aller Punkte
-    const ts = new Array(L.length);
+    // Höhen aller Punkte — nur die Achsenkomponente (p·d) wird gebraucht, der
+    // 3er-Array von toLocal() wäre hier reine Ballast-Allokation
+    const n = L.length;
+    const ts = new Array(n);
     let tmin = Infinity, tmax = -Infinity;
-    for (let i = 0; i < L.length; i++) {
-      const t = toLocal(frame, L[i])[2];
+    for (let i = 0; i < n; i++) {
+      const t = dot(L[i], frame.d);
       ts[i] = t;
       if (t < tmin) tmin = t;
       if (t > tmax) tmax = t;
     }
     if (!(tmax - tmin > 10 * levelTol)) continue;
 
+    // Punktschlüssel je Loop-Punkt EINMAL (nur Koordinatenbezug → gleiche Werte
+    // wie der mehrfache Aufruf, aber ohne Wiederholungsarbeit in Level- und Seitenlauf)
+    const ks = new Array(n);
+    for (let i = 0; i < n; i++) ks[i] = vkey(L[i]);
+
     // Punkte den Ebenen zuordnen (lo bei tmin, hi bei tmax)
     const level = new Map();
     let ok = true, sumLo = 0, nLo = 0, sumHi = 0, nHi = 0;
-    for (let i = 0; i < L.length; i++) {
-      const k = vkey(L[i]);
+    for (let i = 0; i < n; i++) {
+      const k = ks[i];
       const t = ts[i];
       if (Math.abs(t - tmin) <= levelTol) { level.set(k, 'lo'); sumLo += t; nLo++; }
       else if (Math.abs(t - tmax) <= levelTol) { level.set(k, 'hi'); sumHi += t; nHi++; }
@@ -563,10 +686,9 @@ export function buildChains(fds, d, frame, index, taken, opts) {
 
     // Seitenkanten: Kanten mit einem lo- und einem hi-Punkt (genau 2 nötig)
     const sides = [];
-    const n = L.length;
     for (let i = 0; i < n; i++) {
       const a = L[i], b = L[(i + 1) % n];
-      const ka = vkey(a), kb = vkey(b);
+      const ka = ks[i], kb = ks[(i + 1) % n];
       if (ka === kb) continue;
       const la = level.get(ka), lb = level.get(kb);
       if (!la || !lb || la === lb) continue;
@@ -590,6 +712,10 @@ export function buildChains(fds, d, frame, index, taken, opts) {
   const adj = new Map();
   for (const [fi, info] of facets) {
     const nb = [];
+    const n1 = fds[fi].normal;
+    // Einheitsvektor der Facetten-Normalen einmal je fi (gleiche Rechnung wie
+    // der bisherige Aufruf je Nachbar — der Wert ändert sich nicht)
+    const n1n = n1 ? norm(n1) : null;
     for (const sk of info.sides) {
       for (const e of index.get(sk) || []) {
         if (e.fi === fi) continue;
@@ -598,9 +724,9 @@ export function buildChains(fds, d, frame, index, taken, opts) {
         if (g.sides.indexOf(sk) < 0) continue;             // dort ebenfalls Seitenkante?
         if (Math.abs(info.tlo - g.tlo) > levelTol) continue;
         if (Math.abs(info.thi - g.thi) > levelTol) continue;
-        const n1 = fds[fi].normal, n2 = fds[e.fi].normal;
+        const n2 = fds[e.fi].normal;
         if (!n1 || !n2) continue;
-        const cs = Math.min(1, Math.max(-1, dot(norm(n1), norm(n2))));
+        const cs = Math.min(1, Math.max(-1, dot(n1n, norm(n2))));
         if (Math.acos(cs) * 180 / Math.PI > o.maxSegDeg) continue;
         if (nb.some((x) => x.nb === e.fi)) continue;
         nb.push({ nb: e.fi, key: sk });
