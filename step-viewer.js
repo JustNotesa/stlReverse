@@ -12,7 +12,7 @@ let stepOcctRenderer = null, stepOcctScene = null, stepOcctCamera = null,
 let stepOcctContainer = null;
 let stepOcctEdges = null;       // THREE.LineSegments der Flächengrenzen (B-Rep-Kanten)
 let stepEdgesVisible = true;    // Sichtbarkeit (Checkbox „Kanten")
-let stepOcctOrient = null;      // Orientierungs-Gruppe (y/z-Tausch wie im STL-Viewer)
+let stepOcctOrient = null;      // Orientierungs-Gruppe (Drehung Z-oben → Y-oben wie im STL-Viewer)
 let syncUiWired = false;        // Kopplungs-UI (Checkbox + Ansichts-Radios) nur einmal verdrahten
 
 let occtWorker = null;
@@ -174,7 +174,7 @@ function _renderOcctResult(result) {
   }
 
   if (stepOcctMeshGroup) {
-    // Das Modell hängt an der Orientierungs-Gruppe (y/z-Tausch) → darüber aus der Szene nehmen.
+    // Das Modell hängt an der Orientierungs-Gruppe (Z-oben → Y-oben) → darüber aus der Szene nehmen.
     if (stepOcctOrient) {
       stepOcctScene.remove(stepOcctOrient);
       stepOcctOrient.remove(stepOcctMeshGroup);
@@ -265,16 +265,17 @@ function _renderOcctResult(result) {
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
   stepOcctMeshGroup.position.sub(center);
 
-  // Orientierung: der STL-Viewer zeigt das Modell mit vertauschten y/z-Achsen (x, z, y).
-  // Das STEP-Mesh bekommt denselben Tausch über eine eigene Gruppe → beide Panels zeigen
-  // dasselbe Teil aus derselben Blickrichtung (die Matrix hat negative Determinante,
-  // three.js dreht die Vorder-/Rückseiten beim Rendern automatisch).
+  // Orientierung: der STL-Viewer dreht das Modell von Z-oben nach Y-oben,
+  // (x, y, z) → (x, z, -y). Das STEP-Mesh bekommt dieselbe Drehung über eine eigene Gruppe
+  // → beide Panels zeigen dasselbe Teil aus derselben Blickrichtung. Die Matrix hat
+  // Determinante +1 (echte Drehung, KEIN Spiegeln) — die Vorder-/Rückseiten bleiben
+  // korrekt orientiert, genau wie im STL-Viewer.
   stepOcctOrient = new THREE.Group();
   stepOcctOrient.matrixAutoUpdate = false;
   stepOcctOrient.matrix.set(
     1, 0, 0, 0,
     0, 0, 1, 0,
-    0, 1, 0, 0,
+    0, -1, 0, 0,
     0, 0, 0, 1
   );
   stepOcctOrient.matrixWorldNeedsUpdate = true;
