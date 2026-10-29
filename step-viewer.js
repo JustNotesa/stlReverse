@@ -1,5 +1,5 @@
 import * as THREE from './libs/three.module.js';
-import { createThreeJsViewer, disposeThreeJsViewer } from './viewers.js?v=28';
+import { createThreeJsViewer, disposeThreeJsViewer } from './viewers.js?v=29';
 
 const extensionApi = typeof browser !== 'undefined' ? browser
   : typeof chrome !== 'undefined' ? chrome : null;
@@ -124,6 +124,7 @@ async function _handleStepFileSelect(event) {
   try {
     const buffer = await file.arrayBuffer();
     loadStepIntoViewer(buffer);
+    document.dispatchEvent(new CustomEvent('stlreverse:step-imported', { detail: { name: file.name } }));
   } catch (err) {
     console.error('STEP-Import fehlgeschlagen', err);
   } finally {
