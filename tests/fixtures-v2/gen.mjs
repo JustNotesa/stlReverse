@@ -73,6 +73,29 @@ export const slotProfile = (len, R, seg) => {
   for (let k = 0; k <= seg; k++) { const a = PI / 2 + PI * k / seg; pts.push([R + R * Math.cos(a), R + R * Math.sin(a)]); }
   return pts;
 };
+// Ösen-Loch: Kreis R (n Segmente), dessen untere Hälfte durch eine Sehne (y = chordY) abgeschnitten
+// ist (D-Form). Die Sehnen-Endpunkte liegen EXAKT auf dem Kreis (x = cx ± √(R²−(cy−chordY)²))
+// und werden als ZUSÄTZLICHE Konturpunkte geführt — dadurch decken sich die Wandpunkte der unteren
+// (D-) und der oberen (Kreis-)Hälfte exakt (die Wand bleibt ein zusammenhängender Zylinder).
+// Rückgabe (je CCW, Startpunkt beliebig — zyklisch):
+//   d     = D-Kontur der unteren Hälfte (der Bogen unter der Sehne entfällt, die Sehne schließt)
+//   ring  = Vollkreis-Kontur MIT den Sehnen-Endpunkten (Wand der oberen Hälfte)
+//   ledge = Steg-Kontur zwischen Sehne und Bogen (die waagerechte Fläche bei z = 5)
+// Die Steg-Kontur ist der Teil des Rings zwischen den beiden Sehnen-Endpunkten, der den
+// abgeschnittenen Bogen enthält (bei chordY < cy: der untere Bogen).
+export function eyeletHole(cx, cy, R, n, chordY) {
+  const pts = [];
+  for (let i = 0; i < n; i++) { const a = 2 * PI * i / n; pts.push([cx + R * Math.cos(a), cy + R * Math.sin(a)]); }
+  const dx = Math.sqrt(Math.max(0, R * R - (cy - chordY) * (cy - chordY)));
+  const pL = [cx - dx, chordY], pR = [cx + dx, chordY];   // beide exakt auf dem Kreis
+  pts.push(pL, pR);
+  const ang = (p) => Math.atan2(p[1] - cy, p[0] - cx);
+  const ring = pts.slice().sort((p, q) => ang(p) - ang(q));            // CCW
+  const d = ring.filter((p) => p[1] >= chordY - 1e-9);                  // Bogen unter der Sehne entfällt
+  const iL = ring.indexOf(pL), iR = ring.indexOf(pR);
+  const ledge = iL < iR ? ring.slice(iL, iR + 1) : ring.slice(iR, iL + 1);   // Bogen mit den Schnittpunkten
+  return { d, ring, ledge };
+}
 
 // Taschen-Kontur wie die Logo-Tasche am Kabelhalter: Rechteck w×h ab (x0, y0), Unterseite als flacher
 // Kreisbogen (Stich f nach außen, arcSeg Sehnen), alle vier Ecken senkrecht mit rc gerundet (seg
@@ -485,8 +508,10 @@ export function triangulateWithHoles(outer, holes) {
 
 // ── Körper bauen ────────────────────────────────────────────────────────────
 // body.columns: [{ name, profile, z0, z1, bottom, top, draftDeg? }]
-// body.caps (optional): [{ z, up, outer: {c, end, rev?}, holes: [{c, end, rev?}] }]
+// body.caps (optional): [{ z, up, outer: {c, end, rev?} | {pts: [...]}, holes: [{c, end, rev?}] }]
 //   Default: Deckel oben/unten aus allen Säulen (CCW-Säulen = Außen, CW-Säulen = Löcher).
+//   `outer.pts` = EXPLIZITER Ring (3D-Punkte, CCW) statt eines Säulenrings — nötig für Flächen,
+//   deren Rand kein Säulenring ist (z. B. der schmale Steg zwischen zwei Profilen einer Öse).
 // body.jitter (optional): mm — deterministisches Rauschen auf jedem Netzpunkt
 //   (gleicher Punkt → gleiches Rauschen, Hash der gerundeten Koordinate). Die Punkte
 //   werden VOR der starren Transformation verrauscht (die Drehung bleibt exakt).
@@ -503,6 +528,7 @@ export function buildMesh(body) {
     }
   });
   const ringAt = ({ c, end, rev }) => { const rs = rings[c]; const r = end === 'top' ? rs[rs.length - 1] : rs[0]; return rev ? r.slice().reverse() : r; };
+  const capOuter = (o) => (o.pts ? o.pts : ringAt(o));   // Spaltfläche: expliziter Ring
   let caps = body.caps;
   if (!caps) {
     const outerIdx = body.columns.map((col, i) => i).filter((i) => polyArea(body.columns[i].profile) > 0);
@@ -524,7 +550,7 @@ export function buildMesh(body) {
       }
       continue;
     }
-    const outer = ringAt(cap.outer), holes = (cap.holes || []).map(ringAt);
+    const outer = capOuter(cap.outer), holes = (cap.holes || []).map(ringAt);
     for (const [a, b, c] of triangulateWithHoles(outer, holes)) tris.push(cap.up ? [a, b, c] : [a, c, b]);
   }
   let out = tris;
@@ -669,6 +695,9 @@ const blindPlate = (holes, W = 40, D = 30, H = 10, extra = {}) => {
   caps.push({ up: false, outer: { c: 0, end: 'bottom' }, holes: botHoles });
   return { columns, caps, ...extra };
 };
+
+// Ösen-Loch (Körper z2): Kreis R2.75 bei (10,10), untere Hälfte D (Sehne y = 8)
+const EYELET = eyeletHole(10, 10, 2.75, 48, 8);
 
 export const BODIES = [
   {
@@ -1415,6 +1444,33 @@ export const BODIES = [
       { col: 2, R: 3, seg: 32, kind: 'tip', tipDeg: 118 },
       { col: 3, R: 2.5, seg: 32, kind: 'through' },
     ],
+  },
+  // ── Öse: Durchgangsloch, dessen untere Hälfte ein D ist ─────────────────────
+  // Block 20×20×10 (scharf), senkrechtes Loch R2.75 (48 Seg.) bei (10,10): die untere Hälfte
+  // (z 0…5) ist ein D (Kreis, unten durch die Sehne y = 8 abgeschnitten — die Sehnen-Endpunkte
+  // liegen exakt auf dem Kreis), die obere Hälfte (z 5…10) der volle Kreis. Zwischen beiden liegt
+  // der schmale Steg (Sehne ↔ Bogen) bei z = 5.
+  // Der Bohrungs-Pfad (attemptBore → rimsFromLoops) verlangt ZWEI saubere Rand-Kreise — hier sind
+  // es drei Randkonturen (unten D, Steg, oben Kreis) → der Bohrungs-Pfad scheitert an den Rändern
+  // (nicht an der Wand) → der Profil-Bogen-Pfad muss die Wand als Teil-Zylinder übernehmen.
+  {
+    id: 'z2', extra: true, file: 'v2_x_oese_d_loch',
+    desc: 'Block 20×20×10 (Kanten scharf) mit senkrechtem Loch R2.75 (48 Seg.) bei (10,10): untere Hälfte (z 0…5) D-Form (Kreis, unten durch die Sehne y = 8 abgeschnitten), obere Hälfte (z 5…10) voller Kreis, Steg bei z = 5',
+    columns: [
+      { name: 'block', profile: rectProfile(0, 0, 20, 20), z0: 0, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'loch_unten', profile: EYELET.d.slice().reverse(), z0: 0, z1: 5, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { name: 'loch_oben', profile: EYELET.ring.slice().reverse(), z0: 5, z1: 10, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 2, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [{ c: 1, end: 'bottom' }] },
+      // Steg bei z = 5 (zwischen Sehne und Bogen): Material darunter, Loch darüber → Normale nach +Z
+      { up: true, outer: { pts: EYELET.ledge.map(([x, y]) => [x, y, 5]) }, holes: [] },
+    ],
+    // Der Bohrungs-Pfad scheitert an den Rändern (keine zwei sauberen Rand-Kreise) → der Profil-Bogen-
+    // Pfad übernimmt die Wand: 1 Bogen-Fläche (Teil-Zylinder) — im AUS- wie im AN-Lauf (die
+    // Bohrungs-Sperre des Bogen-Pfads darf eine an den Rändern gescheiterte Bohrung nicht blockieren).
+    expect: { mode: 'skip', arcsOff: 1, arcsOn: 1 },
   },
   // ── PINCH: zwei Löcher EINER Deckfläche berühren sich in genau EINER Ecke ────
   // Die Deckfläche z=3 der Platte hat zwei Löcher, die sich im Punkt (12; 18.5) berühren: der

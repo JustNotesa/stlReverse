@@ -30,6 +30,17 @@ import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArc
 //   - gleich dem Punkt-Raster des Region-Growing (Schlüssel auf 1e-4 mm).
 export const STEP_UNCERTAINTY_MM = '1.E-04';
 
+// Grund, warum der Bohrungs-Pfad (attemptBore) an einer Bohrung gescheitert ist:
+//   'rims' — die Rand-Loops sind keine zwei sauberen Rand-Kreise (kein einfaches Durchgangsloch:
+//            D-Loch, Steg in der Wand, …). Der Bohrungs-Pfad hat die WAND dann gar nicht beurteilt.
+//   'wall' — die Ränder waren in Ordnung, aber die Wand ist kaputt (Delle, Verdrehung) → der
+//            Bohrungs-Pfad hat sie geprüft und verworfen.
+// Der Profil-Bogen-Pfad (arcBlockedGroups) darf eine Bohrungs-Wand nur dann übernehmen, wenn sie
+// mit 'rims' gescheitert ist: dort hat der Bohrungs-Pfad die Wand-Qualität nie beurteilt. Bei
+// 'wall' bleibt die Sperre — und der Bogen-Pfad ist ohnehin strenger (Fit 5e-3 mm ≪ Rand-Toleranz
+// 0.08…0.06·R), eine gedellte Wand kann seinen Fit nicht bestehen.
+const boreFailWhy = new WeakMap();
+
 export function buildOutlinesDxf(outlines) {
   const lines = [];
   const planeOrder = ['XY', 'YZ', 'ZX'];
@@ -450,16 +461,34 @@ export function buildVolumeStepBrepV2(analysis) {
   };
   const arcBlockedGroups = () => {
     const s = new Set();
+    // Eine Bohrung, deren Wand der Bogen-Pfad übernehmen darf: der Bohrungs-Pfad ist an den
+    // RÄNDERN gescheitert ('rims' — kein einfaches Durchgangsloch: D-Loch, Steg in der Wand …).
+    // Er hat die Wand dann gar nicht beurteilt; seine Gates (Delle, Verdrehung, dünner Steg,
+    // Rand an der Plattenkante) liefen also nie. Der Bogen-Pfad hat eigene, STRENGERE Gates
+    // (Fit 5e-3 mm ≪ Rand-Toleranz 0.08…0.06·R; jeder Band-Bogen muss an genau eine ebene
+    // Fläche oder ein anderes Band grenzen) — eine kaputte Wand kann sie nicht bestehen.
+    // Bei 'wall' (Delle/Verdrehung) bleibt die Sperre: dort hat der Bohrungs-Pfad die Wand
+    // geprüft und verworfen.
+    const boreOpenForArcs = (e) => {
+      if (borePathPlan(e)) return false;                 // Plan vorhanden → der Bohrungs-Pfad urteilt
+      return boreFailWhy.get(e) === 'rims';
+    };
     for (const [, e] of mantleById) for (const g of e.groups) s.add(g);
     for (const [, e] of boreById) {
-      if (DEFEATURE) { for (const g of e.groups) s.add(g); continue; }   // AN: der Bohrungs-Pfad entscheidet über jede Bohrung
-      let claimed = false;                                               // AUS: Direkt-Treffer (in diesem Lauf umgewandelt)
+      if (DEFEATURE) {                                                        // AN: der Bohrungs-Pfad entscheidet über jede Bohrung
+        if (boreOpenForArcs(e)) continue;                                     // …außer er scheiterte an den Rändern
+        for (const g of e.groups) s.add(g); continue;
+      }
+      let claimed = false;                                                     // AUS: Direkt-Treffer (in diesem Lauf umgewandelt)
       for (const pl of finalPlans) if (pl && pl.entry === e) { claimed = true; break; }
       if (!claimed) {
         const plan = borePathPlan(e);
-        if (!plan) { for (const g of e.groups) s.add(g); continue; }      // Wand kaputt (Delle, Verdrehung)
-        if (boreRimOnDeck(plan)) for (const g of e.groups) s.add(g);     // Gate-Abgelehntes Loch (z. B. Freigang)
-        continue;                                                        // …sonst nur der Schalter → Bogen-Pfad darf übernehmen
+        if (!plan) {
+          if (boreFailWhy.get(e) === 'rims') continue;                        // Wand ungeprüft → Bogen-Pfad darf übernehmen
+          for (const g of e.groups) s.add(g); continue;                        // Wand kaputt (Delle, Verdrehung)
+        }
+        if (boreRimOnDeck(plan)) for (const g of e.groups) s.add(g);           // Gate-Abgelehntes Loch (z. B. Freigang)
+        continue;                                                              // …sonst nur der Schalter → Bogen-Pfad darf übernehmen
       }
       for (const g of e.groups) s.add(g);
     }
@@ -1376,9 +1405,9 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     const bnd = []; for (const e of ec.values()) if (e.c === 1) bnd.push({ v0: e.a, v1: e.b });
     const rims = rimsFromLoops(chainEdges(bnd), entry.prim);
-    if (!rims) return null;
+    if (!rims) { boreFailWhy.set(entry, 'rims'); return null; }   // kein einfaches Durchgangsloch
     const wall = { loops: tris, pts: [] };                       // Wand = Original-Dreiecke
-    if (!boreWallOk(rims, wall.loops, wall.pts, BORE_RIM_TOL(rims[0].radius))) return null;     // verdrillt / Delle → facettiert
+    if (!boreWallOk(rims, wall.loops, wall.pts, BORE_RIM_TOL(rims[0].radius))) { boreFailWhy.set(entry, 'wall'); return null; }   // verdrillt / Delle → facettiert
     return { prim: entry.prim, rims, groups: entry.groups, surfCenter: rims[0].center, wall, entry };
   };
 
