@@ -14,7 +14,7 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=4';
 // Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
-import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop } from './profile-arcs.js?v=3';
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=3';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
@@ -6689,23 +6689,38 @@ export function buildVolumeStepBrepV2(analysis) {
   const convertArcs = (fds) => {
     if (!ARCS) return { fds, arcs: null };
     arcStats.tried++;
+    const runArcs = (list) => {
+      try {
+        // Wände, die die Primitive-Pfade (Mantel/Bohrung) beanspruchen, dürfen NICHT in Bänder
+        // geteilt werden: deren Gates (Delle, Verdrehung, dünner Steg, Rand an der Plattenkante,
+        // Konkavität) sind strenger als die des Bogen-Pfads — eine Teilung würde sie umgehen.
+        const fb0 = findArcBands(list, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() });
+        let det = validateArcBands(list, fb0, { vtxKey });
+        for (let it = 0; it < 4 && det.bands.length; it++) {
+          const ap = applyArcBands(list, det, { vtxKey });
+          const snap = snapToPlanes(ap.fds).snap;
+          const written = (p) => { const q = snap.get(vtxKey(p)) || p; return q.map((x) => +toStep(x)); };
+          const res = buildArcPlans(list, det, written, { vtxKey });   // ORIGINAL-Liste: band.facets indizieren sie
+          if (!res.failed.size) return { fds: ap.fds, arcs: { plans: res.plans, geoms: res.geoms } };
+          for (const b of det.bands) if (res.failed.has(b.id)) arcBlocked.add(b.sig);
+          det = validateArcBands(list, findArcBands(list, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() }), { vtxKey });
+        }
+      } catch (e) { /* Bögen sind optional: bei jedem Fehler facettiert */ }
+      return null;
+    };
+    const plain = runArcs(fds);
+    // VERDREHTE RINGE (oberer Ring gegen den unteren verdreht, Wand = Zickzack-Dreiecke): keine
+    // Seitenkante ist eine Mantellinie → kein Band-Ende, keine Ring-Teilung. insertRulings setzt
+    // Punkte auf den Kreis und trianguliert die Wand neu (Mantellinien an den Schnittstellen).
+    // Beide Varianten werden gebaut, die mit WENIGER Flächen gewinnt — bringt die neu
+    // triangulierte Variante nichts oder scheitert sie, bleibt alles wie bisher.
+    let ruled = null;
     try {
-      // Wände, die die Primitive-Pfade (Mantel/Bohrung) beanspruchen, dürfen NICHT in Bänder
-      // geteilt werden: deren Gates (Delle, Verdrehung, dünner Steg, Rand an der Plattenkante,
-      // Konkavität) sind strenger als die des Bogen-Pfads — eine Teilung würde sie umgehen.
-      const fb0 = findArcBands(fds, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() });
-      let det = validateArcBands(fds, fb0, { vtxKey });
-      for (let it = 0; it < 4 && det.bands.length; it++) {
-        const ap = applyArcBands(fds, det, { vtxKey });
-        const snap = snapToPlanes(ap.fds).snap;
-        const written = (p) => { const q = snap.get(vtxKey(p)) || p; return q.map((x) => +toStep(x)); };
-        const res = buildArcPlans(fds, det, written, { vtxKey });   // ORIGINAL-Liste: band.facets indizieren sie
-        if (!res.failed.size) return { fds: ap.fds, arcs: { plans: res.plans, geoms: res.geoms } };
-        for (const b of det.bands) if (res.failed.has(b.id)) arcBlocked.add(b.sig);
-        det = validateArcBands(fds, findArcBands(fds, { vtxKey, blocked: arcBlocked, blockedGroups: arcBlockedGroups() }), { vtxKey });
-      }
-    } catch (e) { /* Bögen sind optional: bei jedem Fehler facettiert */ }
-    return { fds, arcs: null };
+      const ins = insertRulings(fds, { vtxKey, blockedGroups: arcBlockedGroups() });
+      if (ins.fds !== fds) ruled = runArcs(ins.fds);
+    } catch (e) { ruled = null; }
+    if (ruled && (!plain || ruled.fds.length < plain.fds.length)) return ruled;
+    return plain || { fds, arcs: null };
   };
   // Zusammenbau mit Bögen; scheitert er (failed) und liegt es an den Bögen, werden die Bänder an
   // defekten Kanten gesperrt und neu gebaut. Scheitert er danach weiter, liegt es nicht an den Bögen:
