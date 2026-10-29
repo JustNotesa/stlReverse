@@ -45,6 +45,14 @@ let viewSyncEnabled = true;   // Schalter „Ansichten koppeln"
 let syncBusy = false;         // Re-entrancy-Schutz: das 'change'-Event der Ziel-Kamera
                               // darf nicht zurück in die Quelle zurückspringen.
 
+/** Diagnose/Test: aktuelle Kamera-Werte beider gekoppelter Viewer. */
+export function getViewCameraStates() {
+  const f = (v) => v && {
+    position: v.camera.position.toArray(), target: v.controls.target.toArray(), zoom: v.camera.zoom
+  };
+  return { stl: f(syncViewers.stl), step: f(syncViewers.step) };
+}
+
 export function registerSyncViewer(name, camera, controls) {
   if (!camera || !controls) return;
   // Vorherige Registrierung desselben Namens entfernen (Re-Init leakt sonst Listener).

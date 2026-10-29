@@ -573,8 +573,8 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
 /* Ab 640 px Breite folgt die Höhe dem Fenster. So bleibt die Karte
    „Vorher / Nachher“ bei 1440x900 vollständig ohne Scrollen sichtbar. */
 @media (min-width: 640px) {
-  .compare .viewer-3d { height: clamp(300px, calc(100vh - 490px), 720px); }
-  #compare-panel[data-view="step"] .viewer-3d { height: clamp(320px, calc(100vh - 440px), 800px); }
+  .compare .viewer-3d { height: clamp(300px, calc(100vh - 535px), 720px); }
+  #compare-panel[data-view="step"] .viewer-3d { height: clamp(320px, calc(100vh - 485px), 800px); }
 }
 .expert .viewer-3d { height: clamp(240px, 38vh, 460px); }
 
