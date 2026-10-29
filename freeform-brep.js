@@ -107,10 +107,14 @@ import { trianglesFromGroups, indexMesh, segmentByFit } from './freeform-segment
 import { buildTopology, checkTopology } from './freeform-topology.js';
 import {
   normalAt, projectMulti, fitIntersectionCurve, evalBspline,
-  add, sub, mul, dot, cross, len, norm,
+  add, sub, mul, dot, cross, len, norm, project,
 } from './freeform-geom.js';
 import { snapSurfaces } from './freeform-snap.js';
 import { writeFreeformStep } from './freeform-step.js';
+import {
+  lineToBspline, evalCurve, reverseCurve, splitCurve, joinCurves, coonsPatch,
+  surfaceNormal, surfaceDerivs, projectToSurface, fitCurveOnSurface, interpPolyline,
+} from './freeform-nurbs.js';
 
 // ---- Grenzwerte (Etappe 1) ----
 const ROUNDS_MAX = 12;           // höchstens 12 Runden (Standard; opts.maxRounds)
@@ -126,6 +130,26 @@ const COLLAPSE_EPS = 1e-6;       // Kante fällt weg (Punktkontakt)
 const FIT_TOL = 5e-7;            // Toleranz der Schnittkurve (B-Spline)
 const EDGE_MAX_SHIFT = 0.5;      // größte Verschiebung eines Stützpunkts
 const VERT_TOL = 1e-9;           // Rest der Eckprojektion (mm) — Ecken liegen exakt auf allen Flächen (ACIS 1e-6)
+const VERT_TOL_BLEND = 1e-6;     // Rest bei Ecken MIT Blend-Nachbarn (mm): ohne die
+// Fit-Fläche der Blend-Region ist die Projektion auf die beiden analytischen
+// Nachbarn entartet (die Flächen sind tangential) — der Rest bleibt in der
+// Fit-Genauigkeit (~1e-7 mm). Weit unter der STEP-Unsicherheit (1e-4 mm).
+
+// ---- Blend-Patches (Teil-Rückfall, Etappe 1b) ----
+// Eine Verrundungs-Region, deren gefittete Fläche ihre Nachbarn nicht exakt
+// trifft, wird zu EINER B-Spline-Fläche (Coons-Patch über den Randkurven) —
+// statt zu lauter Einzel-Facetten. Der Rückfall "Region ganz zur Fassade"
+// bleibt, wenn der Patch nicht gelingt.
+const BLEND_MAX_R = 3;            // mm — Radius (Zylinder/Kugel R, Torus r) bis zu dem eine Region als Blend taugt
+const BLEND_MAX_AREA = 20;        // mm² — Fläche bis zu der eine Region (jeder Art) als Blend taugt
+const BLEND_TOL_ABS = 0.05;       // mm — Mindestabstand Netzecke ↔ Blendfläche
+const BLEND_TOL_REL = 0.12;       // × Durchmesser der Region (Mindestabstand).
+// Der Coons-Patch nähert einen Randbogen von 90° nur mit ~10 % des
+// Durchmessers genau (Sehnen-Sagitta) — der Anteil muss größer sein als der
+// reine Fit-Rest, sonst fällt jede Kugelecke (dreiseitiges Patch) durch.
+const BLEND_CORNER_DEG = 30;      // Grad — Wendepunkt eines Blendrands zählt als Ecke
+const BLEND_SENSE_MIN = 0.8;      // |flächengewichtetes Vorzeichen| der Blendfläche
+const BLEND_GRID = 6;             // 6×6 Stützstellen im Inneren (Normalentest)
 
 const now = () => (globalThis.performance && globalThis.performance.now)
   ? globalThis.performance.now() : Date.now();
@@ -313,6 +337,306 @@ function isCylSphere(A, B) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Blend-Patches (Etappe 1b)
+//
+// Eine Region, die als "Blend" behandelt wird, bekommt keine analytische
+// Fläche mehr: sie wird zu EINER B-Spline-Fläche (Coons-Patch), deren Rand
+// die exakten Randkurven der Region enthält. Damit fällt der Rückfall
+// "Streifen → Facetten" für kleine Verrundungen weg.
+//
+// Datenmodell der Blend-Region (Arbeitsregion):
+//   { kind:'blend', type, tris (alle Dreiecke der Region), area, src, surf:null }
+// Die Fläche (surf) entsteht erst beim Flächenbau (Schritt i).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Darf die Segmentierungs-Region als Blend (B-Spline-Patch) behandelt werden?
+// Verrundungen bis BLEND_MAX_R und kleine Flächen (jede Art) taugen als Blend.
+function blendEligible(r) {
+  if (!r) return false;
+  let R = null;
+  if (r.type === 'cylinder' || r.type === 'sphere') R = r.surf ? r.surf.R : null;
+  else if (r.type === 'torus') R = r.surf ? r.surf.r : null;
+  if (R !== null && Number.isFinite(R) && R <= BLEND_MAX_R) return true;
+  return Number.isFinite(r.area) && r.area <= BLEND_MAX_AREA;
+}
+
+// Domäne einer B-Spline-Kurve
+function curveDomain(c) {
+  return [c.knots[0], c.knots[c.knots.length - 1]];
+}
+
+// Tangente einer B-Spline-Kurve (numerisch, zentral)
+function curveTangent(c, u) {
+  const [a, b] = curveDomain(c);
+  const h = Math.min(1e-4, Math.max(1e-9, (b - a) * 1e-3));
+  const u0 = Math.max(a, u - h), u1 = Math.min(b, u + h);
+  const t = sub(evalCurve(c, u1), evalCurve(c, u0));
+  const l = len(t);
+  return l > 1e-14 ? mul(t, 1 / l) : [0, 0, 0];
+}
+
+// Länge des Kontrollpolygons (wie in freeform-nurbs.js — die Stückgrenzen
+// der joinCurves rechnen mit genau diesen Längen)
+function ctrlPolyLen(c) {
+  let L = 0;
+  for (let i = 1; i < c.ctrl.length; i++) L += len(sub(c.ctrl[i], c.ctrl[i - 1]));
+  return L;
+}
+
+// Die Randstücke einer Schleife als B-Spline-Stücke (in Laufrichtung der
+// Schleife). Kreisbögen sind hier nicht erlaubt (Patch-Fehler), Geraden werden
+// mit lineToBspline in B-Splines überführt.
+function loopPieces(uses, edges, vertices) {
+  const out = [];
+  for (const u of uses) {
+    const e = edges[u.edge];
+    if (!e || !e.curve) return null;
+    const c = e.curve;
+    if (c.type === 'circle') return null;
+    if (c.type === 'line') {
+      const p0 = vertices[e.v0], p1 = vertices[e.v1];
+      if (!p0 || !p1) return null;
+      out.push(u.fwd === false ? lineToBspline(p1, p0) : lineToBspline(p0, p1));
+    } else if (c.type === 'bspline') {
+      const cc = {
+        type: 'bspline', degree: c.degree, ctrl: c.ctrl.map((p) => p.slice()),
+        knots: c.knots.slice(), mults: c.mults.slice(),
+      };
+      if (c.params) cc.params = c.params.slice();
+      out.push(u.fwd === false ? reverseCurve(cc) : cc);
+    } else return null;
+  }
+  return out.length ? out : null;
+}
+
+// Geschlossene Randkurve einer Blend-Region + die Parameter der Stückgrenzen
+// (joints[k] = Übergang vom Stück k−1 zum Stück k; joints[0] = joints[n] = 0/1
+// ist der Übergang vom letzten zum ersten Stück).
+function closedBoundary(pieces) {
+  const C = joinCurves(pieces);
+  if (!C) return null;
+  const lens = pieces.map(ctrlPolyLen);
+  const total = lens.reduce((x, y) => x + y, 0);
+  const s = [0];
+  for (let k = 0; k < pieces.length; k++) {
+    s.push(total > 0 ? s[k] + lens[k] / total : (k + 1) / pieces.length);
+  }
+  return { curve: C, joints: s };
+}
+
+// Bogenlängen-Messung auf der geschlossenen Kurve (gleichmäßige Abtastung)
+function arcSampler(C, n = 400) {
+  const [a, b] = curveDomain(C);
+  const pts = [];
+  for (let i = 0; i <= n; i++) pts.push(evalCurve(C, a + ((b - a) * i) / n));
+  const cum = [0];
+  for (let i = 1; i <= n; i++) cum.push(cum[i - 1] + len(sub(pts[i], pts[i - 1])));
+  const total = cum[n];
+  // Bogenlänge am Parameter u
+  const at = (u) => {
+    const t = Math.min(1, Math.max(0, (u - a) / (b - a || 1)));
+    const x = t * n;
+    const i = Math.min(n - 1, Math.floor(x));
+    const f = x - i;
+    return cum[i] + (cum[i + 1] - cum[i]) * f;
+  };
+  // Parameter zur Bogenlänge s
+  const paramAt = (s) => {
+    if (s <= 0) return a;
+    if (s >= total) return b;
+    let i = 1;
+    while (i < n && cum[i] < s) i++;
+    const seg = cum[i] - cum[i - 1];
+    const f = seg > 1e-15 ? (s - cum[i - 1]) / seg : 0;
+    return a + ((i - 1 + f) * (b - a)) / n;
+  };
+  return { total, at, paramAt };
+}
+
+// Die geschlossene Kurve an den Ecken-Parametern in Bögen zerlegen (die Bögen
+// in der Reihenfolge des Umlaufs: Bogen i von ps[i] nach ps[i+1], der letzte
+// Bogen schließt den Ring). ps = aufsteigende Parameter; ps[0] darf der Anfang
+// der Domäne sein (der Übergang letztes → erstes Stück).
+function splitClosed(C, ps) {
+  const [a] = curveDomain(C);
+  const n = ps.length;
+  if (n < 2) return null;
+  const hasWrap = Math.abs(ps[0] - a) < 1e-12;
+  const arcs = new Array(n - 1);
+  let cur = C;                      // Rest: [a … ps[i]]
+  let wrap = null;                  // der Bogen ps[n−1] → b (≡ a)
+  for (let i = n - 1; i >= 1; i--) {
+    const sp = splitCurve(cur, ps[i]);
+    if (!sp) return null;
+    if (i === n - 1) wrap = sp[1];
+    else arcs[i] = sp[1];
+    cur = sp[0];
+  }
+  if (hasWrap) {
+    arcs[0] = cur;                  // [a … ps[1]]
+  } else {
+    const sp = splitCurve(cur, ps[0]);
+    if (!sp) return null;
+    arcs[0] = sp[1];                // [ps[0] … ps[1]]
+    wrap = joinCurves([wrap, sp[0]]);
+    if (!wrap) return null;
+  }
+  arcs.push(wrap);                  // [ps[n−1] → a ≡ ps[0]]
+  return arcs;
+}
+
+// Innere Knotenvielfachheit ≤ Grad? (strenge Importer verlangen das)
+function multsOk(knots, mults, degree) {
+  for (let i = 1; i < knots.length - 1; i++) {
+    if ((mults[i] || 0) > degree) return false;
+  }
+  return true;
+}
+
+// Normale an einem Punkt der Fläche. Ist die Stelle entartet (z. B. die
+// Punktseite eines dreiseitigen Patches), wird der nächstgelegene Punkt mit
+// gültiger Normale genommen.
+function normalNear(surf, u, v) {
+  const n = surfaceNormal(surf, u, v);
+  if (n) return n;
+  const du = (surf.knotsU[surf.knotsU.length - 1] - surf.knotsU[0]) * 1e-2;
+  const dv = (surf.knotsV[surf.knotsV.length - 1] - surf.knotsV[0]) * 1e-2;
+  for (const [uu, vv] of [[u + du, v], [u, v + dv], [u + du, v + dv], [u + du / 10, v + dv / 10]]) {
+    const m = surfaceNormal(surf, uu, vv);
+    if (m) return m;
+  }
+  return null;
+}
+
+// Blend-Patch einer Region bauen:
+//   Randkurven → geschlossene Kurve → Ecken (Wendepunkte) → Coons-Patch →
+//   Prüfungen (Abstand der Netzpunkte, Normale, Sinn).
+// Rückgabe { surf, sameSense } oder { fail: Grund }.
+function buildBlendPatch(wr, uses, edges, vertices, mesh) {
+  const { N, A } = mesh;
+  const pieces = loopPieces(uses, edges, vertices);
+  if (!pieces) return { fail: 'Randkurve' };
+  const cb = closedBoundary(pieces);
+  if (!cb) return { fail: 'geschlossene Kurve' };
+  const C = cb.curve;
+  const joints = cb.joints;
+  const n = pieces.length;
+  // Wendepunkte an den Stückgrenzen (B-rep-Ecken des Rands)
+  const cands = [];
+  for (let k = 0; k < n; k++) {
+    const prev = pieces[(k - 1 + n) % n], cur = pieces[k];
+    const tIn = curveTangent(prev, curveDomain(prev)[1]);
+    const tOut = curveTangent(cur, curveDomain(cur)[0]);
+    const c = Math.max(-1, Math.min(1, dot(tIn, tOut)));
+    cands.push({ param: joints[k], ang: (Math.acos(c) * 180) / Math.PI });
+  }
+  const sharp = cands.filter((c) => c.ang > BLEND_CORNER_DEG)
+    .sort((a, b) => b.ang - a.ang || a.param - b.param);
+  let corners;
+  if (sharp.length >= 4) {
+    corners = sharp.slice(0, 4).map((c) => c.param).sort((a, b) => a - b);
+  } else if (sharp.length === 3) {
+    corners = sharp.map((c) => c.param).sort((a, b) => a - b);
+  } else {
+    // zu wenige scharfe Ecken: weitere Ecken nach Bogenlänge ergänzen, bis
+    // vier da sind (der längste Bogen wird jeweils in der Mitte geteilt)
+    const sampler = arcSampler(C);
+    corners = sharp.map((c) => c.param).sort((a, b) => a - b);
+    let guard = 0;
+    while (corners.length < 4 && guard++ < 8) {
+      const m = corners.length;
+      let big = null;
+      for (let i = 0; i < m; i++) {
+        const s0 = corners[i], s1 = corners[(i + 1) % m];
+        const l0 = sampler.at(s0);
+        const l1 = sampler.at(s1) + (i === m - 1 ? sampler.total : 0);
+        if (!big || l1 - l0 > big.l) big = { s0, s1, l: l1 - l0, l0, l1 };
+      }
+      if (!big || !(big.l > 1e-9)) break;
+      const mid = sampler.paramAt((((big.l0 + big.l1) / 2) % sampler.total));
+      if (corners.some((p) => Math.abs(p - mid) < 1e-9)) break;
+      corners.push(mid);
+      corners.sort((a, b) => a - b);
+    }
+    if (corners.length < 3) return { fail: `nur ${corners.length} Ecken` };
+  }
+  // drei Ecken → dreiseitiges Patch (eine Seite ist ein Punkt)
+  const three = corners.length === 3;
+  const arcs = splitClosed(C, corners);
+  if (!arcs) return { fail: 'Randbögen' };
+  // Coons-Patch: c0 = s0, d1 = s1, c1 = reverse(s2), d0 = reverse(s3)
+  const c0 = arcs[0], d1 = arcs[1];
+  const c1 = reverseCurve(arcs[2]);
+  let d0;
+  if (three) {
+    // dreiseitiges Patch: die vierte Seite ist ein Punkt (Ecke C0)
+    const p0 = evalCurve(arcs[0], curveDomain(arcs[0])[0]);
+    d0 = lineToBspline(p0, p0);
+  } else {
+    d0 = reverseCurve(arcs[3]);
+  }
+  const surf = coonsPatch(c0, c1, d0, d1);
+  if (!surf) return { fail: 'Coons-Patch' };
+  // strenge Importer: innere Knotenvielfachheit ≤ Grad
+  if (!multsOk(surf.knotsU, surf.multsU, surf.du) || !multsOk(surf.knotsV, surf.multsV, surf.dv)) {
+    return { fail: 'Knotenvielfachheit' };
+  }
+  // Durchmesser der Region (Bounding-Box-Diagonale der Netzpunkte)
+  const mvSet = [...regionVertices(mesh, wr)];
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const mv of mvSet) {
+    const p = ptOf(mesh, mv);
+    for (let d = 0; d < 3; d++) {
+      if (p[d] < lo[d]) lo[d] = p[d];
+      if (p[d] > hi[d]) hi[d] = p[d];
+    }
+  }
+  const diam = len(sub(hi, lo));
+  const tol = Math.max(BLEND_TOL_ABS, BLEND_TOL_REL * diam);
+  // Abstand der Netzpunkte zur Patch-Fläche
+  for (const mv of mvSet) {
+    const r = projectToSurface(surf, ptOf(mesh, mv), { grid: 6 });
+    if (!(r.dist <= tol)) {
+      return { fail: `Abstand ${r.dist.toFixed(3)} mm > ${tol.toFixed(3)} mm` };
+    }
+  }
+  // Normale im Inneren (BLEND_GRID×BLEND_GRID Stützstellen)
+  const u0 = surf.knotsU[0], u1 = surf.knotsU[surf.knotsU.length - 1];
+  const v0 = surf.knotsV[0], v1 = surf.knotsV[surf.knotsV.length - 1];
+  for (let i = 0; i < BLEND_GRID; i++) {
+    for (let j = 0; j < BLEND_GRID; j++) {
+      const u = u0 + ((u1 - u0) * (i + 0.5)) / BLEND_GRID;
+      const v = v0 + ((v1 - v0) * (j + 0.5)) / BLEND_GRID;
+      if (!surfaceNormal(surf, u, v)) {
+        const d = surfaceDerivs(surf, u, v);
+        const l = len(cross(d.Su, d.Sv));
+        return {
+          fail: `entartete Normale bei u=${u.toFixed(5)} v=${v.toFixed(5)} `
+            + `(|Su×Sv|=${l.toExponential(2)}, Su=[${d.Su.map((x) => x.toFixed(3))}], `
+            + `Sv=[${d.Sv.map((x) => x.toFixed(3))}])`,
+        };
+      }
+    }
+  }
+  // Sinn: flächengewichtetes Vorzeichen (Netznormale ↔ Flächennormale).
+  // Stichprobe (die Fläche ist glatt — der Mittelwert ändert sich nicht).
+  const step = Math.max(1, Math.ceil(wr.tris.length / 64));
+  let acc = 0, accA = 0;
+  for (let k = 0; k < wr.tris.length; k += step) {
+    const t = wr.tris[k];
+    const r = projectToSurface(surf, centroidOf(mesh, t), { grid: 5 });
+    const nn = normalNear(surf, r.u, r.v);
+    if (!nn) return { fail: 'entartete Normale' };
+    const d = dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], nn);
+    acc += A[t] * (d > 0 ? 1 : d < 0 ? -1 : 0);
+    accA += A[t];
+  }
+  const s = accA > 0 ? acc / accA : 0;
+  if (!(Math.abs(s) >= BLEND_SENSE_MIN)) return { fail: `Sinn ${s.toFixed(3)}` };
+  return { surf, sameSense: s > 0 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Freiform-B-Rep bauen: normalGroups → { step, report, brep } | null
 //
 // opts: { tol (Segmentier-Toleranz, default 0.02), debug: { log: [] },
@@ -325,7 +649,8 @@ export function buildFreeformBrep(normalGroups, opts = {}) {
   try {
     return buildInner(normalGroups, o, log);
   } catch (e) {
-    if (log) log.push(`Ausnahme: ${e && e.message ? e.message : String(e)}`);
+    if (log) log.push(`Ausnahme: ${e && e.message ? e.message : String(e)}`
+      + (e && e.stack ? `\n${e.stack}` : ''));
     return null;
   }
 }
@@ -335,6 +660,8 @@ function buildInner(normalGroups, opts, log) {
   // Zeitbudget und Facetten-Anteil (Grenzen gegen endlose Versuche)
   const budgetMs = Number.isFinite(opts.timeBudgetMs) ? Math.max(0, opts.timeBudgetMs) : TIME_BUDGET_MS;
   const shareMax = Number.isFinite(opts.maxFacetShare) ? Math.max(0, opts.maxFacetShare) : FACET_SHARE_MAX;
+  // Blend-Patches (B-Spline-Flächen statt Facetten) — aus = exakt altes Verhalten
+  const blendPatches = opts.blendPatches !== false;
   // 1) Netz: nur EINE dichte, mannigfaltige Schale
   const mesh = indexMesh(trianglesFromGroups(normalGroups));
   if (!mesh || !mesh.manifold || mesh.components !== 1) {
@@ -342,7 +669,9 @@ function buildInner(normalGroups, opts, log) {
     return null;
   }
   // 2) Fit-basierte Segmentierung
-  const seg = segmentByFit(mesh, { tol: opts.tol ?? 0.02, angleDeg: SEG_ANGLE_DEG });
+  // Zeitbudget der Segmentierung = Budget des ganzen Versuchs (unter Last lief die
+  // Segmentierung sonst in ihr eigenes 4-s-Limit und lieferte Tausende Rest-Facetten)
+  const seg = segmentByFit(mesh, { tol: opts.tol ?? 0.02, angleDeg: SEG_ANGLE_DEG, timeBudgetMs: budgetMs });
   if (log) {
     const byType = {};
     for (const r of seg.regions) byType[r.type] = (byType[r.type] || 0) + 1;
@@ -355,6 +684,7 @@ function buildInner(normalGroups, opts, log) {
   const state = {
     stripTris: new Set(),        // Netz-Dreiecke, die zu eigenen Facetten wurden
     demotedRegions: new Set(),   // Regionen, die ganz zur Fassade wurden
+    blendRegions: new Set(),     // Regionen, die als B-Spline-Blend behandelt werden
     stripRounds: new Map(),      // Region → Runden, in denen sie gestreift wurde
     testForceUsed: false,        // Testschalter (Kette): wirkt nur einmal
     testForceVertexUsed: false,  // Testschalter (Ecke): wirkt nur einmal
@@ -363,26 +693,49 @@ function buildInner(normalGroups, opts, log) {
     t0,                                 // Startzeit des Versuchs (Zeitbudget)
     budgetMs,                           // Zeitbudget in ms
     shareMax,                           // Anteil der zu Facetten demotierten Dreiecke
+    blendPatches,                       // Blend-Patches an (Standard) oder aus
   };
+  // Testschalter: Regionen von Anfang an als Blend behandeln
+  if (blendPatches && typeof opts.testBlendRegions === 'function') {
+    for (const r of seg.regions) {
+      let want = false;
+      try { want = !!opts.testBlendRegions(r); } catch (e) { want = false; }
+      if (want) state.blendRegions.add(r.id);
+    }
+  }
   const maxRounds = Number.isFinite(opts.maxRounds) && opts.maxRounds > 0
     ? Math.floor(opts.maxRounds) : ROUNDS_MAX;
   for (let round = 0; round < maxRounds; round++) {
     // vor jeder Runde: Zeitbudget und Hoffnungslosigkeit prüfen
     if (budgetExceeded(state)) { logBudget(log, state); return null; }
     if (hopeless(state, mesh)) { logHopeless(log, state, mesh); return null; }
+    // Fortschritt der Runde messen (vor der Runde: ein Blend-Patch kann die
+    // Region schon in der Runde zur Fassade demotiert haben)
+    const before = state.stripTris.size + state.demotedRegions.size + state.blendRegions.size;
     const res = runRound(mesh, seg, state, round, opts, log);
     if (res.hard) return null;
     if (res.failures.length) {
-      if (!res.strips.size) {
-        if (log) log.push(`Runde ${round}: Fehler ohne schuldige Region → Abbruch`);
-        return null;
-      }
-      const before = state.stripTris.size + state.demotedRegions.size;
       for (const [src, mvSet] of res.strips) {
+        // Blend-taugliche Region: die GANZE Region wird ein B-Spline-Patch
+        // (kein Streifen, keine Facetten). Sonst der alte Streifen-Weg.
+        const r = state.segById.get(src);
+        if (blendPatches && r && !state.blendRegions.has(src)
+          && !state.demotedRegions.has(src) && blendEligible(r)) {
+          state.blendRegions.add(src);
+          if (log) {
+            log.push(`Runde ${round}: Region ${src} (${r.type}) wird zum B-Spline-Blend`);
+          }
+          continue;
+        }
         applyStrip(state, mesh, src, mvSet, round, log);
       }
-      if (state.stripTris.size + state.demotedRegions.size === before) {
-        if (log) log.push(`Runde ${round}: kein neuer Streifen → Abbruch`);
+      const after = state.stripTris.size + state.demotedRegions.size + state.blendRegions.size;
+      if (after === before) {
+        if (log) {
+          log.push(res.strips.size
+            ? `Runde ${round}: kein neuer Streifen → Abbruch`
+            : `Runde ${round}: Fehler ohne schuldige Region → Abbruch`);
+        }
         return null;
       }
       continue;
@@ -410,6 +763,7 @@ function buildInner(normalGroups, opts, log) {
         rounds: round + 1,
         demoted: countDemoted(seg, state),
         stripTris: state.stripTris.size,
+        blends: state.blendRegions.size,
         faces: res.facesByType,
         edges: res.edgesByType,
         ms,
@@ -449,6 +803,17 @@ function runRound(mesh, seg, state, round, opts, log) {
       for (const t of r.tris) addFacet(t, r.id);
       continue;
     }
+    // Blend-Region: die ganze Region wird EIN B-Spline-Patch (keine Flächen-
+    // projektion, keine Ecken-Zwang, kein Snap) — die Fläche entsteht später
+    if (state.blendPatches && state.blendRegions.has(r.id)) {
+      const wr = {
+        id: regions.length, kind: 'blend', surf: null,
+        tris: r.tris, area: r.area, src: r.id, type: r.type,
+      };
+      regions.push(wr); byId.set(wr.id, wr);
+      for (const t of r.tris) wLabel[t] = wr.id;
+      continue;
+    }
     // Streifen: die gestrippten Dreiecke werden Facetten, der Rest behält die
     // Fläche der Region (Original-Fit, kein Neu-Fit)
     for (const t of r.tris) if (state.stripTris.has(t)) addFacet(t, r.id);
@@ -475,10 +840,29 @@ function runRound(mesh, seg, state, round, opts, log) {
   }
 
   // ── Fehler melden: Täter suchen — sonst die Umgebung durchsuchen
-  // (analytische Regionen im 2-Ring, sonst im 3-Ring um den Fehler)
-  const fail = (kind, cands, reason, mvSet, pick) => {
+  // (analytische Regionen im 2-Ring, sonst im 3-Ring um dem Fehler)
+  // blendsAtStart: die Regionen, die zu Rundenbeginn Blend waren. Ein
+  // Patch-Fehler demotiert nur solche Regionen — eine Region, die ERST in
+  // dieser Runde zum Blend geworden ist (ihr Rand ist wegen des Kettenfehlers
+  // noch unvollständig), wird erst in der nächsten Runde demotiert.
+  const blendsAtStart = new Set(state.blendRegions);
+  const fail = (kind, cands, reason, mvSet, pick, fopts) => {
     failures.push(reason);
     failKinds.set(kind, (failKinds.get(kind) || 0) + 1);
+    // Blend-Patch gescheitert: die Region wird GANZ zur Fassade (alter Weg)
+    // und bleibt kein Blend mehr.
+    if (fopts && fopts.demote !== undefined && fopts.demote !== null) {
+      const src = fopts.demote;
+      if (blendsAtStart.has(src)) {
+        state.demotedRegions.add(src);
+        const rr = state.segById.get(src);
+        if (rr) for (const t of rr.tris) state.stripTris.add(t);
+        if (log) log.push(`Runde ${round}: ${reason} → Region ${src} ganz zur Fassade`);
+      } else if (log) {
+        log.push(`Runde ${round}: ${reason} → Region ${src} bleibt Blend (erst in der nächsten Runde demotiert)`);
+      }
+      return null;
+    }
     let c = pick ? pick(cands) : pickCulprit(cands);
     let mv = mvSet;
     if (!c || c.kind !== 'analytic') {
@@ -603,7 +987,11 @@ function runRound(mesh, seg, state, round, opts, log) {
     // schneiden sich nie exakt. Deshalb gilt der Rest ≤ VERT_TOL (2e-5 mm, weit unter der
     // STEP-Unsicherheit 1e-4 mm) als Erfolg; ein echter Widerspruch (kein Schnittpunkt)
     // liefert einen Rest in Größenordnung der Fit-Toleranz und wird abgewiesen.
-    const projOK = r.ok || (Number.isFinite(r.res) && r.res <= VERT_TOL);
+    // Ecke MIT Blend-Nachbarn: die Fit-Fläche der Blend-Region ist keine
+    // Projektionsbedingung — die Projektion auf die (tangentialen) analytischen
+    // Nachbarn allein ist entartet, der Rest bleibt in der Fit-Genauigkeit.
+    const vTol = [...ids].some((id) => regions[id].kind === 'blend') ? VERT_TOL_BLEND : VERT_TOL;
+    const projOK = r.ok || (Number.isFinite(r.res) && r.res <= vTol);
     if (!projOK || shift > maxShift) {
       const cands = [...ids].map((id) => regions[id]).filter((w) => w.kind === 'analytic');
       // Streifen um die Ecke (Ecke + 1-Ring): die kleinste nicht-ebene analytische
@@ -796,16 +1184,19 @@ function runRound(mesh, seg, state, round, opts, log) {
       return { hard: true };
     }
     if (collapsed.has(ch.id)) continue;
+    const wrL = regions[ch.L], wrR = regions[ch.R];
+    const kindL = wrL ? wrL.kind : 'facet', kindR = wrR ? wrR.kind : 'facet';
+    const hasBlend = kindL === 'blend' || kindR === 'blend';
     const A2 = surfOfRegion(ch.L), B2 = surfOfRegion(ch.R);
     const vi0 = topo.vOfMesh[ch.mv[0]], vi1 = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
-    if (!A2 || !B2 || vi0 < 0 || vi1 < 0) {
-      fail('chain:fehlt', [regions[ch.L], regions[ch.R]],
+    if ((!hasBlend && (!A2 || !B2)) || vi0 < 0 || vi1 < 0) {
+      fail('chain:fehlt', [wrL, wrR],
         `Kette ${ch.id}: Fläche oder Ecke fehlt`, new Set(ch.mv));
       continue;
     }
     const v0 = vIdx(vi0), v1 = vIdx(vi1);
     if (v0 === v1) {
-      fail('chain:identisch', [regions[ch.L], regions[ch.R]],
+      fail('chain:identisch', [wrL, wrR],
         `Kette ${ch.id}: beide Enden sind dieselbe Ecke`, new Set(ch.mv));
       continue;
     }
@@ -815,33 +1206,84 @@ function runRound(mesh, seg, state, round, opts, log) {
       : !!(opts.testForceChainFail && isCylSphere(A2, B2));
     if (forced && !state.testForceUsed) {
       state.testForceUsed = true;
-      fail('chain:testForce', [regions[ch.L], regions[ch.R]],
-        `Kette ${ch.id} (${regions[ch.L].type}/${regions[ch.R].type}): Schnittkurve testForceChainFail`,
+      fail('chain:testForce', [wrL, wrR],
+        `Kette ${ch.id} (${wrL.type}/${wrR.type}): Schnittkurve testForceChainFail`,
         new Set(ch.mv));
       continue;
     }
     const p = vertices[v0], q = vertices[v1];
     const guides = ch.mv.slice(1, -1).map((mv) => ptOf(mesh, mv));
-    const res = fitIntersectionCurve(A2, B2, p, q, guides, { tol: FIT_TOL, maxShift: EDGE_MAX_SHIFT });
+    let res = null;
+    let curve = null;
+    if (hasBlend) {
+      // Blend-Kante: analytisch↔blend (Kurve auf der analytischen Fläche),
+      // blend↔blend (freie Kurve), facette↔blend (Gerade — die Facette ist
+      // eben, ihre Kante liegt in der Facetten-Ebene).
+      const anSide = kindL === 'analytic' ? wrL : (kindR === 'analytic' ? wrR : null);
+      const faSide = kindL === 'facet' ? wrL : (kindR === 'facet' ? wrR : null);
+      if (anSide && anSide.surf) {
+        // Die Kurve liegt auf der analytischen Fläche. Liegt die Ecke nicht
+        // exakt auf ihr (Rest ≤ VERT_TOL_BLEND, weil die Fit-Fläche der
+        // Blend-Region nicht mitprojiziert wird), wird für den Fit auf die
+        // Fläche projiziert und der Endpunkt danach auf die Ecke zurückgesetzt
+        // (die Kante muss an der Ecke hängen — die Nachbarflächen teilen sie).
+        const pp = project(anSide.surf, p), qq = project(anSide.surf, q);
+        res = fitCurveOnSurface(anSide.surf, pp, qq, guides,
+          { tol: FIT_TOL, maxShift: EDGE_MAX_SHIFT });
+        if (res.fail) {
+          fail(`chain:blend-${res.fail}`, [anSide],
+            `Kette ${ch.id} (${wrL.type}/${wrR.type}): Blend-Kurve ${res.fail}`,
+            new Set(ch.mv));
+          continue;
+        }
+        curve = res.curve;
+        if (curve && curve.ctrl && curve.ctrl.length >= 2) {
+          curve.ctrl[0] = p.slice();
+          curve.ctrl[curve.ctrl.length - 1] = q.slice();
+        }
+      } else if (faSide) {
+        const d = sub(q, p);
+        const dl = len(d);
+        if (!(dl > 1e-12)) {
+          fail('chain:blend-fehlt', [faSide],
+            `Kette ${ch.id} (${wrL.type}/${wrR.type}): Blend-Kante ohne Länge`, new Set(ch.mv));
+          continue;
+        }
+        curve = { type: 'line', p: p.slice(), d: mul(d, 1 / dl) };
+      } else {
+        const c = interpPolyline(p, q, guides);
+        if (!c) {
+          fail('chain:blend-poly', [wrL, wrR],
+            `Kette ${ch.id} (${wrL.type}/${wrR.type}): Blend-Kurve nicht interpolierbar`,
+            new Set(ch.mv));
+          continue;
+        }
+        curve = c;
+      }
+    } else {
+      res = fitIntersectionCurve(A2, B2, p, q, guides, { tol: FIT_TOL, maxShift: EDGE_MAX_SHIFT });
+      if (!res.fail) curve = res.curve;
+    }
     // Diagnose (nur mit opts.debug.chainStats): Paar, Ausgang, Normalenwinkel in der Kettenmitte
     if (opts.debug && Array.isArray(opts.debug.chainStats)) {
       const mid = guides.length ? guides[guides.length >> 1] : mul(add(p, q), 0.5);
-      const na = normalAt(A2, mid), nb = normalAt(B2, mid);
-      const ang = Math.acos(Math.min(1, Math.abs(dot(na, nb)))) * 180 / Math.PI;
+      const na = A2 ? normalAt(A2, mid) : null;
+      const nb = B2 ? normalAt(B2, mid) : null;
+      const ang = (na && nb)
+        ? Math.acos(Math.min(1, Math.abs(dot(na, nb)))) * 180 / Math.PI : NaN;
       opts.debug.chainStats.push({
-        round, L: regions[ch.L].type, R: regions[ch.R].type, idL: regions[ch.L].src, idR: regions[ch.R].src, kL: regions[ch.L].kind, kR: regions[ch.R].kind,
-        fail: res.fail || null, curve: res.curve ? res.curve.type : null, ang,
+        round, L: wrL.type, R: wrR.type, idL: wrL.src, idR: wrR.src, kL: wrL.kind, kR: wrR.kind,
+        fail: (res && res.fail) || null, curve: curve ? curve.type : null, ang,
         endsOK: !vFailed.has(vi0) && !vFailed.has(vi1), n: ch.mv.length, A: A2, B: B2, p, q, mid,
       });
     }
-    if (res.fail) {
-      fail(`chain:${res.fail}`, [regions[ch.L], regions[ch.R]],
-        `Kette ${ch.id} (${regions[ch.L].type}/${regions[ch.R].type}): Schnittkurve ${res.fail}`,
+    if (res && res.fail) {
+      fail(`chain:${res.fail}`, [wrL, wrR],
+        `Kette ${ch.id} (${wrL.type}/${wrR.type}): Schnittkurve ${res.fail}`,
         new Set(ch.mv));
       continue;
     }
     // Kreisbogen: läuft der positive Bogen p→q "lang herum"? → Bogen spiegeln
-    let curve = res.curve;
     if (curve && curve.type === 'circle') {
       curve = fixCircleArc(curve, p, q, chainPolyLen(mesh, ch, p, q));
     }
@@ -851,7 +1293,7 @@ function runRound(mesh, seg, state, round, opts, log) {
 
   // ── i) Flächen (mit Platzierungshinweisen für den STEP-Schreiber)
   const faces = [];
-  const facesByType = { plane: 0, cylinder: 0, cone: 0, sphere: 0, torus: 0, facet: 0 };
+  const facesByType = { plane: 0, cylinder: 0, cone: 0, sphere: 0, torus: 0, facet: 0, bspline: 0 };
   const merged = new Map();                   // entfallene Kante → { keep, flip }
   const dropped = new Set();                  // entfallene Kanten
   // Kanten-Union-Find: eine entfallene Kante zeigt auf ihren Vertreter;
@@ -893,6 +1335,11 @@ function runRound(mesh, seg, state, round, opts, log) {
       surf = wr.surf;
       sameSense = !!wr.sameSense;
       placementHint(wr, surf, mesh);
+    } else if (wr.kind === 'blend') {
+      // B-Spline-Patch: die Fläche entsteht nach dem Kanten-Verschmelzen
+      // (dann sind die endgültigen Kanten bekannt)
+      cand.push({ wr, kind: 'blend', surf: null, sameSense: true, loops, dead: false });
+      continue;
     } else {
       const fs = facetSurf.get(wr.id);
       if (!fs) continue;                       // (bereits als Fehler gemeldet)
@@ -957,9 +1404,20 @@ function runRound(mesh, seg, state, round, opts, log) {
     }
   }
   // Flächen ausgeben (Außenrand bestimmen)
+  const blendFaces = [];
   for (const cf of cand) {
     if (cf.dead) continue;
     const { surf, sameSense, kind, loops } = cf;
+    if (kind === 'blend') {
+      // Blend-Fläche: genau EIN Rand (sonst Patch-Fehler) — die Fläche selbst
+      // wird nach dem Kanten-Verschmelzen gebaut
+      const one = loops.length === 1;
+      loops.forEach((lp) => { lp.outer = one; });
+      for (const lp of loops) delete lp.chains;
+      blendFaces.push({ cf, idx: faces.length });
+      faces.push({ surf: null, sameSense: true, loops, kind: 'blend' });
+      continue;
+    }
     // Außenrand: bei Ebenen der größte projizierte Flächeninhalt, bei gekrümmten
     // Flächen nur bei genau einem Rand
     if (surf.type === 'plane') {
@@ -1004,6 +1462,26 @@ function runRound(mesh, seg, state, round, opts, log) {
     edges = live;
     if (log) log.push(`Runde ${round}: ${dropped.size} Kante(n) verschmolzen, `
       + `${edges.length} Kanten bleiben`);
+  }
+  // ── Blend-Patches: je Blend-Region EINE B-Spline-Fläche über den
+  // Randkurven (jetzt sind die endgültigen Kanten bekannt)
+  for (const { cf, idx } of blendFaces) {
+    if (budgetExceeded(state)) { logBudget(log, state); return { hard: true }; }
+    const wr = cf.wr;
+    if (cf.loops.length !== 1) {
+      fail('blend', [], `Blend ${wr.id} (${wr.type}): ${cf.loops.length} Ränder (genau einer erwartet)`,
+        regionVertices(mesh, wr), null, { demote: wr.src });
+      continue;
+    }
+    const res = buildBlendPatch(wr, cf.loops[0].uses, edges, vertices, mesh);
+    if (res.fail) {
+      fail('blend', [], `Blend ${wr.id} (${wr.type}): ${res.fail}`,
+        regionVertices(mesh, wr), null, { demote: wr.src });
+      continue;
+    }
+    faces[idx].surf = res.surf;
+    faces[idx].sameSense = res.sameSense;
+    facesByType.bspline = (facesByType.bspline || 0) + 1;
   }
   const edgesByType = { line: 0, circle: 0, bspline: 0 };
   for (const e of edges) {
