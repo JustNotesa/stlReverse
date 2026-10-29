@@ -546,6 +546,141 @@ test('fitIntersectionCurve kugel ∩ ebene (20°, 40 mm) → kreis', () => {
   assert.ok(onArc(res.curve, p, q, m), 'm nicht auf dem positiven bogen');
 });
 
+// ── 8) Linsen-Fall: Facetten-Ebene ∩ Verrundung ─────────────────────────────
+// Die Ebene eines Facetten-Dreiecks (alle 3 Ecken auf der Verrundung)
+// schneidet die Verrundung in einer geschlossenen "Linse". Die Kette einer
+// Dreiecksseite muss dem Bogen NEBEN der Sehne folgen und darf nicht auf den
+// Nachbarbogen der Linse springen (Faltung).
+
+// Ebene durch 3 Punkte (Normale = Kreuzprodukt der Kanten)
+function planeThrough(a, b, c) {
+  return { type: 'plane', o: [a[0], a[1], a[2]], n: norm(cross(sub(b, a), sub(c, a))) };
+}
+
+// größter Abstand der Punkte zur Strecke p→q
+function distToChord(pts, p, q) {
+  const d = sub(q, p);
+  const L2 = dot(d, d);
+  let m = 0;
+  for (const x of pts) {
+    const w = sub(x, p);
+    const t = L2 > 0 ? Math.max(0, Math.min(1, dot(w, d) / L2)) : 0;
+    const dist = len(sub(w, mul(d, t)));
+    if (dist > m) m = dist;
+  }
+  return m;
+}
+
+// alte Fit-Variante (nur 2 Bedingungen, freie Minimalnorm-Projektion) zum Vergleich
+function oldFit(A, B, p, q) {
+  const tol = 5e-7;
+  const d = sub(q, p);
+  const Ls = len(d);
+  if (!(Ls > 1e-12)) return { fail: 'degen' };
+  const maxShift = Math.min(0.5, Math.max(0.05, 0.5 * Ls));
+  const proj = new Map();
+  for (const n of [4, 8, 16, 32, 64, 128]) {
+    const pts = [p];
+    for (let i = 1; i < n; i++) {
+      const key = i / n;
+      let x = proj.get(key);
+      if (!x) {
+        const x0 = add(p, mul(d, i / n));
+        const r = projectMulti([A, B], x0);
+        if (!r.ok) return { fail: 'projectMulti' };
+        const shift = len(sub(r.x, x0));
+        if (shift > maxShift) return { fail: 'shift', detail: shift };
+        x = r.x;
+        proj.set(key, x);
+      }
+      if (!(pts.length && len(sub(pts[pts.length - 1], x)) < 1e-6)) pts.push(x);
+    }
+    if (!(pts.length && len(sub(pts[pts.length - 1], q)) < 1e-6)) pts.push(q);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const d1 = sub(pts[i], pts[i - 1]);
+      const d2 = sub(pts[i + 1], pts[i]);
+      if (len(d1) > 1e-9 && len(d2) > 1e-9 && dot(d1, d2) <= 0) return { fail: 'fold', detail: i };
+    }
+    const c = interpCubic(pts);
+    if (!c) return { fail: 'interp' };
+    let maxErr = 0;
+    for (let i = 0; i < c.params.length - 1; i++) {
+      const u0 = c.params[i];
+      const u1 = c.params[i + 1];
+      for (let k = 1; k < 8; k++) {
+        const e = evalBspline(c, u0 + (u1 - u0) * (k / 8));
+        maxErr = Math.max(maxErr, Math.abs(sdist(A, e)), Math.abs(sdist(B, e)));
+      }
+    }
+    if (maxErr <= tol) return { curve: c, pts, err: maxErr };
+  }
+  return { fail: 'maxPts' };
+}
+
+// (a) Facetten-Dreieck auf einer Torus-Verrundung: die Ebene schneidet die
+// Verrundung in einer geschlossenen "Linse" durch alle 3 Ecken. Jede Seite
+// des Dreiecks ist eine Kette, die auf beiden Flächen liegen muss.
+test('fitIntersectionCurve linse: ebene ∩ torus (3 dreiecksseiten)', () => {
+  const D = Math.PI / 180;
+  const TOR = { type: 'torus', c: [0, 0, 0], a: [0, 0, 1], Rm: RM, r: RR };
+  // Ecken auf der Verrundung: 2° Rohr, 0,5° Achse
+  const P1 = torPt(0, -1 * D);
+  const P2 = torPt(0.5 * D, 0);
+  const P3 = torPt(0, 1 * D);
+  const PL = planeThrough(P1, P2, P3);
+  for (const pt of [P1, P2, P3]) {
+    close(Math.abs(sdist(TOR, pt)), 0, 1e-9, 'ecke auf torus');
+    close(Math.abs(sdist(PL, pt)), 0, 1e-9, 'ecke auf ebene');
+  }
+  const sides = [[P1, P2], [P2, P3], [P3, P1]];
+  for (const [p, q] of sides) {
+    const res = fitIntersectionCurve(PL, TOR, p, q, []);
+    assert.ok(!res.fail, 'fit fehlgeschlagen: ' + res.fail + ' ' + res.detail);
+    assert.equal(res.curve.type, 'bspline');
+    near(res.pts[0], p, 1e-12, 'p');
+    near(res.pts[res.pts.length - 1], q, 1e-12, 'q');
+    // Restfehler der Kurve auf beiden Flächen (400 Stützpunkte)
+    const err = fitError(PL, TOR, res.curve, 400);
+    assert.ok(err <= 5e-7, 'maxFehler ' + err);
+    // die Stützpunkte bleiben neben der Sehne (Bogen der Linse, kein Nachbarbogen)
+    const d = distToChord(res.pts, p, q);
+    assert.ok(d <= 0.05, 'abstand zur sehne ' + d);
+  }
+  // Regressionszeuge: ohne die Querschnitt-Bedingung (freie Minimalnorm-
+  // Projektion) faltet die Linse an der Ecke P3 → der Fit schlägt fehl
+  const alt = oldFit(PL, TOR, P3, P1);
+  assert.ok(alt.fail, 'ohne Querschnitt-Ebene wäre kein Fehler aufgetreten');
+  assert.equal(alt.fail, 'fold', 'erwartet Faltung, war ' + alt.fail);
+});
+
+// (b) dasselbe mit einer zylindrischen Verrundung (R = 0,5): 12° Rohr,
+// 1° um die Torusachse (0,358 mm in Achsrichtung)
+test('fitIntersectionCurve linse: ebene ∩ zylinder R=0,5 (3 dreiecksseiten)', () => {
+  const D = Math.PI / 180;
+  const CYL = { type: 'cylinder', o: [20, 0, 0], a: [0, 1, 0], R: RR };
+  const cylPt = (phi, y) => [20 + RR * Math.cos(phi), y, RR * Math.sin(phi)];
+  const P1 = cylPt(0, 0);
+  const P2 = cylPt(6 * D, 0.1789);
+  const P3 = cylPt(12 * D, 0.3578);
+  const PL = planeThrough(P1, P2, P3);
+  for (const pt of [P1, P2, P3]) {
+    close(Math.abs(sdist(CYL, pt)), 0, 1e-9, 'ecke auf zylinder');
+    close(Math.abs(sdist(PL, pt)), 0, 1e-9, 'ecke auf ebene');
+  }
+  const sides = [[P1, P2], [P2, P3], [P3, P1]];
+  for (const [p, q] of sides) {
+    const res = fitIntersectionCurve(PL, CYL, p, q, []);
+    assert.ok(!res.fail, 'fit fehlgeschlagen: ' + res.fail + ' ' + res.detail);
+    assert.equal(res.curve.type, 'bspline');
+    near(res.pts[0], p, 1e-12, 'p');
+    near(res.pts[res.pts.length - 1], q, 1e-12, 'q');
+    const err = fitError(PL, CYL, res.curve, 400);
+    assert.ok(err <= 5e-7, 'maxFehler ' + err);
+    const d = distToChord(res.pts, p, q);
+    assert.ok(d <= 0.05, 'abstand zur sehne ' + d);
+  }
+});
+
 if (failed) {
   console.log('FAIL ' + failed + ' Fall(e)');
   process.exit(1);
