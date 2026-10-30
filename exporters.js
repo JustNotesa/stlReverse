@@ -14,11 +14,11 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=4';
 // Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
-import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=5';
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=6';
 // Gravur (extrusion-bands.js): Schriftzüge (Wand-Streifen) → B-Spline-Kurven
-import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=1';
+import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=2';
 // Gravur (extrusion-plans.js): Pläne der Extrusionsbänder (SURFACE_OF_LINEAR_EXTRUSION) + Rand-Aufweitung
-import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=1';
+import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=2';
 // [freiform1] Einhängepunkt: Freiform-Pfad (fit-basierte Segmentierung → eigenes B-Rep → STEP)
 import { chooseFreeform } from './freeform-brep.js?v=1';
 
