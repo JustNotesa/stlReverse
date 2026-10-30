@@ -104,6 +104,85 @@ const GAUSS8 = [
   [0.7966664774136267, 0.2223810344533745], [0.9602898564975363, 0.1012285362903763],
 ];
 
+// ---- B-Spline-Flächen: Knotenspannen (Startwerte der Projektion) ----------
+//
+// Die Parametrisierung einer Blend-Fläche ist stark ungleichförmig: die Seiten
+// sind aus Randkurven zusammengesetzt und nach Kontrollpolygonlänge
+// parametrisiert. Ein Randstück kann < 1 % des u-Bereichs belegen, eine
+// Polseite (dreiseitiges Patch) kollabiert. Ein gleichmäßiges Raster über die
+// Domäne verfehlt solche Spuren — die Projektion blieb in einem Nebenminimum
+// hängen und meldete Punkte, die exakt auf der Fläche liegen, als 2e-3 … 1e-2 mm
+// daneben. Deshalb: Startwerte je Knotenspan.
+
+// Spannen (Intervalle mit K[k+1] > K[k]) im gültigen Bereich [p, nCtrl-1]
+function knotSpans(K, p, nCtrl) {
+  const out = [];
+  for (let k = p; k < nCtrl; k++) if (K[k + 1] > K[k]) out.push({ k, a: K[k], b: K[k + 1] });
+  return out;
+}
+
+// Stützstellen je Span verteilen: mindestens eine, der Rest proportional zum
+// geometrischen Gewicht (Sehne über die Kontrollpunkte des Spans)
+function allocSpan(weights, total) {
+  const n = weights.length;
+  const cnt = new Array(n).fill(1);
+  const sum = weights.reduce((a, b) => a + b, 0);
+  const left = total - n;
+  if (left > 0 && sum > 0) {
+    const exact = weights.map((w) => (left * w) / sum);
+    let used = 0;
+    for (let i = 0; i < n; i++) { const c = Math.max(1, Math.floor(exact[i])); cnt[i] = c; used += c; }
+    const order = exact.map((e, i) => ({ i, f: e - Math.floor(e) })).sort((a, b) => b.f - a.f);
+    for (let k = 0; used < total && k < order.length; k++) { cnt[order[k].i]++; used++; }
+  }
+  return cnt;
+}
+
+// Stützstellenwerte je Span (Spannenenden eingeschlossen; bei einer
+// Stützstelle die Spanmitte)
+function spanValues(spans, cnt) {
+  const out = [];
+  for (let i = 0; i < spans.length; i++) {
+    const { a, b } = spans[i];
+    const c = cnt[i];
+    if (c <= 1) { out.push(0.5 * (a + b)); continue; }
+    for (let k = 0; k < c; k++) out.push(a + ((b - a) * k) / (c - 1));
+  }
+  return out;
+}
+
+// Minimum einer eindimensionalen Funktion: grobe Suche + goldener Schnitt
+function scanMin1D(f, a, b) {
+  const N = 32;
+  const ts = new Float64Array(N + 1);
+  let bt = a;
+  let bd = Infinity;
+  let bi = 0;
+  for (let i = 0; i <= N; i++) {
+    const t = a + ((b - a) * i) / N;
+    ts[i] = t;
+    const d = f(t);
+    if (d < bd) { bd = d; bt = t; bi = i; }
+  }
+  let lo = ts[Math.max(0, bi - 1)];
+  let hi = ts[Math.min(N, bi + 1)];
+  if (hi > lo) {
+    const g = (Math.sqrt(5) - 1) / 2;
+    let x1 = hi - g * (hi - lo);
+    let x2 = lo + g * (hi - lo);
+    let f1 = f(x1);
+    let f2 = f(x2);
+    for (let k = 0; k < 50 && hi - lo > 1e-14 * (1 + Math.abs(lo)); k++) {
+      if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - g * (hi - lo); f1 = f(x1); }
+      else { lo = x1; x1 = x2; f1 = f2; x2 = lo + g * (hi - lo); f2 = f(x2); }
+    }
+    const t = 0.5 * (lo + hi);
+    const d = f(t);
+    if (d < bd) { bd = d; bt = t; }
+  }
+  return { t: bt, d: bd };
+}
+
 export function checkStepStrict(text, opts = {}) {
   const TOL = opts.tol ?? 1e-4;          // mm — strikte Kerne arbeiten mit ~1e-6; 1e-4 ist großzügig
   const ents = parseStep(text);
@@ -394,20 +473,55 @@ export function checkStepStrict(text, opts = {}) {
     const sv = (u, v) => { evalAll(u, v); return [oV[0], oV[1], oV[2]]; };
 
     // ---- Startgitter: EINMAL je Fläche, danach Raumplatzsuche (Hash-Zellen) ----
-    const NU = Math.min(72, 8 * (iu.length + 1)), NV = Math.min(72, 8 * (iv.length + 1));
+    // Die Stützstellen liegen je KNOTENSPAN, nicht gleichmäßig über die Domäne:
+    // die Parametrisierung ist stark ungleichförmig — ein Randstück kann < 1 %
+    // des u-Bereichs belegen und würde vom gleichmäßigen Raster verfehlt.
+    const spU = knotSpans(U, du, nu);
+    const spV = knotSpans(V, dv, nv);
+    // geometrisches Gewicht je Span: die Kontrollpolygon-Länge im Span
+    // (Anhaltsmaß für die Bogenlänge — proportional dazu verteilt sich die
+    // Stützstellenzahl, damit der Abstand benachbarter Gitterpunkte (und damit
+    // die Zellgröße der Raumplatzsuche) überall ähnlich bleibt)
+    const wu = spU.map(({ k }) => {
+      let s = 0;
+      for (let i = k - du + 1; i <= k; i++) {
+        let m = 0;
+        for (let j = 0; j < nv; j++) {
+          const a = 3 * (i * nv + j), b = 3 * ((i - 1) * nv + j);
+          m += Math.hypot(CP[a] - CP[b], CP[a + 1] - CP[b + 1], CP[a + 2] - CP[b + 2]);
+        }
+        s += m / nv;
+      }
+      return s;
+    });
+    const wv = spV.map(({ k }) => {
+      let s = 0;
+      for (let j = k - dv + 1; j <= k; j++) {
+        let m = 0;
+        for (let i = 0; i < nu; i++) {
+          const a = 3 * (i * nv + j), b = 3 * (i * nv + j - 1);
+          m += Math.hypot(CP[a] - CP[b], CP[a + 1] - CP[b + 1], CP[a + 2] - CP[b + 2]);
+        }
+        s += m / nu;
+      }
+      return s;
+    });
+    const us = spanValues(spU, allocSpan(wu, Math.min(72, Math.max(8 * spU.length, 4))));
+    const vs = spanValues(spV, allocSpan(wv, Math.min(72, Math.max(8 * spV.length, 4))));
+    const NCU = us.length, NCV = vs.length;
     let grid = null;
     const buildGrid = () => {
       prof.grid++;
-      const M = (NU + 1) * (NV + 1);
+      const M = NCU * NCV;
       const pts = new Float64Array(3 * M), gu = new Float64Array(M), gv = new Float64Array(M);
       let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
       let n = 0;
       // je v-Wert die Zeilen einmal auswerten, dann alle u-Werte (spart die v-Arbeit)
-      for (let j = 0; j <= NV; j++) {
-        const v = v0 + (v1 - v0) * j / NV;
+      for (let j = 0; j < NCV; j++) {
+        const v = vs[j];
         evalRows(v);
-        for (let i = 0; i <= NU; i++) {
-          const u = u0 + (u1 - u0) * i / NU;
+        for (let i = 0; i < NCU; i++) {
+          const u = us[i];
           deBoorU(scrR, du, U, spanOf(U, du, u), u);
           const o = 3 * n;
           pts[o] = buf[3 * du]; pts[o + 1] = buf[3 * du + 1]; pts[o + 2] = buf[3 * du + 2];
@@ -420,10 +534,10 @@ export function checkStepStrict(text, opts = {}) {
       // Zellgröße = größter Abstand benachbarter Gitterpunkte; die Ring-Erweiterung der
       // Suche bleibt unabhängig davon exakt.
       let cell = 0;
-      for (let i = 0; i <= NU; i++) for (let j = 0; j <= NV; j++) {
-        const a = 3 * (i * (NV + 1) + j);
-        if (i < NU) { const b = 3 * ((i + 1) * (NV + 1) + j); const d = Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]); if (d > cell) cell = d; }
-        if (j < NV) { const b = 3 * (i * (NV + 1) + j + 1); const d = Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]); if (d > cell) cell = d; }
+      for (let j = 0; j < NCV; j++) for (let i = 0; i < NCU; i++) {
+        const a = 3 * (j * NCU + i);
+        if (i + 1 < NCU) { const b = 3 * (j * NCU + i + 1); const d = Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]); if (d > cell) cell = d; }
+        if (j + 1 < NCV) { const b = 3 * ((j + 1) * NCU + i); const d = Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]); if (d > cell) cell = d; }
       }
       if (!(cell > 0)) cell = 1;
       const NX = Math.max(1, Math.floor((mxx - mnx) / cell) + 1);
@@ -532,6 +646,21 @@ export function checkStepStrict(text, opts = {}) {
     };
 
     let lastUV = null;      // letztes (u,v) dieser Fläche → Startwert für den nächsten Punkt
+    // Startpunkte auf den vier Rand-Isokurven (u=u0, u=u1, v=v0, v=v1): ein Randpunkt
+    // liegt EXAKT auf der Randkurve — der 2-D-Newton verfeinert von dort auf Abstand
+    // null. Im Inneren führt der Gradient nicht zum Rand, der Newton blieb dort in
+    // einem Nebenminimum hängen (Randpunkte wurden 2e-3 … 1e-2 mm daneben gemeldet).
+    const boundaryCandidates = (p) => {
+      const d = (q) => { const ex = q[0] - p[0], ey = q[1] - p[1], ez = q[2] - p[2]; return Math.sqrt(ex * ex + ey * ey + ez * ez); };
+      const m0 = scanMin1D((t) => d(at(t, v0)), u0, u1);
+      const m1 = scanMin1D((t) => d(at(t, v1)), u0, u1);
+      const m2 = scanMin1D((t) => d(at(u0, t)), v0, v1);
+      const m3 = scanMin1D((t) => d(at(u1, t)), v0, v1);
+      return [
+        { u: m0.t, v: v0 }, { u: m1.t, v: v1 },
+        { u: u0, v: m2.t }, { u: u1, v: m3.t },
+      ];
+    };
     const solve = (p) => {
       prof.solve++;
       if (!grid) buildGrid();
@@ -555,33 +684,60 @@ export function checkStepStrict(text, opts = {}) {
         if (r.d2 < best.d2) best = r;
         if (r.d2 < 1e-28) break;      // Punkt liegt auf der Fläche — genauer geht es nicht
       }
-      // 3) Rückfall (selten): Punkt nicht auf der Fläche gefunden → feines Raster
-      //    (40×40) als Startwerte. Der Gauss-Newton blieb sonst an entarteten Stellen
-      //    (Polseite dreiseitiger Patches, sehr ungleich lange Seiten) hängen und
-      //    meldete Randpunkte bis 0,09 mm neben der Fläche, die exakt auf ihr liegen.
+      // 3) Rückfall (selten): Punkt nicht auf der Fläche gefunden. Der Gauss-Newton
+      //    blieb an entarteten Stellen (Polseite dreiseitiger Patches, sehr ungleich
+      //    lange Seiten) hängen und meldete Randpunkte bis 0,09 mm neben der Fläche,
+      //    die exakt auf ihr liegen. Startwerte: weitere Gitterpunkte (verschiedene
+      //    Punkte — an einer Polseite fallen alle Punkte einer Zeile auf denselben)
+      //    und die vier Rand-Isokurven (1-D auf der Kurve, dann 2-D verfeinern).
       if (best.d2 > 1e-16) {
-        const M = 40, cand = [];
-        for (let i = 0; i <= M; i++) {
-          for (let j = 0; j <= M; j++) {
-            const u = u0 + ((u1 - u0) * i) / M, v = v0 + ((v1 - v0) * j) / M;
-            evalPoint(u, v, tmp);
-            const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
-            cand.push([ex * ex + ey * ey + ez * ez, u, v, tmp[0], tmp[1], tmp[2]]);
-          }
-        }
-        cand.sort((a, b) => a[0] - b[0]);
-        // verschiedene Startpunkte: an einer Polseite (dreiseitiges Patch) fallen alle
-        // Rasterpunkte einer Zeile auf denselben Punkt — die zählen nur einmal
         const picked = [];
-        for (const c of cand) {
-          if (picked.some((q) => Math.abs(q[3] - c[3]) + Math.abs(q[4] - c[4]) + Math.abs(q[5] - c[5]) < 1e-9)) continue;
-          picked.push(c);
+        for (const c of gridNear(p, 32)) {
+          const o = 3 * c.s;
+          if (picked.some((q) => Math.abs(grid.pts[3 * q] - grid.pts[o])
+            + Math.abs(grid.pts[3 * q + 1] - grid.pts[o + 1])
+            + Math.abs(grid.pts[3 * q + 2] - grid.pts[o + 2]) < 1e-9)) continue;
+          picked.push(c.s);
           if (picked.length >= 6) break;
         }
-        for (const [, u, v] of picked) {
-          const r = refine(p, u, v);
+        for (const s of picked) {
+          const r = refine(p, grid.gu[s], grid.gv[s]);
           if (r.d2 < best.d2) best = r;
           if (r.d2 < 1e-28) break;
+        }
+        // 3b) Rand-Isokurven: dort liegt der Randpunkt exakt
+        if (best.d2 > 1e-16) {
+          for (const m of boundaryCandidates(p)) {
+            const r = refine(p, m.u, m.v);
+            if (r.d2 < best.d2) best = r;
+            if (r.d2 < 1e-28) break;
+          }
+        }
+        // 3c) letzter Rückfall: feines Raster (40×40) über die ganze Domäne
+        if (best.d2 > 1e-16) {
+          const M = 40, cand = [];
+          for (let i = 0; i <= M; i++) {
+            for (let j = 0; j <= M; j++) {
+              const u = u0 + ((u1 - u0) * i) / M, v = v0 + ((v1 - v0) * j) / M;
+              evalPoint(u, v, tmp);
+              const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+              cand.push([ex * ex + ey * ey + ez * ez, u, v, tmp[0], tmp[1], tmp[2]]);
+            }
+          }
+          cand.sort((a, b) => a[0] - b[0]);
+          // verschiedene Startpunkte: an einer Polseite (dreiseitiges Patch) fallen alle
+          // Rasterpunkte einer Zeile auf denselben Punkt — die zählen nur einmal
+          const picked2 = [];
+          for (const c of cand) {
+            if (picked2.some((q) => Math.abs(q[3] - c[3]) + Math.abs(q[4] - c[4]) + Math.abs(q[5] - c[5]) < 1e-9)) continue;
+            picked2.push(c);
+            if (picked2.length >= 6) break;
+          }
+          for (const [, u, v] of picked2) {
+            const r = refine(p, u, v);
+            if (r.d2 < best.d2) best = r;
+            if (r.d2 < 1e-28) break;
+          }
         }
       }
       lastUV = [best.u, best.v];
@@ -747,6 +903,7 @@ export function checkStepStrict(text, opts = {}) {
     const [, bounds, sref, ssame] = fe.args;
     const sense = ssame?.en === 'F' ? -1 : 1;
     const surf = surfOf(sref);
+    if (opts.onSurface) opts.onSurface(surf, fid);   // Testhaken (bsplineDistForTest)
     if (!surf.normal) { flag('unsupported', `#${fid}: Flächentyp ${surf.kind} nicht prüfbar`, { face: fid }); continue; }
     const loops = [];
     const info = { surf, sense, loops, verts: new Set(), edges: new Set(), ok: true };
@@ -1183,6 +1340,80 @@ export function checkStepStrict(text, opts = {}) {
     stats.bspline = bp;
   }
   return { violations, stats, volumes };
+}
+
+// ---- Testhilfe: Abstand eines Punktes zu einer B-Spline-Fläche --------------
+//
+// bsplineDistForTest(surfObj, p) rechnet den Abstand mit DEMSELBEN Auswerter,
+// den der Prüfer benutzt (Startgitter je Knotenspan + projiziertes Gauss-Newton +
+// Rand-Isokurven). Dazu wird aus den Flächendaten {du,dv,ctrl,knots,mults} eine
+// Surrogate-STEP-Datei gebaut und der Prüfer darauf losgelassen — so misst der
+// Test genau die Strecke, die beim Rand-Punkt-Test des Prüfers geht.
+//
+// surfObj: Fläche aus coonsPatch (knotsU/multsU/knotsV/multsV) oder
+//          {du,dv,ctrl,knots:{U,V},mults:{U,V}} bzw. {du,dv,ctrl,knots:[U,V],mults:[mu,mv]}
+const surfTestCache = new WeakMap();
+
+function surfKnotData(s) {
+  let ku, mu, kv, mv;
+  if (s.knotsU && s.multsU && s.knotsV && s.multsV) {
+    ku = s.knotsU; mu = s.multsU; kv = s.knotsV; mv = s.multsV;
+  } else if (s.knots && s.mults) {
+    if (Array.isArray(s.knots)) { ku = s.knots[0]; kv = s.knots[1]; mu = s.mults[0]; mv = s.mults[1]; }
+    else { ku = s.knots.U; kv = s.knots.V; mu = s.mults.U; mv = s.mults.V; }
+  } else return null;
+  if (!ku || !mu || !kv || !mv) return null;
+  return { ku, mu, kv, mv };
+}
+
+// Surrogate-STEP: genau eine B-Spline-Fläche als Fläche eines Gesichts
+function surrogateStep(du, dv, ctrl, ku, mu, kv, mv) {
+  const L = [];
+  let id = 1;
+  const rows = [];
+  for (const row of ctrl) {
+    const r = [];
+    for (const q of row) {
+      L.push(`#${id}=CARTESIAN_POINT('',(${q[0]},${q[1]},${q[2]}));`);
+      r.push(`#${id}`);
+      id++;
+    }
+    rows.push(`(${r.join(',')})`);
+  }
+  const sId = id++;
+  L.push(`#${sId}=B_SPLINE_SURFACE_WITH_KNOTS('',${du},${dv},(${rows.join(',')}),.UNSPECIFIED.,.F.,.F.,.F.,(${mu.join(',')}),(${mv.join(',')}),(${ku.join(',')}),(${kv.join(',')}),.UNSPECIFIED.);`);
+  const vId = id++;
+  L.push(`#${vId}=VERTEX_POINT('',#1);`);
+  const vlId = id++;
+  L.push(`#${vlId}=VERTEX_LOOP('',#${vId});`);
+  const fbId = id++;
+  L.push(`#${fbId}=FACE_OUTER_BOUND('',#${vlId},.T.);`);
+  const afId = id++;
+  L.push(`#${afId}=ADVANCED_FACE('',(#${fbId}),#${sId},.T.);`);
+  return L.join('\n');
+}
+
+function captureBsplineSurface(surfObj) {
+  const k = surfKnotData(surfObj);
+  if (!k || !surfObj.ctrl || !surfObj.ctrl.length) return null;
+  let got = null;
+  try {
+    checkStepStrict(surrogateStep(surfObj.du, surfObj.dv, surfObj.ctrl, k.ku, k.mu, k.kv, k.mv), {
+      tol: 1e9,
+      onSurface: (s) => { if (!got && s.kind === 'bspline_surface') got = s; },
+    });
+  } catch (e) { return null; }
+  return got;
+}
+
+// Abstand des Punktes p zur Fläche surfObj (mm) — mit dem Auswerter des Prüfers
+export function bsplineDistForTest(surfObj, p) {
+  let s = surfTestCache.get(surfObj);
+  if (s === undefined) {
+    s = captureBsplineSurface(surfObj);
+    surfTestCache.set(surfObj, s);
+  }
+  return s ? s.dist(p) : Infinity;
 }
 
 // ---- CLI
