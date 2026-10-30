@@ -157,6 +157,7 @@ const BLEND_MAX_NET = 40000;      // Stützpunkte im Kontrollnetz (Schreiber-Aus
 const BLEND_MAX_SAMPLES = 200;    // geprüfte Netzecken je Patch (gleichmäßige Stichprobe)
 const BLEND_PROJ_ITERS = 25;      // Newton-Schritte je Projektion (Startwert aus dem Gitter)
 const BLEND_SAMPLES_N = 8;        // 8×8 Gitterpunkte als Startwert der Projektion
+const BLEND_EDGE_TOL = 2e-7;      // mm — Randstück ↔ Patch-Fläche (strenge Importer: 1e-6)
 const BLEND_CHECK_EVERY = 16;     // Zeitprüfung alle BLEND_CHECK_EVERY Stichproben
 
 const now = () => (globalThis.performance && globalThis.performance.now)
@@ -657,6 +658,23 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh, state) {
   // Prüfung wird billiger). Startwert der Projektion: das grobe Gitter der
   // Fläche (einmal berechnet) statt einer eigenen Raster-Suche je Punkt.
   const samples = surfaceSamples(surf, BLEND_SAMPLES_N);
+  // Rand-Probe (Sicherheitsnetz): jedes Randstück muss EXAKT auf der Patch-Fläche
+  // liegen (Skoda: einzelne Patches lagen bis 0,05 mm neben ihren Geraden-Rändern).
+  // Ein Stück wird an 5 Stellen geprüft; Startwert aus dem Gitter, sonst feines Raster.
+  {
+    const bSamples = surfaceSamples(surf, 24);
+    for (const pc of pieces) {
+      const [a0, a1] = curveDomain(pc);
+      for (let k = 0; k <= 4; k++) {
+        const p = evalCurve(pc, a0 + ((a1 - a0) * k) / 4);
+        let r = projectToSurface(surf, p, { samples: bSamples, iters: 40 });
+        if (!(r.dist <= BLEND_EDGE_TOL)) r = projectToSurface(surf, p, { grid: 40 });
+        if (!(r.dist <= BLEND_EDGE_TOL)) {
+          return { fail: `Rand neben dem Patch (${r.dist.toExponential(2)} mm)` };
+        }
+      }
+    }
+  }
   const stepV = Math.max(1, Math.ceil(mvSet.length / BLEND_MAX_SAMPLES));
   let checked = 0;
   for (let i = 0; i < mvSet.length; i += stepV) {
@@ -1992,10 +2010,25 @@ function placementHint(wr, surf, mesh) {
     }
     const m = norm([mx, my, mz]);
     if (len(m) > 1e-9) {
-      surf.axis = m;
       const helper = Math.abs(m[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
       const x = sub(helper, mul(m, dot(helper, m)));
-      surf.x = len(x) > 1e-9 ? norm(x) : norm(cross(m, [0, 0, 1]));
+      const perp = len(x) > 1e-9 ? norm(x) : norm(cross(m, [0, 0, 1]));
+      // Öffnungswinkel der Region um m (größter Winkel Netznormale ↔ m)
+      let minCos = 1;
+      for (const t of wr.tris) {
+        const c = mesh.N[3 * t] * m[0] + mesh.N[3 * t + 1] * m[1] + mesh.N[3 * t + 2] * m[2];
+        if (c < minCos) minCos = c;
+      }
+      if (minCos > Math.cos(70 * Math.PI / 180)) {
+        // flache Kalotte (Skoda: Kugeln R ≈ 300 mm): Fläche auf den ÄQUATOR legen,
+        // Naht (x) gegenüber. Mit dem Pol IN der Fläche nahm OCC die Gegenseite
+        // (Fläche = ganze Kugel minus Kalotte, BRepCheck_UnorientableShape).
+        surf.axis = perp;
+        surf.x = mul(m, -1);
+      } else {
+        surf.axis = m;
+        surf.x = perp;
+      }
     }
   }
 }
