@@ -739,10 +739,10 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh, state) {
       if (checked % BLEND_CHECK_EVERY === 0 && state && budgetExceeded(state)) return { hard: true };
       checked++;
       const p = ptOf(mesh, mv);
-      let r = projectToSurface(surf, p, { samples, iters: BLEND_PROJ_ITERS });
+      let r = projectToSurface(surf, p, { samples, iters: BLEND_PROJ_ITERS, tol });
       if (!(r.dist <= tol)) {
         // Startwert war schlecht → volle Suche (teuer, aber selten)
-        r = projectToSurface(surf, p, { grid: 12 });
+        r = projectToSurface(surf, p, { grid: 12, tol });
       }
       if (!(r.dist <= tol)) {
         return { fail: `Abstand ${r.dist.toFixed(3)} mm > ${tol.toFixed(3)} mm` };
@@ -776,8 +776,8 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh, state) {
       const t = wr.tris[k];
       if (state && budgetExceeded(state)) return { hard: true };
       const c = centroidOf(mesh, t);
-      let r = projectToSurface(surf, c, { samples, iters: BLEND_PROJ_ITERS });
-      if (!(r.dist <= tol)) r = projectToSurface(surf, c, { grid: 12 });
+      let r = projectToSurface(surf, c, { samples, iters: BLEND_PROJ_ITERS, tol });
+      if (!(r.dist <= tol)) r = projectToSurface(surf, c, { grid: 12, tol });
       const nn = normalNear(surf, r.u, r.v);
       if (!nn) return { fail: 'entartete Normale' };
       const d = dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], nn);

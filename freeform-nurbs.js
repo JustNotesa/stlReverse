@@ -705,90 +705,260 @@ export function surfaceNormal(S, u, v) {
   return [n[0] / l, n[1] / l, n[2] / l];
 }
 
-// Grobes Gitter von Flächenpunkten (Startwerte für die Projektion)
-// Einmal je Fläche berechnet → die Projektion vieler Punkte kostet danach
-// nur noch den Vergleich mit dem Gitter statt einer eigenen Raster-Suche.
-export function surfaceSamples(S, n = 8) {
-  const { U, V } = surfaceKnots(S);
-  const u0 = U[0], u1 = U[U.length - 1];
-  const v0 = V[0], v1 = V[V.length - 1];
+// ── Startwerte: Knotenspannen statt gleichmäßigem Raster ────────────────────
+//
+// Die Parametrisierung einer Blend-Fläche ist stark ungleichförmig: die Seiten
+// sind aus Randkurven zusammengesetzt, die nach Kontrollpolygonlänge
+// parametrisiert werden. Ein Randstück kann < 1 % des u-Bereichs belegen
+// (ein 0,05-mm-Stück neben 5-mm-Stücken), eine Polseite (dreiseitiges Patch)
+// kollabiert ganz. Ein gleichmäßiges Raster über die Domäne verfehlt solche
+// Spuren völlig — die Projektion blieb dann in einem Nebenminimum hängen und
+// meldete Punkte, die exakt auf der Fläche liegen, bis 0,05 mm daneben.
+
+// Spannen (Intervalle mit K[k+1] > K[k]) im gültigen Bereich [p, nCtrl-1]
+function knotSpans(K, p, nCtrl) {
   const out = [];
-  for (let i = 0; i <= n; i++) {
-    const u = u0 + ((u1 - u0) * i) / n;
-    for (let j = 0; j <= n; j++) {
-      const v = v0 + ((v1 - v0) * j) / n;
-      out.push({ u, v, p: evalSurface(S, u, v) });
+  for (let k = p; k < nCtrl; k++) if (K[k + 1] > K[k]) out.push({ k, a: K[k], b: K[k + 1] });
+  return out;
+}
+
+// geometrisches Gewicht je Span: die Kontrollpolygon-Länge im Span
+// (Anhaltsmaß für die Bogenlänge — proportional dazu verteilt sich die
+// Stützstellenzahl, damit der Abstand benachbarter Stützstellen überall
+// ähnlich bleibt)
+function spanWeights(S) {
+  const { U, V } = surfaceKnots(S);
+  const nu = S.ctrl.length;
+  const nv = S.ctrl[0].length;
+  const su = knotSpans(U, S.du, nu);
+  const sv = knotSpans(V, S.dv, nv);
+  const wu = su.map(({ k }) => {
+    let s = 0;
+    for (let i = k - S.du + 1; i <= k; i++) {
+      let m = 0;
+      for (let j = 0; j < nv; j++) m += len(sub(S.ctrl[i][j], S.ctrl[i - 1][j]));
+      s += m / nv;
     }
+    return s;
+  });
+  const wv = sv.map(({ k }) => {
+    let s = 0;
+    for (let j = k - S.dv + 1; j <= k; j++) {
+      let m = 0;
+      for (let i = 0; i < nu; i++) m += len(sub(S.ctrl[i][j], S.ctrl[i][j - 1]));
+      s += m / nu;
+    }
+    return s;
+  });
+  return { su, sv, wu, wv };
+}
+
+// Stützstellen je Span verteilen: mindestens eine, der Rest proportional zum
+// geometrischen Gewicht — ein schmaler Span (Randstück) bekommt so trotzdem
+// seine Stützstellen, ein breiter mehr.
+function allocSpan(weights, total) {
+  const n = weights.length;
+  const cnt = new Array(n).fill(1);
+  const sum = weights.reduce((a, b) => a + b, 0);
+  const left = total - n;
+  if (left > 0 && sum > 0) {
+    const exact = weights.map((w) => (left * w) / sum);
+    let used = 0;
+    for (let i = 0; i < n; i++) { const c = Math.max(1, Math.floor(exact[i])); cnt[i] = c; used += c; }
+    const order = exact.map((e, i) => ({ i, f: e - Math.floor(e) })).sort((a, b) => b.f - a.f);
+    for (let k = 0; used < total && k < order.length; k++) { cnt[order[k].i]++; used++; }
+  }
+  return cnt;
+}
+
+// Stützstellenwerte je Span (Spannenenden eingeschlossen; bei einer
+// Stützstelle die Spanmitte)
+function spanValues(spans, cnt) {
+  const out = [];
+  for (let i = 0; i < spans.length; i++) {
+    const { a, b } = spans[i];
+    const c = cnt[i];
+    if (c <= 1) { out.push(0.5 * (a + b)); continue; }
+    for (let k = 0; k < c; k++) out.push(a + ((b - a) * k) / (c - 1));
   }
   return out;
 }
 
-// Nächster Punkt auf der Fläche: Grobgitter + Gauß-Newton (geklemmt)
+// Grobes Gitter von Flächenpunkten (Startwerte für die Projektion)
+// Einmal je Fläche berechnet → die Projektion vieler Punkte kostet danach
+// nur noch den Vergleich mit dem Gitter statt einer eigenen Raster-Suche.
+// Die Stützstellen liegen je KNOTENSPAN, nicht gleichmäßig über die Domäne.
+export function surfaceSamples(S, n = 8) {
+  const { su, sv, wu, wv } = spanWeights(S);
+  const nU = Math.min(64, Math.max(n + 1, 2 * su.length));
+  const nV = Math.min(64, Math.max(n + 1, 2 * sv.length));
+  const us = spanValues(su, allocSpan(wu, nU));
+  const vs = spanValues(sv, allocSpan(wv, nV));
+  const out = [];
+  for (const u of us) for (const v of vs) out.push({ u, v, p: evalSurface(S, u, v) });
+  return out;
+}
+
+// Stützstellen je Fläche zwischenspeichern (die Projektion vieler Punkte auf
+// dieselbe Fläche soll das Gitter nur einmal rechnen)
+const spanCache = new WeakMap();
+function spanSamples(S, n = 8) {
+  let e = spanCache.get(S);
+  if (!e) { e = new Map(); spanCache.set(S, e); }
+  let s = e.get(n);
+  if (!s) { s = surfaceSamples(S, n); e.set(n, s); }
+  return s;
+}
+
+// Minimum einer eindimensionalen Funktion: grobe Suche + goldener Schnitt
+// (robust gegen mehrere lokale Minima — der grobe Scan findet das beste
+// Intervall, der goldene Schnitt verfeinert darin)
+function scanMin(f, a, b) {
+  const N = 32;
+  const ts = new Float64Array(N + 1);
+  let bt = a;
+  let bd = Infinity;
+  let bi = 0;
+  for (let i = 0; i <= N; i++) {
+    const t = a + ((b - a) * i) / N;
+    ts[i] = t;
+    const d = f(t);
+    if (d < bd) { bd = d; bt = t; bi = i; }
+  }
+  let lo = ts[Math.max(0, bi - 1)];
+  let hi = ts[Math.min(N, bi + 1)];
+  if (hi > lo) {
+    const g = (Math.sqrt(5) - 1) / 2;
+    let x1 = hi - g * (hi - lo);
+    let x2 = lo + g * (hi - lo);
+    let f1 = f(x1);
+    let f2 = f(x2);
+    for (let k = 0; k < 50 && hi - lo > 1e-14 * (1 + Math.abs(lo)); k++) {
+      if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - g * (hi - lo); f1 = f(x1); }
+      else { lo = x1; x1 = x2; f1 = f2; x2 = lo + g * (hi - lo); f2 = f(x2); }
+    }
+    const t = 0.5 * (lo + hi);
+    const d = f(t);
+    if (d < bd) { bd = d; bt = t; }
+  }
+  return { t: bt, d: bd };
+}
+
+// Startpunkte auf den vier Rand-Isokurven (u=u0, u=u1, v=v0, v=v1): dort liegt
+// ein Randpunkt exakt — der 2-D-Newton verfeinert von dort auf Abstand null.
+function boundaryMinima(S, p) {
+  const { U, V } = surfaceKnots(S);
+  const u0 = U[0];
+  const u1 = U[U.length - 1];
+  const v0 = V[0];
+  const v1 = V[V.length - 1];
+  const d = (q) => len(sub(q, p));
+  const m0 = scanMin((t) => d(evalSurface(S, t, v0)), u0, u1);
+  const m1 = scanMin((t) => d(evalSurface(S, t, v1)), u0, u1);
+  const m2 = scanMin((t) => d(evalSurface(S, u0, t)), v0, v1);
+  const m3 = scanMin((t) => d(evalSurface(S, u1, t)), v0, v1);
+  return [
+    { u: m0.t, v: v0, d: m0.d },
+    { u: m1.t, v: v1, d: m1.d },
+    { u: u0, v: m2.t, d: m2.d },
+    { u: u1, v: m3.t, d: m3.d },
+  ];
+}
+
+// Nächster Punkt auf der Fläche: Startwerte je Knotenspan + Gauß-Newton (geklemmt)
+//
+// Reihenfolge: bester Startwert → (falls das Ergebnis nicht stimmt) weitere
+// Startwerte und die Rand-Isokurven. Der Newton bleibt sonst in einem
+// Nebenminimum hängen, wenn der gesuchte Punkt auf dem Rand liegt: dort ist
+// das Minimum am Rand des Parameterbereichs und der innere Gradient führt
+// nicht dorthin.
 export function projectToSurface(S, p, opts = {}) {
   const { U, V } = surfaceKnots(S);
   const u0 = U[0];
   const u1 = U[U.length - 1];
   const v0 = V[0];
   const v1 = V[V.length - 1];
-  const N = opts.grid !== undefined ? opts.grid : 12;
-  let bu = u0;
-  let bv = v0;
-  let bd = Infinity;
-  if (opts.samples && opts.samples.length) {
-    // Startwert aus einem vorausberechneten Gitter (ersetzt die teure
-    // Grobraster-Suche je Punkt): der nächstgelegene Gitterpunkt gewinnt
-    for (let i = 0; i < opts.samples.length; i++) {
-      const q = opts.samples[i].p;
-      const dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
-      const d = dx * dx + dy * dy + dz * dz;
-      if (d < bd) { bd = d; bu = opts.samples[i].u; bv = opts.samples[i].v; }
-    }
-    bd = Math.sqrt(bd);
-  } else {
-    for (let i = 0; i <= N; i++) {
-      const u = u0 + ((u1 - u0) * i) / N;
-      for (let j = 0; j <= N; j++) {
-        const v = v0 + ((v1 - v0) * j) / N;
-        const d = len(sub(evalSurface(S, u, v), p));
-        if (d < bd) { bd = d; bu = u; bv = v; }
-      }
-    }
-  }
-  let u = bu;
-  let v = bv;
-  let cur = bd;
   const iters = opts.iters !== undefined ? opts.iters : 80;
-  for (let it = 0; it < iters; it++) {
-    const x = evalSurface(S, u, v);
-    const r = sub(p, x);
-    const d = surfaceDerivs(S, u, v);
-    const a = dot(d.Su, d.Su);
-    const b = dot(d.Su, d.Sv);
-    const c = dot(d.Sv, d.Sv);
-    const e1 = dot(d.Su, r);
-    const e2 = dot(d.Sv, r);
-    const det = a * c - b * b;
-    if (!(Math.abs(det) > 1e-300)) break;
-    let step = 1;
-    let improved = false;
-    for (let k = 0; k < 14; k++) {
-      const du = (step * (c * e1 - b * e2)) / det;
-      const dv = (step * (a * e2 - b * e1)) / det;
-      const nu = Math.min(Math.max(u + du, u0), u1);
-      const nv = Math.min(Math.max(v + dv, v0), v1);
-      const nd = len(sub(evalSurface(S, nu, nv), p));
-      if (nd < cur) {
-        const impr = cur - nd;
-        u = nu; v = nv; cur = nd; improved = true;
-        if (impr < 1e-16) { it = iters; }
-        break;
-      }
-      step *= 0.5;
-    }
-    if (!improved) break;
+  const tol = opts.tol !== undefined ? opts.tol : 1e-9;
+
+  // Startwerte: vorausberechnetes Gitter oder (je Fläche gecacht) die
+  // Knotenspan-Abtastung
+  const src = (opts.samples && opts.samples.length)
+    ? opts.samples
+    : spanSamples(S, opts.grid !== undefined ? opts.grid : 8);
+  let bi = 0;
+  let bd = Infinity;
+  for (let i = 0; i < src.length; i++) {
+    const q = src[i].p;
+    const dx = q[0] - p[0];
+    const dy = q[1] - p[1];
+    const dz = q[2] - p[2];
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < bd) { bd = d; bi = i; }
   }
-  const x = evalSurface(S, u, v);
-  return { u, v, x, dist: len(sub(x, p)) };
+  if (!src.length) return { u: u0, v: v0, x: evalSurface(S, u0, v0), dist: Infinity };
+
+  // Gauß-Newton aus einem Startwert (geklemmt, mit Längensuche)
+  const refine = (us, vs) => {
+    let u = us;
+    let v = vs;
+    let cur = len(sub(evalSurface(S, u, v), p));
+    for (let it = 0; it < iters; it++) {
+      const x = evalSurface(S, u, v);
+      const r = sub(p, x);
+      const d = surfaceDerivs(S, u, v);
+      const a = dot(d.Su, d.Su);
+      const b = dot(d.Su, d.Sv);
+      const c = dot(d.Sv, d.Sv);
+      const e1 = dot(d.Su, r);
+      const e2 = dot(d.Sv, r);
+      const det = a * c - b * b;
+      if (!(Math.abs(det) > 1e-300)) break;
+      let step = 1;
+      let improved = false;
+      for (let k = 0; k < 14; k++) {
+        const du = (step * (c * e1 - b * e2)) / det;
+        const dv = (step * (a * e2 - b * e1)) / det;
+        const nu = Math.min(Math.max(u + du, u0), u1);
+        const nv = Math.min(Math.max(v + dv, v0), v1);
+        const nd = len(sub(evalSurface(S, nu, nv), p));
+        if (nd < cur) {
+          const impr = cur - nd;
+          u = nu; v = nv; cur = nd; improved = true;
+          if (impr < 1e-16) { it = iters; }
+          break;
+        }
+        step *= 0.5;
+      }
+      if (!improved) break;
+    }
+    const x = evalSurface(S, u, v);
+    return { u, v, x, dist: len(sub(x, p)) };
+  };
+
+  let best = refine(src[bi].u, src[bi].v);
+  if (best.dist > tol) {
+    // weitere Startwerte — nur solche, die verschiedene Punkte sind (an einer
+    // Polseite fallen alle Startwerte einer Zeile auf denselben Punkt)
+    const used = [best.x];
+    for (let i = 0; i < src.length && used.length < 8; i++) {
+      const q = src[i].p;
+      if (used.some((w) => Math.abs(w[0] - q[0]) + Math.abs(w[1] - q[1]) + Math.abs(w[2] - q[2]) < 1e-9)) continue;
+      used.push(q);
+      const r = refine(src[i].u, src[i].v);
+      if (r.dist < best.dist) best = r;
+      if (best.dist <= tol) break;
+    }
+    // Rand-Isokurven: 1-D auf der Kurve (dort liegt der Punkt exakt), dann 2-D
+    if (best.dist > tol) {
+      for (const m of boundaryMinima(S, p)) {
+        const r = refine(m.u, m.v);
+        if (r.dist < best.dist) best = r;
+        if (best.dist <= tol) break;
+      }
+    }
+  }
+  return best;
 }
 
 // ── Kurven auf analytischen Flächen ─────────────────────────────────────────
