@@ -201,6 +201,18 @@ Kreis-Kanten teilen.
   Scrollen bei einfachen Teilen), gekoppelte Kameras (Schalter „Ansichten koppeln“), Vollbild-Knopf (Fullscreen-API, Overlay-Rückfall),
   Viewer zeigen das Teil nicht mehr gespiegelt (echte Drehung Z→Y statt y/z-Tausch), ehrlicher Zähler: report.rimFilletsToChamfer
   (Lochrand-Rundung → Fase/Kegel) und report.rimChamfersKept (echte Fase als Kegel). STEP-Ausgabe byte-gleich.
+- [x] **Tempo + Testpflege (2026-10-30, `wt/tempo-tests`)** — Export 16–41 % schneller (NozzleBox AN −33 %, AUS −41 %;
+  Skoda AN −32 %), STEP byte-gleich an 46 Dateien. Kanten-Index je Flächenliste gemerkt, vtxKey-Cache am Punkt, Kreis-Fit ohne
+  Matrizen, nearestParam-Raster je Kurve. npm test um Suiten `freeform` und `gravur` erweitert (14 Suiten). Importe von
+  profile-arcs/spline-fit jetzt einheitlich versioniert (keine doppelten Modul-Kopien mehr). Popup-Memo des Pakets verworfen
+  (main hat currentExport). Offen: Export in den Web-Worker verlegen (blockiert bei großen Teilen ~5 s die UI); toter Code
+  det3/solve3 (Matrix-Varianten) in profile-arcs.js; vtxKey-Symbol ist aufzählbar.
+- [ ] **Kabelhalter-Reste (`wt/kabelhalter-rest`, NICHT gemergt):** Spalten-Kollaps in mesh-clean.js (142/151 statt 218/233),
+  Prüfung: lagenabhängig — z5 verschoben/gedreht kippt AN auf ~255 Flächen, Kabelhalter schräg AN 752 → 1642. Kein Rückfall auf
+  Einzel-Kollaps, Mikro-Kanten bleiben. Erst lagenstabil machen, Härtetest in mehreren Lagen. Unit-Tests insertRulings/guardCorner
+  aus dem Branch sind brauchbar und können separat übernommen werden.
+- [ ] **Freiform Etappe 2 (`wt/freiform2`, NICHT gemergt):** Lead-Agent brach mit Netzwerkfehler ab; 8 Commits (B-Spline-Flächen,
+  Blend-Patches, strenge Prüfung). Noch ungeprüft — Bericht und adversariale Prüfung nachholen.
 - [ ] **UI Rest:** Mit „Verrundungen entfernen“ AUS zählt die Kachel echte Fasen (arcCones) als „bleiben rund“; Karte „überwiegend
   facettiert“ nicht grün einfärben (body[data-quality=faceted]); echter Esc-Test im nativen Firefox-Vollbild; veraltete E2E-Tests (tests/e2e).
 - [x] **Kleinteile NozzleBox (2026-10-29, `wt/kleinteile`)** — (1) Ösen: Lochringe im STL gegeneinander verdreht
