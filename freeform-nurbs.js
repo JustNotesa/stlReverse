@@ -623,23 +623,39 @@ export function coonsPatch(c0, c1, d0, d1) {
 
 // ── Flächen: Auswertung, Ableitungen, Normale, Projektion ───────────────────
 
+// Vollständiger Knotenvektor einer Fläche (gecacht: die Auswertung ruft ihn
+// sehr oft auf und die Vektoren ändern sich nie)
+const knotCache = new WeakMap();
+function surfaceKnots(S) {
+  let e = knotCache.get(S);
+  if (!e) {
+    e = { U: expandKnots(S.knotsU, S.multsU), V: expandKnots(S.knotsV, S.multsV) };
+    knotCache.set(S, e);
+  }
+  return e;
+}
+
 export function evalSurface(S, u, v) {
-  const U = expandKnots(S.knotsU, S.multsU);
-  const V = expandKnots(S.knotsV, S.multsV);
+  const { U, V } = surfaceKnots(S);
   const nu = S.ctrl.length;
   const nv = S.ctrl[0].length;
   const uu = Math.min(Math.max(u, U[0]), U[U.length - 1]);
   const vv = Math.min(Math.max(v, V[0]), V[V.length - 1]);
-  const Nu = basisAll(U, S.du, nu, uu);
-  const Nv = basisAll(V, S.dv, nv, vv);
+  // nur die (du+1)×(dv+1) Stützpunkte im Parameter-Span sind beitragsstark
+  // (alle anderen Basisfunktionen sind dort exakt 0) → O(Grad²) statt O(nu·nv)
+  const spanU = findSpan(U, S.du, nu, uu);
+  const spanV = findSpan(V, S.dv, nv, vv);
+  const Nu = basisFuns(U, S.du, uu, spanU);
+  const Nv = basisFuns(V, S.dv, vv, spanV);
   const out = [0, 0, 0];
-  for (let i = 0; i < nu; i++) {
+  for (let i = 0; i <= S.du; i++) {
     const wi = Nu[i];
     if (wi === 0) continue;
-    for (let j = 0; j < nv; j++) {
+    const gi = spanU - S.du + i;
+    for (let j = 0; j <= S.dv; j++) {
       const w = wi * Nv[j];
       if (w === 0) continue;
-      const c = S.ctrl[i][j];
+      const c = S.ctrl[gi][spanV - S.dv + j];
       out[0] += w * c[0];
       out[1] += w * c[1];
       out[2] += w * c[2];
@@ -650,8 +666,7 @@ export function evalSurface(S, u, v) {
 
 // Punkt und erste Partielle Ableitungen
 export function surfaceDerivs(S, u, v) {
-  const U = expandKnots(S.knotsU, S.multsU);
-  const V = expandKnots(S.knotsV, S.multsV);
+  const { U, V } = surfaceKnots(S);
   const nu = S.ctrl.length;
   const nv = S.ctrl[0].length;
   const uu = Math.min(Math.max(u, U[0]), U[U.length - 1]);
@@ -690,10 +705,27 @@ export function surfaceNormal(S, u, v) {
   return [n[0] / l, n[1] / l, n[2] / l];
 }
 
+// Grobes Gitter von Flächenpunkten (Startwerte für die Projektion)
+// Einmal je Fläche berechnet → die Projektion vieler Punkte kostet danach
+// nur noch den Vergleich mit dem Gitter statt einer eigenen Raster-Suche.
+export function surfaceSamples(S, n = 8) {
+  const { U, V } = surfaceKnots(S);
+  const u0 = U[0], u1 = U[U.length - 1];
+  const v0 = V[0], v1 = V[V.length - 1];
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const u = u0 + ((u1 - u0) * i) / n;
+    for (let j = 0; j <= n; j++) {
+      const v = v0 + ((v1 - v0) * j) / n;
+      out.push({ u, v, p: evalSurface(S, u, v) });
+    }
+  }
+  return out;
+}
+
 // Nächster Punkt auf der Fläche: Grobgitter + Gauß-Newton (geklemmt)
 export function projectToSurface(S, p, opts = {}) {
-  const U = expandKnots(S.knotsU, S.multsU);
-  const V = expandKnots(S.knotsV, S.multsV);
+  const { U, V } = surfaceKnots(S);
   const u0 = U[0];
   const u1 = U[U.length - 1];
   const v0 = V[0];
@@ -702,12 +734,24 @@ export function projectToSurface(S, p, opts = {}) {
   let bu = u0;
   let bv = v0;
   let bd = Infinity;
-  for (let i = 0; i <= N; i++) {
-    const u = u0 + ((u1 - u0) * i) / N;
-    for (let j = 0; j <= N; j++) {
-      const v = v0 + ((v1 - v0) * j) / N;
-      const d = len(sub(evalSurface(S, u, v), p));
-      if (d < bd) { bd = d; bu = u; bv = v; }
+  if (opts.samples && opts.samples.length) {
+    // Startwert aus einem vorausberechneten Gitter (ersetzt die teure
+    // Grobraster-Suche je Punkt): der nächstgelegene Gitterpunkt gewinnt
+    for (let i = 0; i < opts.samples.length; i++) {
+      const q = opts.samples[i].p;
+      const dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d < bd) { bd = d; bu = opts.samples[i].u; bv = opts.samples[i].v; }
+    }
+    bd = Math.sqrt(bd);
+  } else {
+    for (let i = 0; i <= N; i++) {
+      const u = u0 + ((u1 - u0) * i) / N;
+      for (let j = 0; j <= N; j++) {
+        const v = v0 + ((v1 - v0) * j) / N;
+        const d = len(sub(evalSurface(S, u, v), p));
+        if (d < bd) { bd = d; bu = u; bv = v; }
+      }
     }
   }
   let u = bu;
