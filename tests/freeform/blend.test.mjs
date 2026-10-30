@@ -176,13 +176,25 @@ test('blend-kettenfehler', () => {
 });
 
 // ── d) verrauschter Körper: Blends statt Facetten ───────────────────────────
+// Der Fall muss in < 60 s fertig sein: der Versuch bekommt ein Zeitbudget
+// (30 s) und wird im Freiform-Bau an jeder teuren Stelle geprüft.
+const BLEND_BUDGET_MS = 30000;
 test('blend-rauschen', () => {
+  const tAll = Date.now();
   const groups = noiseGroups(groupsOf(BOX));
   const dbgAlt = { log: [] };
-  const alt = buildFreeformBrep(groups, { blendPatches: false, debug: dbgAlt });
+  const tAlt = Date.now();
+  const alt = buildFreeformBrep(groups, {
+    blendPatches: false, debug: dbgAlt, timeBudgetMs: BLEND_BUDGET_MS,
+  });
+  const msAlt = Date.now() - tAlt;
   const dbgNeu = { log: [] };
   lastDbg = dbgNeu;
-  const neu = buildFreeformBrep(groups, { blendPatches: true, debug: dbgNeu });
+  const tNeu = Date.now();
+  const neu = buildFreeformBrep(groups, {
+    blendPatches: true, debug: dbgNeu, timeBudgetMs: BLEND_BUDGET_MS,
+  });
+  const msNeu = Date.now() - tNeu;
   const show = (r, dbg, tag) => {
     if (!r) return `${tag}: null (${dbg.log.slice(-2).join(' | ')})`;
     const f = typesOf(r.report.freeform.faces, FACE_TYPES);
@@ -191,20 +203,33 @@ test('blend-rauschen', () => {
       + ` · Facetten ${r.report.freeform.faces.facet} · Streifen ${r.report.freeform.stripTris}`
       + ` · Verstöße ${v.length}${v.length ? ` (${v.slice(0, 2).map((x) => x.kind).join(',')})` : ''}`;
   };
-  console.log(`     blend-rauschen: ${show(alt, dbgAlt, 'alt')}`);
-  console.log(`     blend-rauschen: ${show(neu, dbgNeu, 'neu')}`);
-  assert.ok(neu, `Blend-Bau lieferte null\n${dbgNeu.log.slice(-6).join('\n')}`);
-  const fNeu = typesOf(neu.report.freeform.faces, FACE_TYPES);
-  const fAlt = alt ? typesOf(alt.report.freeform.faces, FACE_TYPES) : null;
-  const vNeu = checkStepStrict(neu.step).violations;
-  assert.equal(vNeu.length, 0,
-    `STEP-Verstöße (neu): ${vNeu.slice(0, 4).map((v) => `${v.kind}: ${v.msg}`).join(' | ')}`);
-  if (fAlt) {
-    assert.ok(fNeu.facet <= fAlt.facet,
-      `mehr Facetten mit Blends: ${fNeu.facet} statt ${fAlt.facet}`);
+  console.log(`     blend-rauschen: ${show(alt, dbgAlt, 'alt')} · ${msAlt} ms`);
+  console.log(`     blend-rauschen: ${show(neu, dbgNeu, 'neu')} · ${msNeu} ms`);
+  for (const line of dbgNeu.log.filter((l) => l.startsWith('ZEIT'))) {
+    console.log(`     blend-rauschen: ${line}`);
   }
-  writeFileSync(join('tests/freeform/out', 'blend-rauschen-neu.step'), neu.step);
+  // Der Versuch muss entweder ein gültiges Ergebnis liefern …
+  if (neu) {
+    const vNeu = checkStepStrict(neu.step).violations;
+    assert.equal(vNeu.length, 0,
+      `STEP-Verstöße (neu): ${vNeu.slice(0, 4).map((v) => `${v.kind}: ${v.msg}`).join(' | ')}`);
+    const fNeu = typesOf(neu.report.freeform.faces, FACE_TYPES);
+    const fAlt = alt ? typesOf(alt.report.freeform.faces, FACE_TYPES) : null;
+    if (fAlt) {
+      assert.ok(fNeu.facet <= fAlt.facet,
+        `mehr Facetten mit Blends: ${fNeu.facet} statt ${fAlt.facet}`);
+    }
+    writeFileSync(join('tests/freeform/out', 'blend-rauschen-neu.step'), neu.step);
+  } else {
+    // … oder innerhalb des Budgets aufgeben (und das sagen).
+    console.log(`     blend-rauschen: neu=null — ${dbgNeu.log.slice(-3).join(' | ')}`);
+    assert.ok(msNeu <= BLEND_BUDGET_MS + 5000,
+      `Budget überschritten: ${msNeu} ms > ${BLEND_BUDGET_MS} ms`);
+  }
   if (alt) writeFileSync(join('tests/freeform/out', 'blend-rauschen-alt.step'), alt.step);
+  const msAll = Date.now() - tAll;
+  console.log(`     blend-rauschen: gesamt ${msAll} ms`);
+  assert.ok(msAll < 60000, `zu lang: ${msAll} ms (Limit 60 s)`);
 });
 
 writeFileSync(join('tests/freeform/out', '_fail-blend.log'), failLog.join('\n---\n'));

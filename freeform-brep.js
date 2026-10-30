@@ -113,7 +113,8 @@ import { snapSurfaces } from './freeform-snap.js';
 import { writeFreeformStep } from './freeform-step.js';
 import {
   lineToBspline, evalCurve, reverseCurve, splitCurve, joinCurves, coonsPatch,
-  surfaceNormal, surfaceDerivs, projectToSurface, fitCurveOnSurface, interpPolyline,
+  surfaceNormal, surfaceDerivs, projectToSurface, surfaceSamples,
+  fitCurveOnSurface, interpPolyline,
 } from './freeform-nurbs.js';
 
 // ---- Grenzwerte (Etappe 1) ----
@@ -150,9 +151,31 @@ const BLEND_TOL_REL = 0.12;       // × Durchmesser der Region (Mindestabstand).
 const BLEND_CORNER_DEG = 30;      // Grad — Wendepunkt eines Blendrands zählt als Ecke
 const BLEND_SENSE_MIN = 0.8;      // |flächengewichtetes Vorzeichen| der Blendfläche
 const BLEND_GRID = 6;             // 6×6 Stützstellen im Inneren (Normalentest)
+// Arbeitsgrenzen je Patch (damit ein Patch nie unbegrenzt teuer wird):
+const BLEND_MAX_CTRL = 400;       // Stützpunkte je Patch-Seite / Kontrollnetz-Richtung
+const BLEND_MAX_NET = 40000;      // Stützpunkte im Kontrollnetz (Schreiber-Ausgabe!)
+const BLEND_MAX_SAMPLES = 200;    // geprüfte Netzecken je Patch (gleichmäßige Stichprobe)
+const BLEND_PROJ_ITERS = 25;      // Newton-Schritte je Projektion (Startwert aus dem Gitter)
+const BLEND_SAMPLES_N = 8;        // 8×8 Gitterpunkte als Startwert der Projektion
+const BLEND_CHECK_EVERY = 16;     // Zeitprüfung alle BLEND_CHECK_EVERY Stichproben
 
 const now = () => (globalThis.performance && globalThis.performance.now)
   ? globalThis.performance.now() : Date.now();
+
+// TEMP-Messung (wird nach der Messung wieder entfernt)
+let TIME = null;
+function tm(key, t0) {
+  if (!TIME) return;
+  TIME[key] = (TIME[key] || 0) + (now() - t0);
+}
+function tmCount(key, n) {
+  if (!TIME) return;
+  TIME[key] = (TIME[key] || 0) + n;
+}
+function tmMax(key, n) {
+  if (!TIME) return;
+  TIME[key] = Math.max(TIME[key] || 0, n);
+}
 
 // Zeitbudget überschritten? (jetzt − Start des Versuchs ≥ Budget)
 function budgetExceeded(state) {
@@ -511,13 +534,31 @@ function normalNear(surf, u, v) {
 // Blend-Patch einer Region bauen:
 //   Randkurven → geschlossene Kurve → Ecken (Wendepunkte) → Coons-Patch →
 //   Prüfungen (Abstand der Netzpunkte, Normale, Sinn).
-// Rückgabe { surf, sameSense } oder { fail: Grund }.
-function buildBlendPatch(wr, uses, edges, vertices, mesh) {
+// Rückgabe { surf, sameSense } | { fail: Grund } | { hard: true } (Zeitbudget).
+function buildBlendPatch(wr, uses, edges, vertices, mesh, state) {
   const { N, A } = mesh;
+  const tStart = now();
+  let t = tStart;
+  if (state && budgetExceeded(state)) return { hard: true };
   const pieces = loopPieces(uses, edges, vertices);
   if (!pieces) return { fail: 'Randkurve' };
+  // Rand zu aufwendig? (die geschlossene Randkurve bekommt alle Stützpunkte
+  // der Randkanten; das Coons-Netz wächst dann quadratisch mit)
+  let nCtrl = 0;
+  for (const c of pieces) nCtrl += c.ctrl.length;
+  if (nCtrl > 4 * BLEND_MAX_CTRL) return { fail: `Rand zu lang (${nCtrl} Stützpunkte)` };
   const cb = closedBoundary(pieces);
-  if (!cb) return { fail: 'geschlossene Kurve' };
+  if (!cb) {
+    // Diagnose: größte Lücke zwischen aufeinanderfolgenden Stücken
+    let gap = 0;
+    for (let k = 0; k < pieces.length; k++) {
+      const a = pieces[k], b = pieces[(k + 1) % pieces.length];
+      gap = Math.max(gap, len(sub(evalCurve(a, curveDomain(a)[1]), evalCurve(b, curveDomain(b)[0]))));
+    }
+    return { fail: `geschlossene Kurve (Stücke ${pieces.length}, größte Lücke ${gap.toExponential(2)} mm)` };
+  }
+  tm('blend.boundary', t); t = now();
+  if (state && budgetExceeded(state)) return { hard: true };
   const C = cb.curve;
   const joints = cb.joints;
   const n = pieces.length;
@@ -564,6 +605,8 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh) {
   const three = corners.length === 3;
   const arcs = splitClosed(C, corners);
   if (!arcs) return { fail: 'Randbögen' };
+  tm('blend.arcs', t); t = now();
+  if (state && budgetExceeded(state)) return { hard: true };
   // Coons-Patch: c0 = s0, d1 = s1, c1 = reverse(s2), d0 = reverse(s3)
   const c0 = arcs[0], d1 = arcs[1];
   const c1 = reverseCurve(arcs[2]);
@@ -575,8 +618,24 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh) {
   } else {
     d0 = reverseCurve(arcs[3]);
   }
+  // Arbeitsgrenze VOR dem Coons-Patch: das Kontrollnetz ist das Produkt der
+  // Stützpunktzahlen der Seiten (die Seiten sind aus vielen Randkurven
+  // zusammengesetzt, ihr Knotenvektor-Vereinigungsnetz explodiert sonst).
+  // Der Rand muss exakt bleiben — also wird der Patch gemeldet, nicht gerundet.
+  for (const [nm, c] of [['c0', c0], ['c1', c1], ['d0', d0], ['d1', d1]]) {
+    if (c.ctrl.length > BLEND_MAX_CTRL) {
+      return { fail: `Seite ${nm} zu lang (${c.ctrl.length} Stützpunkte)` };
+    }
+  }
   const surf = coonsPatch(c0, c1, d0, d1);
   if (!surf) return { fail: 'Coons-Patch' };
+  tm('blend.coons', t); t = now();
+  tmCount('blend.patches', 1);
+  tmMax('blend.net', surf.ctrl.length * surf.ctrl[0].length);
+  tmMax('blend.side', Math.max(c0.ctrl.length, c1.ctrl.length, d0.ctrl.length, d1.ctrl.length));
+  if (surf.ctrl.length * surf.ctrl[0].length > BLEND_MAX_NET) {
+    return { fail: `Kontrollnetz zu groß (${surf.ctrl.length}×${surf.ctrl[0].length})` };
+  }
   // strenge Importer: innere Knotenvielfachheit ≤ Grad
   if (!multsOk(surf.knotsU, surf.multsU, surf.du) || !multsOk(surf.knotsV, surf.multsV, surf.dv)) {
     return { fail: 'Knotenvielfachheit' };
@@ -593,13 +652,28 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh) {
   }
   const diam = len(sub(hi, lo));
   const tol = Math.max(BLEND_TOL_ABS, BLEND_TOL_REL * diam);
-  // Abstand der Netzpunkte zur Patch-Fläche
-  for (const mv of mvSet) {
-    const r = projectToSurface(surf, ptOf(mesh, mv), { grid: 6 });
+  // Abstand der Netzpunkte zur Patch-Fläche — gleichmäßige Stichprobe
+  // (höchstens BLEND_MAX_SAMPLES Ecken; der Rand bleibt exakt, nur die
+  // Prüfung wird billiger). Startwert der Projektion: das grobe Gitter der
+  // Fläche (einmal berechnet) statt einer eigenen Raster-Suche je Punkt.
+  const samples = surfaceSamples(surf, BLEND_SAMPLES_N);
+  const stepV = Math.max(1, Math.ceil(mvSet.length / BLEND_MAX_SAMPLES));
+  let checked = 0;
+  for (let i = 0; i < mvSet.length; i += stepV) {
+    const mv = mvSet[i];
+    if (checked % BLEND_CHECK_EVERY === 0 && state && budgetExceeded(state)) return { hard: true };
+    checked++;
+    const p = ptOf(mesh, mv);
+    let r = projectToSurface(surf, p, { samples, iters: BLEND_PROJ_ITERS });
+    if (!(r.dist <= tol)) {
+      // Startwert war schlecht → volle Suche (teuer, aber selten)
+      r = projectToSurface(surf, p, { grid: 12 });
+    }
     if (!(r.dist <= tol)) {
       return { fail: `Abstand ${r.dist.toFixed(3)} mm > ${tol.toFixed(3)} mm` };
     }
   }
+  tm('blend.dist', t); t = now();
   // Normale im Inneren (BLEND_GRID×BLEND_GRID Stützstellen)
   const u0 = surf.knotsU[0], u1 = surf.knotsU[surf.knotsU.length - 1];
   const v0 = surf.knotsV[0], v1 = surf.knotsV[surf.knotsV.length - 1];
@@ -618,13 +692,17 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh) {
       }
     }
   }
+  tm('blend.normal', t); t = now();
   // Sinn: flächengewichtetes Vorzeichen (Netznormale ↔ Flächennormale).
   // Stichprobe (die Fläche ist glatt — der Mittelwert ändert sich nicht).
   const step = Math.max(1, Math.ceil(wr.tris.length / 64));
   let acc = 0, accA = 0;
   for (let k = 0; k < wr.tris.length; k += step) {
     const t = wr.tris[k];
-    const r = projectToSurface(surf, centroidOf(mesh, t), { grid: 5 });
+    if (state && budgetExceeded(state)) return { hard: true };
+    const c = centroidOf(mesh, t);
+    let r = projectToSurface(surf, c, { samples, iters: BLEND_PROJ_ITERS });
+    if (!(r.dist <= tol)) r = projectToSurface(surf, c, { grid: 12 });
     const nn = normalNear(surf, r.u, r.v);
     if (!nn) return { fail: 'entartete Normale' };
     const d = dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], nn);
@@ -632,7 +710,10 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh) {
     accA += A[t];
   }
   const s = accA > 0 ? acc / accA : 0;
-  if (!(Math.abs(s) >= BLEND_SENSE_MIN)) return { fail: `Sinn ${s.toFixed(3)}` };
+  if (!(Math.abs(s) >= BLEND_SENSE_MIN)) {
+    return { fail: `Sinn ${s.toFixed(3)} (Stücke ${n}, scharfe Ecken ${sharp.length}: `
+      + `${cands.map((c) => c.ang.toFixed(0)).join('/')}, Ecken ${corners.length}, Dreiecke ${wr.tris.length})` };
+  }
   return { surf, sameSense: s > 0 };
 }
 
@@ -647,7 +728,9 @@ export function buildFreeformBrep(normalGroups, opts = {}) {
   const dbg = (o.debug && typeof o.debug === 'object') ? o.debug : null;
   const log = dbg ? (dbg.log || (dbg.log = [])) : null;
   try {
-    return buildInner(normalGroups, o, log);
+    const r = buildInner(normalGroups, o, log);
+    if (log && TIME) log.push(`ZEIT ${JSON.stringify(TIME)}`);
+    return r;
   } catch (e) {
     if (log) log.push(`Ausnahme: ${e && e.message ? e.message : String(e)}`
       + (e && e.stack ? `\n${e.stack}` : ''));
@@ -657,6 +740,7 @@ export function buildFreeformBrep(normalGroups, opts = {}) {
 
 function buildInner(normalGroups, opts, log) {
   const t0 = now();
+  TIME = {};
   // Zeitbudget und Facetten-Anteil (Grenzen gegen endlose Versuche)
   const budgetMs = Number.isFinite(opts.timeBudgetMs) ? Math.max(0, opts.timeBudgetMs) : TIME_BUDGET_MS;
   const shareMax = Number.isFinite(opts.maxFacetShare) ? Math.max(0, opts.maxFacetShare) : FACET_SHARE_MAX;
@@ -671,7 +755,9 @@ function buildInner(normalGroups, opts, log) {
   // 2) Fit-basierte Segmentierung
   // Zeitbudget der Segmentierung = Budget des ganzen Versuchs (unter Last lief die
   // Segmentierung sonst in ihr eigenes 4-s-Limit und lieferte Tausende Rest-Facetten)
+  const tSeg = now();
   const seg = segmentByFit(mesh, { tol: opts.tol ?? 0.02, angleDeg: SEG_ANGLE_DEG, timeBudgetMs: budgetMs });
+  tm('seg', tSeg);
   if (log) {
     const byType = {};
     for (const r of seg.regions) byType[r.type] = (byType[r.type] || 0) + 1;
@@ -712,7 +798,9 @@ function buildInner(normalGroups, opts, log) {
     // Fortschritt der Runde messen (vor der Runde: ein Blend-Patch kann die
     // Region schon in der Runde zur Fassade demotiert haben)
     const before = state.stripTris.size + state.demotedRegions.size + state.blendRegions.size;
+    const tRound = now();
     const res = runRound(mesh, seg, state, round, opts, log);
+    tm('round.total', tRound); tmCount('round.count', 1);
     if (res.hard) return null;
     if (res.failures.length) {
       for (const [src, mvSet] of res.strips) {
@@ -1187,6 +1275,12 @@ function runRound(mesh, seg, state, round, opts, log) {
     const wrL = regions[ch.L], wrR = regions[ch.R];
     const kindL = wrL ? wrL.kind : 'facet', kindR = wrR ? wrR.kind : 'facet';
     const hasBlend = kindL === 'blend' || kindR === 'blend';
+    // Blend-Ketten kosten je Kette einen Kurvenfit auf der analytischen Fläche
+    // → das Zeitbudget wird hier je Kette geprüft, nicht nur alle CHECK_EVERY.
+    if (hasBlend && budgetExceeded(state)) {
+      logBudget(log, state);
+      return { hard: true };
+    }
     const A2 = surfOfRegion(ch.L), B2 = surfOfRegion(ch.R);
     const vi0 = topo.vOfMesh[ch.mv[0]], vi1 = topo.vOfMesh[ch.mv[ch.mv.length - 1]];
     if ((!hasBlend && (!A2 || !B2)) || vi0 < 0 || vi1 < 0) {
@@ -1473,7 +1567,8 @@ function runRound(mesh, seg, state, round, opts, log) {
         regionVertices(mesh, wr), null, { demote: wr.src });
       continue;
     }
-    const res = buildBlendPatch(wr, cf.loops[0].uses, edges, vertices, mesh);
+    const res = buildBlendPatch(wr, cf.loops[0].uses, edges, vertices, mesh, state);
+    if (res.hard) { logBudget(log, state); return { hard: true }; }
     if (res.fail) {
       fail('blend', [], `Blend ${wr.id} (${wr.type}): ${res.fail}`,
         regionVertices(mesh, wr), null, { demote: wr.src });
