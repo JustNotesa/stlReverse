@@ -16,6 +16,7 @@
 //                                             gefangen, sauberer Rückfall
 //   schalen      shell-regression.mjs       — Hohlräume, invertierte Netze, Finnen, berührende Körper,
 //                                             offene Fremdteile, Freigang der Kreis-Umwandlung
+//   lagen        lagen-regression.mjs       — Netz-Bereinigung in 12 Lagen (Spalten-Kollaps ≤ ohne)
 //   ocp          ocp-suite.mjs              — volles OpenCascade (OCP, Python) als zweiter Prüfer:
 //                                             alle Samples + Schalen-Körper; ohne OCP übersprungen
 //
@@ -43,6 +44,7 @@ const SUITES = [
   { name: 'orient',      args: ['tests/orientation-guard.mjs'] },
   { name: 'schalen',     args: ['tests/shell-regression.mjs'] },
   { name: 'ocp',         args: ['tests/ocp-suite.mjs'] },
+  { name: 'lagen',       args: ['tests/lagen-regression.mjs'] },
 ];
 
 const results = [];
