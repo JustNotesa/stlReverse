@@ -197,10 +197,12 @@ Kreis-Kanten teilen.
   „Freiform-Erkennung“ (aus), Vorher/Nachher-Viewer (Vergleich | Nur STEP), Expertenansicht mit Reitern, hell/dunkel, ab 700 px,
   Tastaturbedienung. Neue Module verdict.js, layout.js, feature-colors.js (+ tests/verdict.test.js). STEP-Ausgabe unverändert.
   Screenshots tests/screenshots/ui-neu-*.png.
-- [ ] **UI Etappe 2:** Verrundungs-Zähler im Report fehlt, wenn Rundungen in Bohrung/Mantel aufgehen (Washer: „keine gezählt“,
-  obwohl 39 → 6 Flächen); Karte bei „überwiegend facettiert“ nicht grün (body[data-quality=faceted]), Tausenderpunkt im
-  Facetten-Text; Viewer bei schmalem Fenster weiter nach oben + Vollbild-Knopf (User-Frage offen); leere Grid-Reihen im
-  Fehlerzustand; veraltete E2E-Tests (tests/e2e, #plane-table usw.).
+- [x] **UI Etappe 2 (2026-10-30, `wt/ui-etappe2`)** — kompaktere Ergebnis-Karte, Viewer-Höhe folgt dem Fenster (1440×900 ohne
+  Scrollen bei einfachen Teilen), gekoppelte Kameras (Schalter „Ansichten koppeln“), Vollbild-Knopf (Fullscreen-API, Overlay-Rückfall),
+  Viewer zeigen das Teil nicht mehr gespiegelt (echte Drehung Z→Y statt y/z-Tausch), ehrlicher Zähler: report.rimFilletsToChamfer
+  (Lochrand-Rundung → Fase/Kegel) und report.rimChamfersKept (echte Fase als Kegel). STEP-Ausgabe byte-gleich.
+- [ ] **UI Rest:** Mit „Verrundungen entfernen“ AUS zählt die Kachel echte Fasen (arcCones) als „bleiben rund“; Karte „überwiegend
+  facettiert“ nicht grün einfärben (body[data-quality=faceted]); echter Esc-Test im nativen Firefox-Vollbild; veraltete E2E-Tests (tests/e2e).
 - [x] **Kleinteile NozzleBox (2026-10-29, `wt/kleinteile`)** — (1) Ösen: Lochringe im STL gegeneinander verdreht
   (keine Mantellinie) → `insertRulings` (profile-arcs.js) setzt Punkte exakt auf den Kreis an Schnittwinkeln und
   trianguliert die Wand neu; Gravur-Ablauf läuft ohne/mit Mantellinien, weniger Flächen gewinnt. (2) Scharnier-Knöchel:

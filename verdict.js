@@ -394,7 +394,7 @@ export function renderVerdict(v, { res = null, fileBase = 'model', doc = documen
   setKpi(doc, 'kpi-fillets', filletsText);
   const filletsLi = $(doc, 'kpi-fillets');
   if (filletsLi) {
-    if (filletsText === 'keine gezählt') {
+    if (filletsText === 'keine gezählt' && v.rimChamfersKept > 0) {
       filletsLi.setAttribute('title', 'Echte Fasen zählen nicht als Verrundung — sie stehen als Chip unter „Was umgewandelt wurde“.');
     } else {
       filletsLi.removeAttribute('title');
