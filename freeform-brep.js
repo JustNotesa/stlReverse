@@ -113,7 +113,7 @@ import { snapSurfaces } from './freeform-snap.js';
 import { writeFreeformStep } from './freeform-step.js';
 import {
   lineToBspline, evalCurve, reverseCurve, splitCurve, joinCurves, coonsPatch,
-  surfaceNormal, surfaceDerivs, projectToSurface, surfaceSamples,
+  surfaceNormal, surfaceDerivs, projectToSurface, surfaceSamples, evalSurface,
   fitCurveOnSurface, interpPolyline,
 } from './freeform-nurbs.js';
 
@@ -658,21 +658,43 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh, state) {
   // Prüfung wird billiger). Startwert der Projektion: das grobe Gitter der
   // Fläche (einmal berechnet) statt einer eigenen Raster-Suche je Punkt.
   const samples = surfaceSamples(surf, BLEND_SAMPLES_N);
-  // Rand-Probe (Sicherheitsnetz): jedes Randstück muss EXAKT auf der Patch-Fläche
-  // liegen (Skoda: einzelne Patches lagen bis 0,05 mm neben ihren Geraden-Rändern).
-  // Ein Stück wird an 5 Stellen geprüft; Startwert aus dem Gitter, sonst feines Raster.
+  // Rand-Probe (Sicherheitsnetz) über die PARAMETER, nicht per Projektion: die
+  // Projektion auf stark ungleich parametrisierte Patches (ein Randstück belegt
+  // < 1 % des Parameterbereichs, Polseite) blieb in Nebenminima hängen und meldete
+  // Schein-Abstände bis 0,05 mm. Geprüft wird, was die Konstruktion verspricht:
+  //  (1) jedes Randstück k liegt auf der geschlossenen Kurve C im Intervall
+  //      [joints[k], joints[k+1]] (lineare Umparametrisierung, exakt);
+  //  (2) die Fläche trägt ihre vier Seiten: S(u,v0)=c0(u), S(u,v1)=c1(u),
+  //      S(u0,v)=d0(v), S(u1,v)=d1(v).
   {
-    const bSamples = surfaceSamples(surf, 24);
-    for (const pc of pieces) {
+    const sU0 = surf.knotsU[0], sU1 = surf.knotsU[surf.knotsU.length - 1];
+    const sV0 = surf.knotsV[0], sV1 = surf.knotsV[surf.knotsV.length - 1];
+    let worst = 0;
+    for (let k = 0; k < pieces.length; k++) {
+      const pc = pieces[k];
       const [a0, a1] = curveDomain(pc);
-      for (let k = 0; k <= 4; k++) {
-        const p = evalCurve(pc, a0 + ((a1 - a0) * k) / 4);
-        let r = projectToSurface(surf, p, { samples: bSamples, iters: 40 });
-        if (!(r.dist <= BLEND_EDGE_TOL)) r = projectToSurface(surf, p, { grid: 40 });
-        if (!(r.dist <= BLEND_EDGE_TOL)) {
-          return { fail: `Rand neben dem Patch (${r.dist.toExponential(2)} mm)` };
-        }
+      const [ca, cb] = curveDomain(C);
+      const s0 = ca + (cb - ca) * joints[k], s1 = ca + (cb - ca) * joints[k + 1];
+      for (let i = 0; i <= 4; i++) {
+        const t = i / 4;
+        const d = len(sub(evalCurve(pc, a0 + (a1 - a0) * t), evalCurve(C, s0 + (s1 - s0) * t)));
+        if (d > worst) worst = d;
       }
+    }
+    const sideCheck = (c, at) => {
+      const [a0, a1] = curveDomain(c);
+      for (let i = 0; i <= 8; i++) {
+        const t = i / 8;
+        const d = len(sub(evalCurve(c, a0 + (a1 - a0) * t), at(t)));
+        if (d > worst) worst = d;
+      }
+    };
+    sideCheck(c0, (t) => evalSurface(surf, sU0 + (sU1 - sU0) * t, sV0));
+    sideCheck(c1, (t) => evalSurface(surf, sU0 + (sU1 - sU0) * t, sV1));
+    sideCheck(d0, (t) => evalSurface(surf, sU0, sV0 + (sV1 - sV0) * t));
+    sideCheck(d1, (t) => evalSurface(surf, sU1, sV0 + (sV1 - sV0) * t));
+    if (!(worst <= BLEND_EDGE_TOL)) {
+      return { fail: `Rand neben dem Patch (${worst.toExponential(2)} mm)` };
     }
   }
   const stepV = Math.max(1, Math.ceil(mvSet.length / BLEND_MAX_SAMPLES));
