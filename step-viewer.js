@@ -1,5 +1,5 @@
 import * as THREE from './libs/three.module.js';
-import { createThreeJsViewer, disposeThreeJsViewer } from './viewers.js?v=28';
+import { createThreeJsViewer, disposeThreeJsViewer, registerSyncViewer, setViewSync, syncViewsFrom } from './viewers.js?v=32';
 
 const extensionApi = typeof browser !== 'undefined' ? browser
   : typeof chrome !== 'undefined' ? chrome : null;
@@ -12,6 +12,8 @@ let stepOcctRenderer = null, stepOcctScene = null, stepOcctCamera = null,
 let stepOcctContainer = null;
 let stepOcctEdges = null;       // THREE.LineSegments der Flächengrenzen (B-Rep-Kanten)
 let stepEdgesVisible = true;    // Sichtbarkeit (Checkbox „Kanten")
+let stepOcctOrient = null;      // Orientierungs-Gruppe (Drehung Z-oben → Y-oben wie im STL-Viewer)
+let syncUiWired = false;        // Kopplungs-UI (Checkbox + Ansichts-Radios) nur einmal verdrahten
 
 let occtWorker = null;
 let occtWorkerTimer = null;
@@ -34,6 +36,10 @@ export function initStepOcctViewer() {
   );
   stepOcctRenderer = stepOcctScene = stepOcctCamera = null;
   stepOcctControls = stepOcctResizeObs = stepOcctAnimId = null;
+  // Das alte Modell hängt an der Orientierungs-Gruppe → mit zurücksetzen.
+  stepOcctMeshGroup = null;
+  stepOcctEdges = null;
+  stepOcctOrient = null;
 
   if (stepOcctContainer) {
     try {
@@ -44,6 +50,8 @@ export function initStepOcctViewer() {
       stepOcctControls = s.controls;
       stepOcctResizeObs = s.resizeObserver;
       stepOcctAnimId   = s.animFrameId;
+      // Ansichts-Kopplung mit dem STL-Viewer (Panel 1).
+      registerSyncViewer('step', s.camera, s.controls);
     } catch (e) { console.warn('STEP occt viewer init failed:', e.message); }
   }
 
@@ -63,6 +71,30 @@ export function initStepOcctViewer() {
       if (stepOcctEdges) stepOcctEdges.visible = stepEdgesVisible;
     });
   }
+
+  // Ansichts-Kopplung verdrahten (nur einmal — initStepOcctViewer kann mehrfach laufen).
+  _wireSyncUi();
+}
+
+// Kopplungs-Schalter („Ansichten koppeln") + Ansichts-Umschaltung („Vergleich | Nur STEP").
+// Beim Zurückwechseln in den Vergleich wird die zuletzt benutzte STEP-Kamera zur Quelle:
+// der Nutzer hat die STEP-Ansicht im „Nur STEP"-Modus gedreht, das Original soll folgen.
+function _wireSyncUi() {
+  if (syncUiWired) return;
+  syncUiWired = true;
+
+  const syncToggle = document.getElementById('view-sync-toggle');
+  if (syncToggle) {
+    setViewSync(syncToggle.checked);
+    syncToggle.addEventListener('change', () => setViewSync(syncToggle.checked));
+  }
+
+  const modeInputs = document.querySelectorAll('input[name="view-mode"]');
+  modeInputs.forEach((input) => {
+    input.addEventListener('change', () => {
+      if (input.value === 'split') syncViewsFrom('step');
+    });
+  });
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -124,6 +156,7 @@ async function _handleStepFileSelect(event) {
   try {
     const buffer = await file.arrayBuffer();
     loadStepIntoViewer(buffer);
+    document.dispatchEvent(new CustomEvent('stlreverse:step-imported', { detail: { name: file.name } }));
   } catch (err) {
     console.error('STEP-Import fehlgeschlagen', err);
   } finally {
@@ -141,7 +174,13 @@ function _renderOcctResult(result) {
   }
 
   if (stepOcctMeshGroup) {
-    stepOcctScene.remove(stepOcctMeshGroup);
+    // Das Modell hängt an der Orientierungs-Gruppe (Z-oben → Y-oben) → darüber aus der Szene nehmen.
+    if (stepOcctOrient) {
+      stepOcctScene.remove(stepOcctOrient);
+      stepOcctOrient.remove(stepOcctMeshGroup);
+    } else {
+      stepOcctScene.remove(stepOcctMeshGroup);
+    }
     stepOcctMeshGroup.traverse((obj) => {
       if (obj.geometry) obj.geometry.dispose();
       if (obj.material) {
@@ -151,6 +190,7 @@ function _renderOcctResult(result) {
     });
     stepOcctMeshGroup = null;
     stepOcctEdges = null;
+    stepOcctOrient = null;
   }
 
   stepOcctMeshGroup = new THREE.Group();
@@ -217,15 +257,32 @@ function _renderOcctResult(result) {
     stepOcctMeshGroup.add(stepOcctEdges);
   }
 
-  stepOcctScene.add(stepOcctMeshGroup);
-
-  stepOcctContainer.dataset.state = 'ready';
-
+  // Bounding-Box im Modell-Koordinatensystem: die Gruppe hängt noch nicht in der Szene,
+  // die Box ist deshalb exakt die Modell-Box (kein Welt-Offset).
   const box    = new THREE.Box3().setFromObject(stepOcctMeshGroup);
   const center = box.getCenter(new THREE.Vector3());
   const size   = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
   stepOcctMeshGroup.position.sub(center);
+
+  // Orientierung: der STL-Viewer dreht das Modell von Z-oben nach Y-oben,
+  // (x, y, z) → (x, z, -y). Das STEP-Mesh bekommt dieselbe Drehung über eine eigene Gruppe
+  // → beide Panels zeigen dasselbe Teil aus derselben Blickrichtung. Die Matrix hat
+  // Determinante +1 (echte Drehung, KEIN Spiegeln) — die Vorder-/Rückseiten bleiben
+  // korrekt orientiert, genau wie im STL-Viewer.
+  stepOcctOrient = new THREE.Group();
+  stepOcctOrient.matrixAutoUpdate = false;
+  stepOcctOrient.matrix.set(
+    1, 0, 0, 0,
+    0, 0, 1, 0,
+    0, -1, 0, 0,
+    0, 0, 0, 1
+  );
+  stepOcctOrient.matrixWorldNeedsUpdate = true;
+  stepOcctOrient.add(stepOcctMeshGroup);
+  stepOcctScene.add(stepOcctOrient);
+
+  stepOcctContainer.dataset.state = 'ready';
 
   if (stepOcctCamera && stepOcctControls) {
     stepOcctCamera.position.set(maxDim * 1.5, maxDim * 1.2, maxDim * 1.5);
@@ -234,6 +291,8 @@ function _renderOcctResult(result) {
     stepOcctControls.saveState();
   }
 
+  // Gekoppelte Ansicht: die STEP-Kamera übernimmt den Stand des STL-Viewers.
+  syncViewsFrom('stl');
 }
 
 // Extrahiert die B-Rep-Kanten (Flächengrenzen) aus den occt-Meshes als EINE LineSegments.
