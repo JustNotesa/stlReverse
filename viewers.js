@@ -1,11 +1,12 @@
 import * as THREE from './libs/three.module.js';
+import { FEATURE_COLORS } from './feature-colors.js?v=1';
 
 // Farbton für normale (nicht erkannte) Regionen in Panel 2/3: Rot/Orange/Pink sind für erkannte
 // Bohrungen, Verrundungen bzw. Außenmäntel reserviert. Der Regenbogen läuft deshalb nur über
 // Gelbgrün → Blau → Violett (61°…299°). Vorher bekam die größte Region (Index 0) Farbton 0 = Rot
 // und sah aus wie eine erkannte Bohrung (z.B. Zylinder-Deckel).
 const regionHue = (idx, n) => 0.17 + 0.66 * (idx / Math.max(1, n));
-const MANTLE_COLOR = 0xff2d92;
+const MANTLE_COLOR = FEATURE_COLORS.mantle;
 // Voller Zylinder als konvexer Außenmantel (Welle, Zapfen, Scheiben-Außenwand) statt Bohrung: die
 // Erkennung nennt jeden vollen Zylinder kind 'bore'; wie in exporters.js (radialScore) entscheidet
 // die Richtung der Wand-Normalen — von der Achse weg = Mantel.
@@ -35,6 +36,71 @@ let featuresRenderer = null, featuresScene = null, featuresCamera = null,
     featuresAnimId = null;
 let brepRenderer = null, brepScene = null, brepCamera = null, brepControls = null,
     brepMeshGroup = null, brepResizeObs = null, brepAnimId = null;
+
+// ── Ansichts-Kopplung (STL ↔ STEP) ──────────────────────────────────────────
+// Registry der gekoppelten Viewer: name → { camera, controls, listener }.
+// 'stl' = Original-Mesh (Panel 1), 'step' = STEP-Modell (Panel 4).
+const syncViewers = { stl: null, step: null };
+let viewSyncEnabled = true;   // Schalter „Ansichten koppeln"
+let syncBusy = false;         // Re-entrancy-Schutz: das 'change'-Event der Ziel-Kamera
+                              // darf nicht zurück in die Quelle zurückspringen.
+
+/** Diagnose/Test: aktuelle Kamera-Werte beider gekoppelter Viewer. */
+export function getViewCameraStates() {
+  const f = (v) => v && {
+    position: v.camera.position.toArray(), target: v.controls.target.toArray(), zoom: v.camera.zoom
+  };
+  return { stl: f(syncViewers.stl), step: f(syncViewers.step) };
+}
+
+export function registerSyncViewer(name, camera, controls) {
+  if (!camera || !controls) return;
+  // Vorherige Registrierung desselben Namens entfernen (Re-Init leakt sonst Listener).
+  const prev = syncViewers[name];
+  if (prev && prev.listener && prev.controls) {
+    prev.controls.removeEventListener('change', prev.listener);
+  }
+  const listener = () => {
+    if (!viewSyncEnabled) return;
+    syncViewsFrom(name);
+  };
+  controls.addEventListener('change', listener);
+  syncViewers[name] = { camera, controls, listener };
+}
+
+/**
+ * Kopplung ein-/ausschalten. Beim Einschalten wird sofort der STL-Stand übernommen.
+ * @param {boolean} on
+ */
+export function setViewSync(on) {
+  viewSyncEnabled = !!on;
+  if (viewSyncEnabled) syncViewsFrom('stl');
+}
+
+/**
+ * Kamera + Zielpunkt von einem Viewer auf den anderen übertragen.
+ * Inaktiv bei ausgeschalteter Kopplung oder im Modus „Nur STEP" (data-view="step").
+ * @param {'stl'|'step'} src Quell-Viewer
+ */
+export function syncViewsFrom(src) {
+  if (!viewSyncEnabled) return;
+  const panel = document.getElementById('compare-panel');
+  if (panel && panel.dataset && panel.dataset.view === 'step') return;
+  const from = syncViewers[src];
+  const to = syncViewers[src === 'stl' ? 'step' : 'stl'];
+  if (!from || !to) return;
+  if (syncBusy) return;
+  syncBusy = true;
+  try {
+    to.camera.position.copy(from.camera.position);
+    to.controls.target.copy(from.controls.target);
+    to.camera.zoom = from.camera.zoom;
+    to.camera.updateProjectionMatrix();
+    to.controls.update();
+  } finally {
+    syncBusy = false;
+  }
+}
 
 // ── Public helpers (also used by step-viewer.js) ────────────────────────────
 
@@ -133,6 +199,8 @@ export function initPipelineViewers() {
       const s = createThreeJsViewer(stlContainer, 0x1be0a0);
       stlRenderer = s.renderer; stlScene = s.scene; stlCamera = s.camera;
       stlControls = s.controls; stlResizeObs = s.resizeObserver; stlAnimId = s.animFrameId;
+      // Ansichts-Kopplung: STL ist die Quelle, das STEP-Modell folgt.
+      registerSyncViewer('stl', s.camera, s.controls);
     } catch (e) { console.warn('STL viewer init failed:', e.message); }
   }
 
@@ -154,6 +222,12 @@ export function initPipelineViewers() {
 }
 
 // ── Viewer 1: Original STL Mesh ─────────────────────────────────────────────
+
+// Koordinaten-Abbildung Modell → three.js: (x, y, z) → (x, z, -y).
+// Das ist eine ECHTE DREHUNG (Z-oben → Y-oben) mit Determinante +1 — kein Spiegeln.
+// Vorher stand hier (x, z, y): das ist eine Spiegelung (Determinante -1), wodurch
+// asymmetrische Teile seitenverkehrt erschienen. Da die Abbildung die Händigkeit
+// erhält, bleibt die Dreiecks-Windungsreihenfolge (v0, v1, v2) unverändert.
 
 export function updateStlViewer(triangles, bbox) {
   if (!stlScene) return;
@@ -181,12 +255,12 @@ export function updateStlViewer(triangles, bbox) {
 
   triangles.forEach((tri, i) => {
     const o = i * 9;
-    positions[o]   = tri.vertices[0][0]; positions[o+1] = tri.vertices[0][2]; positions[o+2] = tri.vertices[0][1];
-    positions[o+3] = tri.vertices[1][0]; positions[o+4] = tri.vertices[1][2]; positions[o+5] = tri.vertices[1][1];
-    positions[o+6] = tri.vertices[2][0]; positions[o+7] = tri.vertices[2][2]; positions[o+8] = tri.vertices[2][1];
-    normals[o]   = tri.normal[0]; normals[o+1] = tri.normal[2]; normals[o+2] = tri.normal[1];
-    normals[o+3] = tri.normal[0]; normals[o+4] = tri.normal[2]; normals[o+5] = tri.normal[1];
-    normals[o+6] = tri.normal[0]; normals[o+7] = tri.normal[2]; normals[o+8] = tri.normal[1];
+    positions[o]   = tri.vertices[0][0]; positions[o+1] = tri.vertices[0][2]; positions[o+2] = -tri.vertices[0][1];
+    positions[o+3] = tri.vertices[1][0]; positions[o+4] = tri.vertices[1][2]; positions[o+5] = -tri.vertices[1][1];
+    positions[o+6] = tri.vertices[2][0]; positions[o+7] = tri.vertices[2][2]; positions[o+8] = -tri.vertices[2][1];
+    normals[o]   = tri.normal[0]; normals[o+1] = tri.normal[2]; normals[o+2] = -tri.normal[1];
+    normals[o+3] = tri.normal[0]; normals[o+4] = tri.normal[2]; normals[o+5] = -tri.normal[1];
+    normals[o+6] = tri.normal[0]; normals[o+7] = tri.normal[2]; normals[o+8] = -tri.normal[1];
   });
 
   const geometry = new THREE.BufferGeometry();
@@ -198,10 +272,11 @@ export function updateStlViewer(triangles, bbox) {
   }));
 
   if (bbox) {
+    // Zentrierung: Punkt p → (p.x-cX, p.z-cZ, -(p.y-cY)) ⇒ Offset (-cX, -cZ, +cY).
     mesh.position.set(
       -(bbox.min[0] + bbox.width / 2),
       -(bbox.min[2] + bbox.height / 2),
-      -(bbox.min[1] + bbox.depth / 2)
+      +(bbox.min[1] + bbox.depth / 2)
     );
   }
 
@@ -222,7 +297,7 @@ export function updateStlViewer(triangles, bbox) {
     const rawPos = new Float32Array(rawUnique.length * 3);
     for (let i = 0; i < rawUnique.length; i++) {
       const v = rawUnique[i]; const o = i * 3;
-      rawPos[o] = v[0]; rawPos[o + 1] = v[2]; rawPos[o + 2] = v[1];
+      rawPos[o] = v[0]; rawPos[o + 1] = v[2]; rawPos[o + 2] = -v[1];
     }
     const rawGeo = new THREE.BufferGeometry();
     rawGeo.setAttribute('position', new THREE.BufferAttribute(rawPos, 3));
@@ -233,7 +308,7 @@ export function updateStlViewer(triangles, bbox) {
       rawPts.position.set(
         -(bbox.min[0] + bbox.width / 2),
         -(bbox.min[2] + bbox.height / 2),
-        -(bbox.min[1] + bbox.depth / 2)
+        +(bbox.min[1] + bbox.depth / 2)
       );
     }
     stlMeshGroup.add(rawPts);
@@ -246,9 +321,13 @@ export function updateStlViewer(triangles, bbox) {
     stlControls.target.set(0, 0, 0);
     stlControls.update();
   }
+
+  // Gekoppelte Ansicht (STEP-Panel) auf den neuen STL-Stand bringen.
+  syncViewsFrom('stl');
 }
 
 // ── Viewer 2: Erkannte Features ─────────────────────────────────────────────
+// Gleiche Abbildung wie Viewer 1: (x, y, z) → (x, z, -y) (echte Drehung, Determinante +1).
 
 export function updateFeaturesViewer(triangles, analysis, bbox) {
   if (!featuresScene) return;
@@ -299,15 +378,15 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
       // Verrundungen orange (statt Regenbogen-HSL). Kanäle zuerst: ihre Streifen tragen oft
       // zusätzlich ein Zylinder-Tag.
       const col = group.tube
-        ? new THREE.Color(0xaf52de)
+        ? new THREE.Color(FEATURE_COLORS.tube)
         : group.primitive?.type === 'cylinder'
-        ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff9500 : isConvexMantle(group) ? MANTLE_COLOR : 0xff3b30)
+        ? new THREE.Color(group.primitive.kind === 'fillet' ? FEATURE_COLORS.fillet : isConvexMantle(group) ? MANTLE_COLOR : FEATURE_COLORS.bore)
         : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.75, 0.55);
       for (let i = 0; i < triCount; i++) {
         const v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
-        positions[p]   = v0[0]; positions[p+1] = v0[2]; positions[p+2] = v0[1];
-        positions[p+3] = v1[0]; positions[p+4] = v1[2]; positions[p+5] = v1[1];
-        positions[p+6] = v2[0]; positions[p+7] = v2[2]; positions[p+8] = v2[1];
+        positions[p]   = v0[0]; positions[p+1] = v0[2]; positions[p+2] = -v0[1];
+        positions[p+3] = v1[0]; positions[p+4] = v1[2]; positions[p+5] = -v1[1];
+        positions[p+6] = v2[0]; positions[p+7] = v2[2]; positions[p+8] = -v2[1];
         for (let k = 0; k < 9; k += 3) { colors[p+k] = col.r; colors[p+k+1] = col.g; colors[p+k+2] = col.b; }
         p += 9;
       }
@@ -321,24 +400,24 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
     const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
       vertexColors: true, metalness: 0.1, roughness: 0.5, side: THREE.DoubleSide
     }));
-    mesh.position.set(-centerX, -centerZ, -centerY);
+    mesh.position.set(-centerX, -centerZ, +centerY);
     featuresMeshGroup.add(mesh);
   } else {
     // Fallback: einfaches Basis-Mesh (grau)
     const positions = new Float32Array(triangles.length * 9);
     triangles.forEach((tri, i) => {
       const o = i * 9;
-      positions[o]   = tri.vertices[0][0]; positions[o+1] = tri.vertices[0][2]; positions[o+2] = tri.vertices[0][1];
-      positions[o+3] = tri.vertices[1][0]; positions[o+4] = tri.vertices[1][2]; positions[o+5] = tri.vertices[1][1];
-      positions[o+6] = tri.vertices[2][0]; positions[o+7] = tri.vertices[2][2]; positions[o+8] = tri.vertices[2][1];
+      positions[o]   = tri.vertices[0][0]; positions[o+1] = tri.vertices[0][2]; positions[o+2] = -tri.vertices[0][1];
+      positions[o+3] = tri.vertices[1][0]; positions[o+4] = tri.vertices[1][2]; positions[o+5] = -tri.vertices[1][1];
+      positions[o+6] = tri.vertices[2][0]; positions[o+7] = tri.vertices[2][2]; positions[o+8] = -tri.vertices[2][1];
     });
     const baseGeo = new THREE.BufferGeometry();
     baseGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     baseGeo.computeVertexNormals();
     const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({
-      color: 0x607080, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide
+      color: FEATURE_COLORS.plane, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide
     }));
-    baseMesh.position.set(-centerX, -centerZ, -centerY);
+    baseMesh.position.set(-centerX, -centerZ, +centerY);
     featuresMeshGroup.add(baseMesh);
   }
 
@@ -353,6 +432,7 @@ export function updateFeaturesViewer(triangles, analysis, bbox) {
 }
 
 // ── Viewer 3: Rekonstruiertes B-Rep ─────────────────────────────────────────
+// Gleiche Abbildung wie Viewer 1/2: (x, y, z) → (x, z, -y) (echte Drehung, Determinante +1).
 
 // Math-Helfer für konvexe Hülle (gleich wie im STEP-Exporter)
 const _dot3  = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -478,16 +558,16 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     const triCount = Math.floor(verts.length / 3);
     const isCyl = !!group.tube || group.primitive?.type === 'cylinder';
     const col = group.tube
-      ? new THREE.Color(0xaf52de)                                                 // Kanal: violett
+      ? new THREE.Color(FEATURE_COLORS.tube)                                      // Kanal: violett
       : isCyl
-      ? new THREE.Color(group.primitive.kind === 'fillet' ? 0xff8c00 : isConvexMantle(group) ? MANTLE_COLOR : 0xff1744) // Rot / Orange / Pink
+      ? new THREE.Color(group.primitive.kind === 'fillet' ? FEATURE_COLORS.fillet : isConvexMantle(group) ? MANTLE_COLOR : FEATURE_COLORS.bore) // Rot / Orange / Pink
       : new THREE.Color().setHSL(regionHue(idx, normalGroups.length), 0.30, 0.72);
     const a = isCyl ? 0.96 : 0.26; // erkannte Features fast deckend, Rest stark durchscheinend
     for (let i = 0; i < triCount; i++) {
       const v0 = verts[i*3], v1 = verts[i*3+1], v2 = verts[i*3+2];
-      positions[p]   = v0[0]; positions[p+1] = v0[2]; positions[p+2] = v0[1];
-      positions[p+3] = v1[0]; positions[p+4] = v1[2]; positions[p+5] = v1[1];
-      positions[p+6] = v2[0]; positions[p+7] = v2[2]; positions[p+8] = v2[1];
+      positions[p]   = v0[0]; positions[p+1] = v0[2]; positions[p+2] = -v0[1];
+      positions[p+3] = v1[0]; positions[p+4] = v1[2]; positions[p+5] = -v1[1];
+      positions[p+6] = v2[0]; positions[p+7] = v2[2]; positions[p+8] = -v2[1];
       p += 9;
       for (let k = 0; k < 3; k++) { colors[c] = col.r; colors[c+1] = col.g; colors[c+2] = col.b; colors[c+3] = a; c += 4; }
     }
@@ -500,7 +580,7 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     vertexColors: true, metalness: 0.1, roughness: 0.5, side: THREE.DoubleSide,
     transparent: true, opacity: 1, depthWrite: false // durchscheinend: erkannte Features hinter der Hülle bleiben sichtbar
   }));
-  faceMesh.position.set(-centerX, -centerZ, -centerY);
+  faceMesh.position.set(-centerX, -centerZ, +centerY);
   brepMeshGroup.add(faceMesh);
 
   // Boundary-Edges als ein einziges gelbes Linien-Set
@@ -509,8 +589,8 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     let e = 0;
     for (const edges of boundaryEdgesByGroup.values()) {
       for (const { v0, v1 } of edges) {
-        edgePos[e]   = v0[0]; edgePos[e+1] = v0[2]; edgePos[e+2] = v0[1];
-        edgePos[e+3] = v1[0]; edgePos[e+4] = v1[2]; edgePos[e+5] = v1[1];
+        edgePos[e]   = v0[0]; edgePos[e+1] = v0[2]; edgePos[e+2] = -v0[1];
+        edgePos[e+3] = v1[0]; edgePos[e+4] = v1[2]; edgePos[e+5] = -v1[1];
         e += 6;
       }
     }
@@ -519,13 +599,13 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
     const lines = new THREE.LineSegments(edgeGeo,
       new THREE.LineBasicMaterial({ color: 0xffeb3b })
     );
-    lines.position.set(-centerX, -centerZ, -centerY);
+    lines.position.set(-centerX, -centerZ, +centerY);
     brepMeshGroup.add(lines);
   }
 
   // Erkannte Zylinder als durchscheinendes Overlay (zeigt die rekonstruierte Achse + Radius).
-  // Mesh-Koordinaten nutzen den Y/Z-Swap (x,z,y); THREE-Zylinder zeigen entlang +Y → per
-  // Quaternion auf die (geswappte) Achse ausrichten.
+  // Mesh-Koordinaten nutzen die Drehung Z-oben → Y-oben (x,y,z) → (x,z,-y); THREE-Zylinder zeigen
+  // entlang +Y → per Quaternion auf die (gedrehte) Achse ausrichten.
   const prims = analysis?.primitives;
   if (prims?.length) {
     // Zylinder-Streifen gebogener Kanäle bekommen kein eigenes Overlay (der Kanal ist violett gefärbt)
@@ -536,7 +616,7 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
       if (tubePrimIds.has(p.id)) continue;
       const cylGeo = new THREE.CylinderGeometry(p.radius, p.radius, p.height, 32, 1, true);
       const cyl = new THREE.Mesh(cylGeo, new THREE.MeshStandardMaterial({
-        color: mantlePrimIds.has(p.id) ? MANTLE_COLOR : 0xff1744, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
+        color: mantlePrimIds.has(p.id) ? MANTLE_COLOR : FEATURE_COLORS.bore, metalness: 0.1, roughness: 0.4, side: THREE.DoubleSide,
         transparent: true, opacity: 0.45
       }));
       const mid = [
@@ -544,8 +624,8 @@ export function updateBrepViewer(volumeData, bbox, analysis) {
         p.axisPoint[1] + p.axis[1] * p.height / 2,
         p.axisPoint[2] + p.axis[2] * p.height / 2
       ];
-      cyl.position.set(mid[0] - centerX, mid[2] - centerZ, mid[1] - centerY);
-      const axViewer = new THREE.Vector3(p.axis[0], p.axis[2], p.axis[1]).normalize();
+      cyl.position.set(mid[0] - centerX, mid[2] - centerZ, -(mid[1] - centerY));
+      const axViewer = new THREE.Vector3(p.axis[0], p.axis[2], -p.axis[1]).normalize();
       cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axViewer);
       brepMeshGroup.add(cyl);
     }
