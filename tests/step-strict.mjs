@@ -555,6 +555,35 @@ export function checkStepStrict(text, opts = {}) {
         if (r.d2 < best.d2) best = r;
         if (r.d2 < 1e-28) break;      // Punkt liegt auf der Fläche — genauer geht es nicht
       }
+      // 3) Rückfall (selten): Punkt nicht auf der Fläche gefunden → feines Raster
+      //    (40×40) als Startwerte. Der Gauss-Newton blieb sonst an entarteten Stellen
+      //    (Polseite dreiseitiger Patches, sehr ungleich lange Seiten) hängen und
+      //    meldete Randpunkte bis 0,09 mm neben der Fläche, die exakt auf ihr liegen.
+      if (best.d2 > 1e-16) {
+        const M = 40, cand = [];
+        for (let i = 0; i <= M; i++) {
+          for (let j = 0; j <= M; j++) {
+            const u = u0 + ((u1 - u0) * i) / M, v = v0 + ((v1 - v0) * j) / M;
+            evalPoint(u, v, tmp);
+            const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+            cand.push([ex * ex + ey * ey + ez * ez, u, v, tmp[0], tmp[1], tmp[2]]);
+          }
+        }
+        cand.sort((a, b) => a[0] - b[0]);
+        // verschiedene Startpunkte: an einer Polseite (dreiseitiges Patch) fallen alle
+        // Rasterpunkte einer Zeile auf denselben Punkt — die zählen nur einmal
+        const picked = [];
+        for (const c of cand) {
+          if (picked.some((q) => Math.abs(q[3] - c[3]) + Math.abs(q[4] - c[4]) + Math.abs(q[5] - c[5]) < 1e-9)) continue;
+          picked.push(c);
+          if (picked.length >= 6) break;
+        }
+        for (const [, u, v] of picked) {
+          const r = refine(p, u, v);
+          if (r.d2 < best.d2) best = r;
+          if (r.d2 < 1e-28) break;
+        }
+      }
       lastUV = [best.u, best.v];
       return best;
     };
