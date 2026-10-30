@@ -18,6 +18,8 @@
 //                                             offene Fremdteile, Freigang der Kreis-Umwandlung
 //   ocp          ocp-suite.mjs              — volles OpenCascade (OCP, Python) als zweiter Prüfer:
 //                                             alle Samples + Schalen-Körper; ohne OCP übersprungen
+//   freeform     tests/freeform/*.test.mjs  — Freiform-Pfad (Etappe 1): Geometrie, Segmentierung, Snap, Topologie, B-Rep, STEP
+//   gravur       gravur-regression.mjs      — synthetische Gravur-Körper (Extrusions-Wände): wasserdicht, strikte Importer, ΔV ≤ 1e-3
 //
 // Jede Suite läuft als eigener Prozess (Ausgabe durchgereicht); es laufen ALLE,
 // auch wenn eine scheitert — am Ende Zusammenfassung mit Laufzeiten und
@@ -43,6 +45,19 @@ const SUITES = [
   { name: 'orient',      args: ['tests/orientation-guard.mjs'] },
   { name: 'schalen',     args: ['tests/shell-regression.mjs'] },
   { name: 'ocp',         args: ['tests/ocp-suite.mjs'] },
+  // Freiform: alle Dateien einzeln (kein Shell-Glob) und nacheinander
+  // (--test-concurrency=1), weil gen/brep die STL in tests/freeform/stl neu schreiben,
+  // während snap/seg sie lesen.
+  { name: 'freeform',    args: ['--test', '--test-concurrency=1',
+    'tests/freeform/brep.test.mjs',
+    'tests/freeform/gen.test.mjs',
+    'tests/freeform/geom.test.mjs',
+    'tests/freeform/seg.test.mjs',
+    'tests/freeform/snap.test.mjs',
+    'tests/freeform/step.test.mjs',
+    'tests/freeform/strict.test.mjs',
+    'tests/freeform/topo.test.mjs'] },
+  { name: 'gravur',      args: ['tests/gravur-regression.mjs'] },
 ];
 
 const results = [];
