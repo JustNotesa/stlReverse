@@ -157,13 +157,16 @@ const BLEND_MAX_NET = 40000;      // Stützpunkte im Kontrollnetz (Schreiber-Aus
 const BLEND_MAX_SAMPLES = 200;    // geprüfte Netzecken je Patch (gleichmäßige Stichprobe)
 const BLEND_PROJ_ITERS = 25;      // Newton-Schritte je Projektion (Startwert aus dem Gitter)
 const BLEND_SAMPLES_N = 8;        // 8×8 Gitterpunkte als Startwert der Projektion
+const BLEND_CORNER_TRIES = 1;     // Eckensätze je Blend-Patch. Mehr (Alternativen aus den 6 schärfsten Knicken)
+// rettete am Skoda Regionen, erzeugte aber OCP-ungültige Patches (3 Flächen, 61 Selbstschnitte) → aus
+const BLEND_FOLD_COS = 0;         // Patch-Normale ↔ Netznormale: kleiner → Faltung (Patch verworfen)
 const BLEND_EDGE_TOL = 2e-7;      // mm — Randstück ↔ Patch-Fläche (strenge Importer: 1e-6)
 const BLEND_CHECK_EVERY = 16;     // Zeitprüfung alle BLEND_CHECK_EVERY Stichproben
 
 const now = () => (globalThis.performance && globalThis.performance.now)
   ? globalThis.performance.now() : Date.now();
 
-// TEMP-Messung (wird nach der Messung wieder entfernt)
+// Zeitmessung je Abschnitt (landet nur im Debug-Log als Zeile "ZEIT {…}")
 let TIME = null;
 function tm(key, t0) {
   if (!TIME) return;
@@ -574,187 +577,261 @@ function buildBlendPatch(wr, uses, edges, vertices, mesh, state) {
   }
   const sharp = cands.filter((c) => c.ang > BLEND_CORNER_DEG)
     .sort((a, b) => b.ang - a.ang || a.param - b.param);
-  let corners;
-  if (sharp.length >= 4) {
-    corners = sharp.slice(0, 4).map((c) => c.param).sort((a, b) => a - b);
-  } else if (sharp.length === 3) {
-    corners = sharp.map((c) => c.param).sort((a, b) => a - b);
-  } else {
-    // zu wenige scharfe Ecken: weitere Ecken nach Bogenlänge ergänzen, bis
-    // vier da sind (der längste Bogen wird jeweils in der Mitte geteilt)
-    const sampler = arcSampler(C);
-    corners = sharp.map((c) => c.param).sort((a, b) => a - b);
-    let guard = 0;
-    while (corners.length < 4 && guard++ < 8) {
-      const m = corners.length;
-      let big = null;
-      for (let i = 0; i < m; i++) {
-        const s0 = corners[i], s1 = corners[(i + 1) % m];
-        const l0 = sampler.at(s0);
-        const l1 = sampler.at(s1) + (i === m - 1 ? sampler.total : 0);
-        if (!big || l1 - l0 > big.l) big = { s0, s1, l: l1 - l0, l0, l1 };
+  // Eckensätze: zuerst der bisherige (die 4 schärfsten Knicke bzw. Bogenlängen-
+  // Ergänzung), dann Alternativen aus den bis zu 6 schärfsten Knicken (4er-, dann
+  // 3er-Kombinationen). Ein falscher Eckensatz verdreht den Coons-Patch (Faltung,
+  // Sinn) — die nächste Wahl rettet die Region vor dem Facetten-Rückfall.
+  const cornerSets = [];
+  const firstSet = (() => {
+    let corners;
+    if (sharp.length >= 4) {
+      corners = sharp.slice(0, 4).map((c) => c.param).sort((a, b) => a - b);
+    } else if (sharp.length === 3) {
+      corners = sharp.map((c) => c.param).sort((a, b) => a - b);
+    } else {
+      // zu wenige scharfe Ecken: weitere Ecken nach Bogenlänge ergänzen, bis
+      // vier da sind (der längste Bogen wird jeweils in der Mitte geteilt)
+      const sampler = arcSampler(C);
+      corners = sharp.map((c) => c.param).sort((a, b) => a - b);
+      let guard = 0;
+      while (corners.length < 4 && guard++ < 8) {
+        const m = corners.length;
+        let big = null;
+        for (let i = 0; i < m; i++) {
+          const s0 = corners[i], s1 = corners[(i + 1) % m];
+          const l0 = sampler.at(s0);
+          const l1 = sampler.at(s1) + (i === m - 1 ? sampler.total : 0);
+          if (!big || l1 - l0 > big.l) big = { s0, s1, l: l1 - l0, l0, l1 };
+        }
+        if (!big || !(big.l > 1e-9)) break;
+        const mid = sampler.paramAt((((big.l0 + big.l1) / 2) % sampler.total));
+        if (corners.some((p) => Math.abs(p - mid) < 1e-9)) break;
+        corners.push(mid);
+        corners.sort((a, b) => a - b);
       }
-      if (!big || !(big.l > 1e-9)) break;
-      const mid = sampler.paramAt((((big.l0 + big.l1) / 2) % sampler.total));
-      if (corners.some((p) => Math.abs(p - mid) < 1e-9)) break;
-      corners.push(mid);
-      corners.sort((a, b) => a - b);
+      if (corners.length < 3) return { fail: `nur ${corners.length} Ecken` };
     }
-    if (corners.length < 3) return { fail: `nur ${corners.length} Ecken` };
-  }
-  // drei Ecken → dreiseitiges Patch (eine Seite ist ein Punkt)
-  const three = corners.length === 3;
-  const arcs = splitClosed(C, corners);
-  if (!arcs) return { fail: 'Randbögen' };
-  tm('blend.arcs', t); t = now();
-  if (state && budgetExceeded(state)) return { hard: true };
-  // Coons-Patch: c0 = s0, d1 = s1, c1 = reverse(s2), d0 = reverse(s3)
-  const c0 = arcs[0], d1 = arcs[1];
-  const c1 = reverseCurve(arcs[2]);
-  let d0;
-  if (three) {
-    // dreiseitiges Patch: die vierte Seite ist ein Punkt (Ecke C0)
-    const p0 = evalCurve(arcs[0], curveDomain(arcs[0])[0]);
-    d0 = lineToBspline(p0, p0);
-  } else {
-    d0 = reverseCurve(arcs[3]);
-  }
-  // Arbeitsgrenze VOR dem Coons-Patch: das Kontrollnetz ist das Produkt der
-  // Stützpunktzahlen der Seiten (die Seiten sind aus vielen Randkurven
-  // zusammengesetzt, ihr Knotenvektor-Vereinigungsnetz explodiert sonst).
-  // Der Rand muss exakt bleiben — also wird der Patch gemeldet, nicht gerundet.
-  for (const [nm, c] of [['c0', c0], ['c1', c1], ['d0', d0], ['d1', d1]]) {
-    if (c.ctrl.length > BLEND_MAX_CTRL) {
-      return { fail: `Seite ${nm} zu lang (${c.ctrl.length} Stützpunkte)` };
-    }
-  }
-  const surf = coonsPatch(c0, c1, d0, d1);
-  if (!surf) return { fail: 'Coons-Patch' };
-  tm('blend.coons', t); t = now();
-  tmCount('blend.patches', 1);
-  tmMax('blend.net', surf.ctrl.length * surf.ctrl[0].length);
-  tmMax('blend.side', Math.max(c0.ctrl.length, c1.ctrl.length, d0.ctrl.length, d1.ctrl.length));
-  if (surf.ctrl.length * surf.ctrl[0].length > BLEND_MAX_NET) {
-    return { fail: `Kontrollnetz zu groß (${surf.ctrl.length}×${surf.ctrl[0].length})` };
-  }
-  // strenge Importer: innere Knotenvielfachheit ≤ Grad
-  if (!multsOk(surf.knotsU, surf.multsU, surf.du) || !multsOk(surf.knotsV, surf.multsV, surf.dv)) {
-    return { fail: 'Knotenvielfachheit' };
-  }
-  // Durchmesser der Region (Bounding-Box-Diagonale der Netzpunkte)
-  const mvSet = [...regionVertices(mesh, wr)];
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (const mv of mvSet) {
-    const p = ptOf(mesh, mv);
-    for (let d = 0; d < 3; d++) {
-      if (p[d] < lo[d]) lo[d] = p[d];
-      if (p[d] > hi[d]) hi[d] = p[d];
-    }
-  }
-  const diam = len(sub(hi, lo));
-  const tol = Math.max(BLEND_TOL_ABS, BLEND_TOL_REL * diam);
-  // Abstand der Netzpunkte zur Patch-Fläche — gleichmäßige Stichprobe
-  // (höchstens BLEND_MAX_SAMPLES Ecken; der Rand bleibt exakt, nur die
-  // Prüfung wird billiger). Startwert der Projektion: das grobe Gitter der
-  // Fläche (einmal berechnet) statt einer eigenen Raster-Suche je Punkt.
-  const samples = surfaceSamples(surf, BLEND_SAMPLES_N);
-  // Rand-Probe (Sicherheitsnetz) über die PARAMETER, nicht per Projektion: die
-  // Projektion auf stark ungleich parametrisierte Patches (ein Randstück belegt
-  // < 1 % des Parameterbereichs, Polseite) blieb in Nebenminima hängen und meldete
-  // Schein-Abstände bis 0,05 mm. Geprüft wird, was die Konstruktion verspricht:
-  //  (1) jedes Randstück k liegt auf der geschlossenen Kurve C im Intervall
-  //      [joints[k], joints[k+1]] (lineare Umparametrisierung, exakt);
-  //  (2) die Fläche trägt ihre vier Seiten: S(u,v0)=c0(u), S(u,v1)=c1(u),
-  //      S(u0,v)=d0(v), S(u1,v)=d1(v).
+    return corners;
+  })();
+  if (firstSet && firstSet.fail) return firstSet;
+  cornerSets.push(firstSet);
   {
-    const sU0 = surf.knotsU[0], sU1 = surf.knotsU[surf.knotsU.length - 1];
-    const sV0 = surf.knotsV[0], sV1 = surf.knotsV[surf.knotsV.length - 1];
-    let worst = 0;
-    for (let k = 0; k < pieces.length; k++) {
-      const pc = pieces[k];
-      const [a0, a1] = curveDomain(pc);
-      const [ca, cb] = curveDomain(C);
-      const s0 = ca + (cb - ca) * joints[k], s1 = ca + (cb - ca) * joints[k + 1];
-      for (let i = 0; i <= 4; i++) {
-        const t = i / 4;
-        const d = len(sub(evalCurve(pc, a0 + (a1 - a0) * t), evalCurve(C, s0 + (s1 - s0) * t)));
-        if (d > worst) worst = d;
-      }
-    }
-    const sideCheck = (c, at) => {
-      const [a0, a1] = curveDomain(c);
-      for (let i = 0; i <= 8; i++) {
-        const t = i / 8;
-        const d = len(sub(evalCurve(c, a0 + (a1 - a0) * t), at(t)));
-        if (d > worst) worst = d;
-      }
+    const top = sharp.slice(0, 6).map((c) => c.param);
+    const key = (cs) => cs.map((x) => x.toFixed(12)).join('|');
+    const seen = new Set([key(firstSet)]);
+    const combos = (k) => {
+      const out = [];
+      const rec = (i, acc) => {
+        if (acc.length === k) { out.push(acc.slice().sort((a, b) => a - b)); return; }
+        for (let j = i; j < top.length; j++) { acc.push(top[j]); rec(j + 1, acc); acc.pop(); }
+      };
+      rec(0, []);
+      return out;
     };
-    sideCheck(c0, (t) => evalSurface(surf, sU0 + (sU1 - sU0) * t, sV0));
-    sideCheck(c1, (t) => evalSurface(surf, sU0 + (sU1 - sU0) * t, sV1));
-    sideCheck(d0, (t) => evalSurface(surf, sU0, sV0 + (sV1 - sV0) * t));
-    sideCheck(d1, (t) => evalSurface(surf, sU1, sV0 + (sV1 - sV0) * t));
-    if (!(worst <= BLEND_EDGE_TOL)) {
-      return { fail: `Rand neben dem Patch (${worst.toExponential(2)} mm)` };
+    for (const cs of combos(4)) {
+      if (cornerSets.length >= BLEND_CORNER_TRIES) break;
+      const k = key(cs);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      cornerSets.push(cs);
     }
   }
-  const stepV = Math.max(1, Math.ceil(mvSet.length / BLEND_MAX_SAMPLES));
-  let checked = 0;
-  for (let i = 0; i < mvSet.length; i += stepV) {
-    const mv = mvSet[i];
-    if (checked % BLEND_CHECK_EVERY === 0 && state && budgetExceeded(state)) return { hard: true };
-    checked++;
-    const p = ptOf(mesh, mv);
-    let r = projectToSurface(surf, p, { samples, iters: BLEND_PROJ_ITERS });
-    if (!(r.dist <= tol)) {
-      // Startwert war schlecht → volle Suche (teuer, aber selten)
-      r = projectToSurface(surf, p, { grid: 12 });
+  const attempt = (corners) => {
+    // drei Ecken → dreiseitiges Patch (eine Seite ist ein Punkt)
+    const three = corners.length === 3;
+    const arcs = splitClosed(C, corners);
+    if (!arcs) return { fail: 'Randbögen' };
+    tm('blend.arcs', t); t = now();
+    if (state && budgetExceeded(state)) return { hard: true };
+    // Coons-Patch: c0 = s0, d1 = s1, c1 = reverse(s2), d0 = reverse(s3)
+    const c0 = arcs[0], d1 = arcs[1];
+    const c1 = reverseCurve(arcs[2]);
+    let d0;
+    if (three) {
+      // dreiseitiges Patch: die vierte Seite ist ein Punkt (Ecke C0)
+      const p0 = evalCurve(arcs[0], curveDomain(arcs[0])[0]);
+      d0 = lineToBspline(p0, p0);
+    } else {
+      d0 = reverseCurve(arcs[3]);
     }
-    if (!(r.dist <= tol)) {
-      return { fail: `Abstand ${r.dist.toFixed(3)} mm > ${tol.toFixed(3)} mm` };
-    }
-  }
-  tm('blend.dist', t); t = now();
-  // Normale im Inneren (BLEND_GRID×BLEND_GRID Stützstellen)
-  const u0 = surf.knotsU[0], u1 = surf.knotsU[surf.knotsU.length - 1];
-  const v0 = surf.knotsV[0], v1 = surf.knotsV[surf.knotsV.length - 1];
-  for (let i = 0; i < BLEND_GRID; i++) {
-    for (let j = 0; j < BLEND_GRID; j++) {
-      const u = u0 + ((u1 - u0) * (i + 0.5)) / BLEND_GRID;
-      const v = v0 + ((v1 - v0) * (j + 0.5)) / BLEND_GRID;
-      if (!surfaceNormal(surf, u, v)) {
-        const d = surfaceDerivs(surf, u, v);
-        const l = len(cross(d.Su, d.Sv));
-        return {
-          fail: `entartete Normale bei u=${u.toFixed(5)} v=${v.toFixed(5)} `
-            + `(|Su×Sv|=${l.toExponential(2)}, Su=[${d.Su.map((x) => x.toFixed(3))}], `
-            + `Sv=[${d.Sv.map((x) => x.toFixed(3))}])`,
-        };
+    // Arbeitsgrenze VOR dem Coons-Patch: das Kontrollnetz ist das Produkt der
+    // Stützpunktzahlen der Seiten (die Seiten sind aus vielen Randkurven
+    // zusammengesetzt, ihr Knotenvektor-Vereinigungsnetz explodiert sonst).
+    // Der Rand muss exakt bleiben — also wird der Patch gemeldet, nicht gerundet.
+    for (const [nm, c] of [['c0', c0], ['c1', c1], ['d0', d0], ['d1', d1]]) {
+      if (c.ctrl.length > BLEND_MAX_CTRL) {
+        return { fail: `Seite ${nm} zu lang (${c.ctrl.length} Stützpunkte)` };
       }
     }
+    const surf = coonsPatch(c0, c1, d0, d1);
+    if (!surf) return { fail: 'Coons-Patch' };
+    tm('blend.coons', t); t = now();
+    tmCount('blend.patches', 1);
+    tmMax('blend.net', surf.ctrl.length * surf.ctrl[0].length);
+    tmMax('blend.side', Math.max(c0.ctrl.length, c1.ctrl.length, d0.ctrl.length, d1.ctrl.length));
+    if (surf.ctrl.length * surf.ctrl[0].length > BLEND_MAX_NET) {
+      return { fail: `Kontrollnetz zu groß (${surf.ctrl.length}×${surf.ctrl[0].length})` };
+    }
+    // strenge Importer: innere Knotenvielfachheit ≤ Grad
+    if (!multsOk(surf.knotsU, surf.multsU, surf.du) || !multsOk(surf.knotsV, surf.multsV, surf.dv)) {
+      return { fail: 'Knotenvielfachheit' };
+    }
+    // Durchmesser der Region (Bounding-Box-Diagonale der Netzpunkte)
+    const mvSet = [...regionVertices(mesh, wr)];
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const mv of mvSet) {
+      const p = ptOf(mesh, mv);
+      for (let d = 0; d < 3; d++) {
+        if (p[d] < lo[d]) lo[d] = p[d];
+        if (p[d] > hi[d]) hi[d] = p[d];
+      }
+    }
+    const diam = len(sub(hi, lo));
+    const tol = Math.max(BLEND_TOL_ABS, BLEND_TOL_REL * diam);
+    // Abstand der Netzpunkte zur Patch-Fläche — gleichmäßige Stichprobe
+    // (höchstens BLEND_MAX_SAMPLES Ecken; der Rand bleibt exakt, nur die
+    // Prüfung wird billiger). Startwert der Projektion: das grobe Gitter der
+    // Fläche (einmal berechnet) statt einer eigenen Raster-Suche je Punkt.
+    const samples = surfaceSamples(surf, BLEND_SAMPLES_N);
+    // Rand-Probe (Sicherheitsnetz) über die PARAMETER, nicht per Projektion: die
+    // Projektion auf stark ungleich parametrisierte Patches (ein Randstück belegt
+    // < 1 % des Parameterbereichs, Polseite) blieb in Nebenminima hängen und meldete
+    // Schein-Abstände bis 0,05 mm. Geprüft wird, was die Konstruktion verspricht:
+    //  (1) jedes Randstück k liegt auf der geschlossenen Kurve C im Intervall
+    //      [joints[k], joints[k+1]] (lineare Umparametrisierung, exakt);
+    //  (2) die Fläche trägt ihre vier Seiten: S(u,v0)=c0(u), S(u,v1)=c1(u),
+    //      S(u0,v)=d0(v), S(u1,v)=d1(v).
+    {
+      const sU0 = surf.knotsU[0], sU1 = surf.knotsU[surf.knotsU.length - 1];
+      const sV0 = surf.knotsV[0], sV1 = surf.knotsV[surf.knotsV.length - 1];
+      let worst = 0;
+      for (let k = 0; k < pieces.length; k++) {
+        const pc = pieces[k];
+        const [a0, a1] = curveDomain(pc);
+        const [ca, cb] = curveDomain(C);
+        const s0 = ca + (cb - ca) * joints[k], s1 = ca + (cb - ca) * joints[k + 1];
+        for (let i = 0; i <= 4; i++) {
+          const t = i / 4;
+          const d = len(sub(evalCurve(pc, a0 + (a1 - a0) * t), evalCurve(C, s0 + (s1 - s0) * t)));
+          if (d > worst) worst = d;
+        }
+      }
+      const sideCheck = (c, at) => {
+        const [a0, a1] = curveDomain(c);
+        for (let i = 0; i <= 8; i++) {
+          const t = i / 8;
+          const d = len(sub(evalCurve(c, a0 + (a1 - a0) * t), at(t)));
+          if (d > worst) worst = d;
+        }
+      };
+      sideCheck(c0, (t) => evalSurface(surf, sU0 + (sU1 - sU0) * t, sV0));
+      sideCheck(c1, (t) => evalSurface(surf, sU0 + (sU1 - sU0) * t, sV1));
+      sideCheck(d0, (t) => evalSurface(surf, sU0, sV0 + (sV1 - sV0) * t));
+      sideCheck(d1, (t) => evalSurface(surf, sU1, sV0 + (sV1 - sV0) * t));
+      if (!(worst <= BLEND_EDGE_TOL)) {
+        return { fail: `Rand neben dem Patch (${worst.toExponential(2)} mm)` };
+      }
+    }
+    const stepV = Math.max(1, Math.ceil(mvSet.length / BLEND_MAX_SAMPLES));
+    let checked = 0;
+    for (let i = 0; i < mvSet.length; i += stepV) {
+      const mv = mvSet[i];
+      if (checked % BLEND_CHECK_EVERY === 0 && state && budgetExceeded(state)) return { hard: true };
+      checked++;
+      const p = ptOf(mesh, mv);
+      let r = projectToSurface(surf, p, { samples, iters: BLEND_PROJ_ITERS });
+      if (!(r.dist <= tol)) {
+        // Startwert war schlecht → volle Suche (teuer, aber selten)
+        r = projectToSurface(surf, p, { grid: 12 });
+      }
+      if (!(r.dist <= tol)) {
+        return { fail: `Abstand ${r.dist.toFixed(3)} mm > ${tol.toFixed(3)} mm` };
+      }
+    }
+    tm('blend.dist', t); t = now();
+    // Normale im Inneren (BLEND_GRID×BLEND_GRID Stützstellen)
+    const u0 = surf.knotsU[0], u1 = surf.knotsU[surf.knotsU.length - 1];
+    const v0 = surf.knotsV[0], v1 = surf.knotsV[surf.knotsV.length - 1];
+    for (let i = 0; i < BLEND_GRID; i++) {
+      for (let j = 0; j < BLEND_GRID; j++) {
+        const u = u0 + ((u1 - u0) * (i + 0.5)) / BLEND_GRID;
+        const v = v0 + ((v1 - v0) * (j + 0.5)) / BLEND_GRID;
+        if (!surfaceNormal(surf, u, v)) {
+          const d = surfaceDerivs(surf, u, v);
+          const l = len(cross(d.Su, d.Sv));
+          return {
+            fail: `entartete Normale bei u=${u.toFixed(5)} v=${v.toFixed(5)} `
+              + `(|Su×Sv|=${l.toExponential(2)}, Su=[${d.Su.map((x) => x.toFixed(3))}], `
+              + `Sv=[${d.Sv.map((x) => x.toFixed(3))}])`,
+          };
+        }
+      }
+    }
+    tm('blend.normal', t); t = now();
+    // Sinn: flächengewichtetes Vorzeichen (Netznormale ↔ Flächennormale).
+    // Stichprobe (die Fläche ist glatt — der Mittelwert ändert sich nicht).
+    const step = Math.max(1, Math.ceil(wr.tris.length / 64));
+    let acc = 0, accA = 0;
+    for (let k = 0; k < wr.tris.length; k += step) {
+      const t = wr.tris[k];
+      if (state && budgetExceeded(state)) return { hard: true };
+      const c = centroidOf(mesh, t);
+      let r = projectToSurface(surf, c, { samples, iters: BLEND_PROJ_ITERS });
+      if (!(r.dist <= tol)) r = projectToSurface(surf, c, { grid: 12 });
+      const nn = normalNear(surf, r.u, r.v);
+      if (!nn) return { fail: 'entartete Normale' };
+      const d = dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], nn);
+      acc += A[t] * (d > 0 ? 1 : d < 0 ? -1 : 0);
+      accA += A[t];
+    }
+    const s = accA > 0 ? acc / accA : 0;
+    if (!(Math.abs(s) >= BLEND_SENSE_MIN)) {
+      return { fail: `Sinn ${s.toFixed(3)} (Stücke ${n}, scharfe Ecken ${sharp.length}: `
+        + `${cands.map((c) => c.ang.toFixed(0)).join('/')}, Ecken ${corners.length}, Dreiecke ${wr.tris.length})` };
+    }
+    // Faltung (Skoda: 4 Patches falteten an einer tangentialen Kante auf ihren Nachbarn,
+    // dazu BOP-Selbstschnitte): die Flächennormale (mit Sinn) muss überall — auch an den
+    // vier Seiten, wo Coons-Patches am ehesten kippen — zur Netznormale des nächsten
+    // Regionsdreiecks zeigen (Skalarprodukt > BLEND_FOLD_COS).
+    {
+      const sg = s > 0 ? 1 : -1;
+      const step2 = Math.max(1, Math.ceil(wr.tris.length / 200));
+      const cents = [];
+      for (let k = 0; k < wr.tris.length; k += step2) cents.push(wr.tris[k]);
+      const cpts = cents.map((t) => centroidOf(mesh, t));
+      const su0 = surf.knotsU[0], su1 = surf.knotsU[surf.knotsU.length - 1];
+      const sv0 = surf.knotsV[0], sv1 = surf.knotsV[surf.knotsV.length - 1];
+      const uvs = [];
+      for (let i = 0; i <= 6; i++) {
+        const t = 0.04 + (0.92 * i) / 6;
+        uvs.push([t, 0.02], [t, 0.98], [0.02, t], [0.98, t]);
+      }
+      for (let i = 1; i < 5; i++) for (let j = 1; j < 5; j++) uvs.push([i / 5, j / 5]);
+      for (const [a, b] of uvs) {
+        const u = su0 + (su1 - su0) * a, v = sv0 + (sv1 - sv0) * b;
+        const nn = normalNear(surf, u, v);
+        if (!nn) continue;
+        const P = evalSurface(surf, u, v);
+        let bi = -1, bd = Infinity;
+        for (let k = 0; k < cpts.length; k++) {
+          const d = len(sub(cpts[k], P));
+          if (d < bd) { bd = d; bi = k; }
+        }
+        if (bi < 0) continue;
+        const t = cents[bi];
+        const c = sg * dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], nn);
+        if (c < BLEND_FOLD_COS && !(state && state.blendFoldCheck === false)) return { fail: `Faltung (cos ${c.toFixed(2)} bei u=${a.toFixed(2)} v=${b.toFixed(2)})` };
+      }
+    }
+    return { surf, sameSense: s > 0 };
+  };
+  let firstFail = null;
+  for (const cs of cornerSets) {
+    const r = attempt(cs);
+    if (r.hard || !r.fail) return r;
+    if (!firstFail) firstFail = r;
   }
-  tm('blend.normal', t); t = now();
-  // Sinn: flächengewichtetes Vorzeichen (Netznormale ↔ Flächennormale).
-  // Stichprobe (die Fläche ist glatt — der Mittelwert ändert sich nicht).
-  const step = Math.max(1, Math.ceil(wr.tris.length / 64));
-  let acc = 0, accA = 0;
-  for (let k = 0; k < wr.tris.length; k += step) {
-    const t = wr.tris[k];
-    if (state && budgetExceeded(state)) return { hard: true };
-    const c = centroidOf(mesh, t);
-    let r = projectToSurface(surf, c, { samples, iters: BLEND_PROJ_ITERS });
-    if (!(r.dist <= tol)) r = projectToSurface(surf, c, { grid: 12 });
-    const nn = normalNear(surf, r.u, r.v);
-    if (!nn) return { fail: 'entartete Normale' };
-    const d = dot([N[3 * t], N[3 * t + 1], N[3 * t + 2]], nn);
-    acc += A[t] * (d > 0 ? 1 : d < 0 ? -1 : 0);
-    accA += A[t];
-  }
-  const s = accA > 0 ? acc / accA : 0;
-  if (!(Math.abs(s) >= BLEND_SENSE_MIN)) {
-    return { fail: `Sinn ${s.toFixed(3)} (Stücke ${n}, scharfe Ecken ${sharp.length}: `
-      + `${cands.map((c) => c.ang.toFixed(0)).join('/')}, Ecken ${corners.length}, Dreiecke ${wr.tris.length})` };
-  }
-  return { surf, sameSense: s > 0 };
+  return firstFail;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -820,6 +897,7 @@ function buildInner(normalGroups, opts, log) {
     budgetMs,                           // Zeitbudget in ms
     shareMax,                           // Anteil der zu Facetten demotierten Dreiecke
     blendPatches,                       // Blend-Patches an (Standard) oder aus
+    blendFoldCheck: opts.blendFoldCheck !== false,   // Faltungsprüfung der Patches (Standard an; aus = mehr Patches, BOP-Selbstschnitte)
   };
   // Testschalter: Regionen von Anfang an als Blend behandeln
   if (blendPatches && typeof opts.testBlendRegions === 'function') {
