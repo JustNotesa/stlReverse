@@ -596,7 +596,7 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
 .viewer-3d[data-state="error"]::after { content: 'Fehler beim Laden der STEP-Datei.'; }
 /* WebGL im Browser abgeschaltet (z. B. Hardwarebeschleunigung aus): ehrlich sagen statt „Keine Daten“. */
 .viewer-3d[data-state="nowebgl"]::after {
-  content: '3D-Ansicht nicht verfügbar: WebGL ist in diesem Browser abgeschaltet.\A \A So einschalten: Firefox-Einstellungen → Allgemein → Leistung → „Empfohlene Leistungseinstellungen“ abwählen und „Hardwarebeschleunigung verwenden, wenn verfügbar“ anhaken, Firefox neu starten. Hilft das nicht: about:config → webgl.force-enabled auf true.\A \A Die STEP-Datei ist trotzdem korrekt.';
+  content: '3D-Ansicht nicht verfügbar: WebGL ist in diesem Browser abgeschaltet.\A \A So einschalten: Firefox-Einstellungen → „Tabs und Surfen“ (oder oben „Hardware“ suchen) → Leistung → „Empfohlene Leistungseinstellungen“ abwählen und „Hardwarebeschleunigung verwenden, wenn verfügbar“ anhaken, Firefox neu starten. Hilft das nicht: about:config → webgl.force-enabled auf true.\A \A Die STEP-Datei ist trotzdem korrekt.';
   white-space: pre-line; padding: 16px 24px; line-height: 1.45;
 }
 .viewer-3d[data-state="ready"]::after,
