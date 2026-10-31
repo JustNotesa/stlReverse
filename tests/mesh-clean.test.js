@@ -6,6 +6,7 @@
 // Wand zerfiel in Fächer-Dreiecke und die Feature-Erkennung (Zylinder/Ebene) scheiterte.
 // Neu: eine Kette paralleler Ring-Kanten wird als SPALTE gemeinsam kollabiert.
 import { cleanMesh } from '../mesh-clean.js';
+import { box } from './shell-regression.mjs';
 import { BODIES, buildMesh, toBinaryStl } from './fixtures-v2/gen.mjs';
 import { GRAVUR_BODIES, buildGravurMesh } from './gravur-bodies.mjs';
 import { parseStl } from '../analysis-core.js';
@@ -81,6 +82,19 @@ const edgeStats = (mesh) => {
     if ((dir.get(`${p}|${q}`) || 0) !== 1 || (dir.get(`${q}|${p}`) || 0) !== 1) badDir++;
   }
   return { edges: und.size, bad, badDir };
+};
+// Höchste Dreieckszahl an einer ungerichteten Kante (> 2 = non-manifold)
+const maxTriPerEdge = (mesh) => {
+  const per = new Map();
+  for (const f of mesh.faces) {
+    const [a, b, c] = f.vertices;
+    for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+      const k = key3(p), l = key3(q);
+      const u = k < l ? `${k}|${l}` : `${l}|${k}`;
+      per.set(u, (per.get(u) || 0) + 1);
+    }
+  }
+  return Math.max(0, ...per.values());
 };
 // Bogenpunkte (nicht die Tangentenpunkte (20,5) / (19,6))
 const onArc = (v) => {
@@ -463,5 +477,54 @@ describe('cleanMesh — Spalten-Kollaps an echten Körpern (z5, gravur_fein)', (
     // auf den glatten Konturen der feinen Schrift bleibt es beim Halbkanten-Verhalten.
     const frac = matchedFraction(w.lo, w.hi, 1e-9, (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]));
     console.log('[E] gravur_fein Wand-Paarigkeit oben/unten: %s', frac.toFixed(4));
+  });
+});
+
+// ── Berührflächen-Reparatur (mesh-repair.js) — läuft VOR dem Kollaps, auch bei τ = 0 ──
+describe('cleanMesh — Berührflächen-Reparatur', () => {
+  // Zwei Würfel, die sich flächig berühren: die Deckfläche des unteren und die Bodenfläche des
+  // oberen tragen dieselbe Kontur — jede Kante dieser Fläche wird von VIER Dreiecken benutzt.
+  const stackedCubes = () => ({
+    faces: [...box([0, 0, 0], [10, 10, 10]), ...box([0, 0, 10], [10, 10, 20])]
+      .map(([a, b, c]) => face(a, b, c))
+  });
+  const singleCube = () => ({
+    faces: box([0, 0, 0], [10, 10, 10]).map(([a, b, c]) => face(a, b, c))
+  });
+
+  test('(A) zwei gestapelte Würfel: Kontaktfläche verschweißt, Netz danach 2-mannigfaltig', () => {
+    const m = stackedCubes();
+    expect(maxTriPerEdge(m)).toBeGreaterThan(2);          // Prämisse: non-manifold
+    const r = cleanMesh(m);
+    expect(r.report.repair).toBeTruthy();
+    expect(r.report.repair.nonManifoldEdges).toBeGreaterThan(0);
+    expect(r.report.repair.contactPairs).toBeGreaterThan(0);
+    expect(r.report.repair.nonManifoldEdgesAfter).toBe(0);
+    // Keine Kante trägt mehr als zwei Dreiecke
+    expect(maxTriPerEdge(r.mesh)).toBe(2);
+  });
+
+  test('(B) τ = 0: die Reparatur läuft trotzdem (nur der Kollaps entfällt)', () => {
+    const r = cleanMesh(stackedCubes(), { minDetailMm: 0 });
+    expect(r.report.repair.contactPairs).toBeGreaterThan(0);
+    expect(r.report.repair.nonManifoldEdgesAfter).toBe(0);
+    expect(r.report.removedTris).toBe(0);
+    expect(maxTriPerEdge(r.mesh)).toBe(2);
+  });
+
+  test('(C) repair: false — keine Reparatur, Flächenzahl und Netz bleiben unverändert', () => {
+    const m = stackedCubes();
+    const r = cleanMesh(m, { repair: false });
+    expect(r.report.repair).toBeNull();
+    expect(r.mesh.faces.length).toBe(m.faces.length);
+    expect(maxTriPerEdge(r.mesh)).toBeGreaterThan(2);      // die Kontaktfläche bleibt doppelt
+  });
+
+  test('(D) ein einzelner Würfel: nichts zu tun, dasselbe Netz-Objekt', () => {
+    const m = singleCube();
+    const r = cleanMesh(m);
+    expect(r.mesh).toBe(m);
+    expect(r.report.repair.contactPairs).toBe(0);
+    expect(r.report.repair.nonManifoldEdges).toBe(0);
   });
 });

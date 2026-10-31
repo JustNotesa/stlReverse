@@ -306,5 +306,12 @@ export function repairNonManifold(mesh, opts = {}) {
   report.nonManifoldEdgesAfter = after.nmE;
   report.nonManifoldVerticesAfter = after.nmV;
   report.ms = now() - t0;
-  return { mesh: { ...mesh, faces: kept }, report };
+  if (!report.removedTris) return { mesh: { ...mesh, faces: kept }, report };
+  // Flache Punktliste (parseStl: mesh.vertices, 9 Werte je Dreieck) wie in mesh-clean.js neu
+  // aufbauen — sonst blieben entfernte Flächen (z. B. eine Netz-Finne) in Hüllquader und Umriss.
+  if (!mesh.vertices) return { mesh: { ...mesh, faces: kept }, report };
+  const flat = new Float32Array(kept.length * 9);
+  let o = 0;
+  for (const f of kept) for (const v of f.vertices) { flat[o++] = v[0]; flat[o++] = v[1]; flat[o++] = v[2]; }
+  return { mesh: { ...mesh, faces: kept, vertices: flat }, report };
 }

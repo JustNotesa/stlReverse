@@ -169,6 +169,8 @@ test('Lage-unabhängigkeit: gedreht/verschoben bleibt dasselbe Ergebnis (float32
     expect(report.nonManifoldEdgesAfter).toBe(0);
     expect(closedManifold(out.faces)).toBe(true);
     expect(volume(out.faces)).toBeCloseTo(2000, 3);
+    // flache Punktliste (parseStl) passt zu den verbliebenen Dreiecken
+    expect(out.vertices.length).toBe(out.faces.length * 9);
   }
 });
 

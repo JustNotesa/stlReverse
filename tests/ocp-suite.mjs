@@ -115,7 +115,7 @@ for (const f of readdirSync(join(ROOT, 'samples')).filter((x) => x.toLowerCase()
   for (const def of [true, false]) add(`${f} [${def ? 'AN' : 'AUS'}]`, quiet(() => buildVolumeStepBrepV2({ normalGroups: groups, defeature: def })));
 }
 for (const cs of CASES) {
-  const tris = cs.tris(), groups = groupsOfTris(tris), vSoll = wantVolume(cs, tris);
+  const tris = cs.tris(), groups = groupsOfTris(tris, cs), vSoll = wantVolume(cs, tris);
   for (const def of [true, false]) add(`${cs.name} [${def ? 'AN' : 'AUS'}]`, exportCase(groups, def), vSoll);
 }
 for (const p of process.argv.slice(2)) {
