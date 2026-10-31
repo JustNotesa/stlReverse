@@ -490,7 +490,16 @@ function triTriIntersect(V0, V1, V2, U0, U1, U2, eps) {
   const d1 = -dot3(n1, V0), d2 = -dot3(n2, U0);
   const dv = [dot3(n2, V0) + d2, dot3(n2, V1) + d2, dot3(n2, V2) + d2];
   const du = [dot3(n1, U0) + d1, dot3(n1, U1) + d1, dot3(n1, U2) + d1];
-  const coplanar = dv.every((x) => Math.abs(x) <= eps) && du.every((x) => Math.abs(x) <= eps);
+  // Koplanaritäts-Toleranz: bei sehr flachen Dreiecken (Splitter) ist die Ebene nur
+  // ungenau bestimmt, der Abstand zweier Flächen liegt dann im Bereich ~1e-7 mm, ohne
+  // dass ein echter Schnitt vorliegt. Für die Ebenen-Intersektion (Linie D) sind solche
+  // Paare ohnehin unbrauchbar (die Schnittgerade ist nicht bestimmt) — sie gehören in
+  // den 2D-Überlappungstest, der gut konditioniert ist.
+  const scale = Math.max(
+    len3(sub3(V1, V0)), len3(sub3(V2, V0)),
+    len3(sub3(U1, U0)), len3(sub3(U2, U0)));
+  const epsCop = Math.max(eps, scale * 1e-7);
+  const coplanar = dv.every((x) => Math.abs(x) <= epsCop) && du.every((x) => Math.abs(x) <= epsCop);
   if (coplanar) return coplanarOverlap(V0, V1, V2, U0, U1, U2, n1, eps);
   if (dv.every((x) => x > eps) || dv.every((x) => x < -eps)) return false;
   if (du.every((x) => x > eps) || du.every((x) => x < -eps)) return false;
@@ -500,27 +509,31 @@ function triTriIntersect(V0, V1, V2, U0, U1, U2, eps) {
   const tOf = (P) => dot3(sub3(P, V0), D);
   const tV = [], tU = [];
   const V = [V0, V1, V2], U = [U0, U1, U2];
-  for (let i = 0; i < 3; i++) {
-    const j = (i + 1) % 3;
-    if ((du[i] > eps && du[j] < -eps) || (du[i] < -eps && du[j] > eps)) {
-      const s = du[i] / (du[i] - du[j]);
-      const P = [
-        V[i][0] + s * (V[j][0] - V[i][0]),
-        V[i][1] + s * (V[j][1] - V[i][1]),
-        V[i][2] + s * (V[j][2] - V[i][2]),
-      ];
-      tV.push(tOf(P));
+  // Die Schnittgerade D liegt in beiden Ebenen. Die Strecke, die das Dreieck auf D
+  // abdeckt, ergibt sich aus den SCHNITTpunkten der eigenen Kanten mit der fremden
+  // Ebene: dv sind die Abstände der V-Ecken zur Ebene U (also wird V's Kante mit dv
+  // interpoliert), du die Abstände der U-Ecken zur Ebene V (U's Kante wird mit du
+  // interpoliert). Vertauscht man dv/du, kommen falsche Treffer heraus.
+  // Eine Ecke, die exakt auf der fremden Ebene liegt (|d| <= eps), liefert selbst
+  // ihren t-Wert (Berührungs-Fall) — sonst ginge der Kontakt verloren.
+  const intervalOf = (tri, d, out) => {
+    for (let i = 0; i < 3; i++) {
+      const j = (i + 1) % 3;
+      if (Math.abs(d[i]) <= eps) { out.push(tOf(tri[i])); continue; }
+      if (Math.abs(d[j]) <= eps) { out.push(tOf(tri[j])); continue; }
+      if ((d[i] > 0) !== (d[j] > 0)) {
+        const s = d[i] / (d[i] - d[j]);
+        const P = [
+          tri[i][0] + s * (tri[j][0] - tri[i][0]),
+          tri[i][1] + s * (tri[j][1] - tri[i][1]),
+          tri[i][2] + s * (tri[j][2] - tri[i][2]),
+        ];
+        out.push(tOf(P));
+      }
     }
-    if ((dv[i] > eps && dv[j] < -eps) || (dv[i] < -eps && dv[j] > eps)) {
-      const s = dv[i] / (dv[i] - dv[j]);
-      const P = [
-        U[i][0] + s * (U[j][0] - U[i][0]),
-        U[i][1] + s * (U[j][1] - U[i][1]),
-        U[i][2] + s * (U[j][2] - U[i][2]),
-      ];
-      tU.push(tOf(P));
-    }
-  }
+  };
+  intervalOf(V, dv, tV);
+  intervalOf(U, du, tU);
   if (!tV.length || !tU.length) return false;
   const tVmin = Math.min(...tV), tVmax = Math.max(...tV);
   const tUmin = Math.min(...tU), tUmax = Math.max(...tU);
