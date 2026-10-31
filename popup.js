@@ -10,7 +10,8 @@ import {
   setStatus, setExportEnabled,
   setProgress, progressStep, startIndeterminateProgress, stopIndeterminateProgress,
   initProgressSteps, resetProgressSteps, setProgressStepStatus, setLiveDetail,
-  handleWorkerProgress, getActiveStep, getStepByKey, setProgressStepCurrent
+  handleWorkerProgress, getActiveStep, getStepByKey, setProgressStepCurrent,
+  markProgressStepsFailed
 } from './ui.js?v=4';
 import {
   updateStats, resetStats, renderOutlines, clearOutlines
@@ -84,7 +85,11 @@ const exportOptions = () => ({
 const withExportOptions = (a) => (a ? { ...a, ...exportOptions() } : a);
 window.__exportOptions = exportOptions;
 
-const WORKER_TIMEOUT_MS = 60000;
+// Abbruchregeln für den Analyse-Worker:
+//   IDLE  — es kam eine Weile kein Fortschritt mehr (hängt die Analyse?)
+//   MAX   — harte Obergrenze, egal wie viel Fortschritt kommt.
+const WORKER_IDLE_TIMEOUT_MS = 45000;
+const WORKER_MAX_TIMEOUT_MS  = 300000;
 
 // Kleinste Detailgröße (mesh-clean.js im Worker): Kanten darunter werden vor der Analyse
 // kollabiert. 0 = aus. Standard 0,02 mm (Begründung in mesh-clean.js, Auswahl in popup.html).
@@ -95,7 +100,10 @@ const _minDetailMm = () => {
 
 // ── Worker setup ─────────────────────────────────────────────────────────────
 
-const analysisWorker = _createAnalysisWorker();
+let analysisWorker = null;
+// Hat der aktuelle Worker ein gecachtes Mesh? Nach einem Abbruch wird der Worker
+// neu gebaut — dann ist der Cache weg und die Datei muss vollständig neu rein.
+let workerCacheReady = false;
 
 function _createAnalysisWorker() {
   const workerUrl = extensionApi?.runtime?.getURL
@@ -104,6 +112,8 @@ function _createAnalysisWorker() {
   const worker = new Worker(workerUrl, { type: 'module' });
 
   worker.onmessage = (event) => {
+    // Nachrichten eines alten (abgebrochenen) Workers ignorieren.
+    if (worker !== analysisWorker) return;
     const { id, ok, analysis, message, progress } = event.data || {};
     const job = workerJobs.get(id);
     if (!job) return;
@@ -114,29 +124,78 @@ function _createAnalysisWorker() {
   };
 
   worker.onerror = (event) => {
+    if (worker !== analysisWorker) return;
     console.error('Analyse-Worker Fehler', event);
     const msg = event?.message || 'Analyse-Worker Fehler – Details in der Konsole.';
+    // Ein abgestürzter Worker hat kein verlässliches Mesh mehr im Cache.
+    workerCacheReady = false;
     workerJobs.forEach(({ reject }, id) => { reject(new Error(msg)); workerJobs.delete(id); });
   };
 
   return worker;
 }
 
+// Der Worker wird nach der Definition erzeugt (die Handler prüfen `analysisWorker`).
+analysisWorker = _createAnalysisWorker();
+
+/**
+ * Worker neu erzeugen: der alte rechnet im Hintergrund weiter (ein Worker kann
+ * keine laufende Arbeit abbrechen) — also terminate() + frischer Worker.
+ * Der Mesh-Cache des neuen Workers ist leer.
+ */
+function _recreateAnalysisWorker() {
+  try { analysisWorker?.terminate(); } catch (e) { console.warn('Worker terminate:', e?.message); }
+  analysisWorker = _createAnalysisWorker();
+  workerCacheReady = false;
+}
+
+/**
+ * Job abbrechen: Worker neu bauen und alle offenen Jobs des alten Workers
+ * ablehnen (sie hängen sonst ewig).
+ */
+function _abortWorkerJob(error) {
+  _recreateAnalysisWorker();
+  const pending = [...workerJobs.entries()];
+  workerJobs.clear();
+  pending.forEach(([, job]) => job.reject(error));
+}
+
 function _runWorkerAnalysis(buffer, fileName, detail, onProgress, { reanalyzeOnly = false } = {}) {
   return new Promise((resolve, reject) => {
-    const id    = ++workerJobCounter;
-    const timer = setTimeout(() => {
-      if (workerJobs.has(id)) {
-        workerJobs.delete(id);
-        reject(new Error('Analyse-Timeout: Die Verarbeitung hat zu lange gedauert (>60s). Versuche eine kleinere Datei.'));
-      }
-    }, WORKER_TIMEOUT_MS);
+    const id        = ++workerJobCounter;
+    const idleSec   = Math.round(WORKER_IDLE_TIMEOUT_MS / 1000);
+    const maxMin    = Math.round(WORKER_MAX_TIMEOUT_MS / 60000);
+    let idleTimer   = null;
+    let maxTimer    = null;
+
+    const clearTimers = () => {
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+      if (maxTimer)  { clearTimeout(maxTimer);  maxTimer = null; }
+    };
+
+    // Der Idle-Timer wird bei JEDER Fortschrittsmeldung neu gestartet.
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (!workerJobs.has(id)) return;
+        _abortWorkerJob(new Error(
+          `Analyse abgebrochen: Seit ${idleSec} s kein Fortschritt mehr – die Datei ist evtl. zu groß oder zu komplex.`));
+      }, WORKER_IDLE_TIMEOUT_MS);
+    };
+
+    maxTimer = setTimeout(() => {
+      if (!workerJobs.has(id)) return;
+      _abortWorkerJob(new Error(
+        `Analyse abgebrochen: Sie hat länger als ${maxMin} Minuten gedauert. Versuche eine kleinere Datei.`));
+    }, WORKER_MAX_TIMEOUT_MS);
 
     workerJobs.set(id, {
-      resolve: (r)   => { clearTimeout(timer); resolve(r); },
-      reject:  (err) => { clearTimeout(timer); reject(err); },
-      progress: onProgress
+      resolve: (r)   => { clearTimers(); resolve(r); },
+      reject:  (err) => { clearTimers(); reject(err); },
+      progress: (p)  => { resetIdleTimer(); onProgress?.(p); }
     });
+
+    resetIdleTimer();
 
     if (reanalyzeOnly) {
       analysisWorker.postMessage({ id, fileName, detailLevel: detail, reanalyzeOnly: true });
@@ -287,8 +346,13 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
   let readDone = false;
 
   resetProgressSteps(reason, sizeLabel);
-  if (reason === 'upload') setProgressStepStatus('read', 'active', 'liest Datei …');
-  else                     setProgressStepStatus('read', 'done', 'Cache');
+  if (reason === 'upload') {
+    // Schritt 1 bleibt aktiv, bis der Worker „STL gelesen“ meldet.
+    setProgressStepStatus('read', 'active', 'liest Datei …');
+  } else {
+    setProgressStepStatus('read', 'done', 'Cache');
+    setProgressStepStatus('prepare', 'active', 'Analyse wird initialisiert …');
+  }
 
   try {
     if (reason !== 'detail') {
@@ -324,14 +388,14 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
     if (_exportBtn) _exportBtn.disabled = true;
     if (_exportTriBtn) _exportTriBtn.disabled = true;
     await progressStep(0.2, reason === 'upload' ? 'Analyse-Worker wird vorbereitet …' : 'Neue Konturen werden berechnet …');
-    if (reason === 'upload') setProgressStepStatus('read', 'done', sizeLabel ? `~${sizeLabel}` : 'fertig');
-    setProgressStepStatus('prepare', 'active', 'Analyse wird initialisiert …');
 
-    const workerLabel   = `Analyse läuft … (~${sizeLabel}) · Detail ${detailLevel}%`;
-    const reanalyzeOnly = reason === 'detail';
-    const workerBuffer  = reanalyzeOnly ? null : buffer.slice(0);
-    setProgressStepStatus('prepare', 'done', 'bereit');
-    setProgressStepStatus('projection', 'active', 'Projektionen berechnen …');
+    const workerLabel = `Analyse läuft … (~${sizeLabel}) · Detail ${detailLevel}%`;
+    // Nach einem Worker-Abbruch (Timeout) ist der Mesh-Cache im Worker weg.
+    // Dann muss die Datei vollständig neu geschickt werden — sonst antwortet
+    // der Worker mit „Kein Buffer übergeben“.
+    const useCache     = reason === 'detail' && workerCacheReady;
+    const reanalyzeOnly = useCache;
+    const workerBuffer  = useCache ? null : buffer.slice(0);
     setLiveDetail(workerLabel);
     startIndeterminateProgress(0.25, workerLabel);
 
@@ -345,6 +409,8 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
       { reanalyzeOnly }
     );
     lastAnalysis = analysis;
+    // Der Worker hat das Mesh jetzt im Cache → ein Detail-Lauf darf ihn nutzen.
+    if (!useCache) workerCacheReady = true;
 
     paramOutput.value = JSON.stringify(analysis.parametric, null, 2);
     setPreviewData(analysis.previewPoints, analysis.boundingBox);
@@ -424,6 +490,9 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
     // (vor resetUI — das setzt den aktiven Schritt zurück)
     const step = (reason === 'upload' && !readDone) ? getStepByKey('read') : getActiveStep();
     resetUI('Fehler', null);
+    // Die Liste nicht zurücksetzen: fertige Schritte bleiben abgehakt, der
+    // gescheiterte wird rot, die folgenden bleiben offen.
+    markProgressStepsFailed(step?.key);
     setStatus(`Fehler beim Einlesen: ${error.message}`, 'error');
     setLiveDetail('Fehler beim Einlesen');
     const stepText = step ? `Abgebrochen bei Schritt ${step.index}: ${step.label}` : 'Abgebrochen';

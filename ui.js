@@ -33,6 +33,7 @@ const stepElements = new Map();
 let currentProgressValue = 0;
 let indeterminateTimer   = null;
 let activeStepKey        = null;   // zuletzt aktiver Schritt (für „Abgebrochen bei Schritt N“)
+let furthestStepIndex    = -1;     // weitester erreichter Schritt — die Liste läuft nie rückwärts
 
 const DEFAULT_LABEL = 'Bereit';
 const DEFAULT_STATS = '–';
@@ -127,6 +128,7 @@ export function resetProgressSteps(reason = 'upload', sizeLabel = '') {
   // Aktiven Schritt und Textzeile zuerst zurücksetzen — die folgenden Aufrufe
   // setzen nur den Listen-Zustand und niemals den Text.
   activeStepKey = null;
+  furthestStepIndex = -1;
   setProgressStepCurrent('');
 
   STEP_DEFS.forEach(({ key }) => setProgressStepStatus(key, 'pending', ''));
@@ -148,12 +150,35 @@ export function setProgressStepStatus(key, status, detailText = '') {
     }
   }
 
+  // Der weiteste erreichte Schritt merken — die Schrittliste läuft nie rückwärts.
+  if (status === 'active' || status === 'done') {
+    const def = _stepDef(key);
+    if (def && def.index > furthestStepIndex) furthestStepIndex = def.index;
+  }
+
   const entry = stepElements.get(key);
   if (!entry) return;
   const { element, detailEl } = entry;
-  element.classList.remove('status--pending', 'status--active', 'status--done');
+  element.classList.remove('status--pending', 'status--active', 'status--done', 'status--error');
   element.classList.add(`status--${status}`);
   if (detailEl) detailEl.textContent = detailText || '';
+}
+
+/**
+ * Nach einem Fehler die Schrittliste markieren: fertige Schritte bleiben
+ * abgehakt, der gescheiterte Schritt wird rot, die folgenden bleiben offen.
+ * @param {string} [key]  Schlüssel des gescheiterten Schritts (leer → aktiver Schritt, sonst 'read')
+ */
+export function markProgressStepsFailed(key) {
+  const failed = _stepDef(key || activeStepKey || 'read') || _stepDef('read');
+  if (!failed) return;
+  STEP_DEFS.forEach(({ key: k }) => {
+    const def = _stepDef(k);
+    if (!def) return;
+    if (def.index < failed.index)       setProgressStepStatus(k, 'done', '✓');
+    else if (def.index === failed.index) setProgressStepStatus(k, 'error', 'Fehler');
+    else                                 setProgressStepStatus(k, 'pending', '');
+  });
 }
 
 /**
@@ -216,8 +241,13 @@ export function handleWorkerProgress(payload) {
     : detail || _formatWorkerDetail(processed, total, liveLabel);
 
   const stageKey = _mapToStageKey(stage || detail);
-  if (stageKey) {
-    const ORDER = ['prepare', 'projection', 'planar', 'cylinder', 'cone', 'sphere', 'volume'];
+  const stepDef  = stageKey ? _stepDef(stageKey) : null;
+  // Die Liste läuft nie rückwärts: eine Nachricht zu einem früheren Schritt
+  // ändert den Zustand nicht (nur der Live-Text wandert weiter).
+  if (stageKey && stepDef && stepDef.index >= furthestStepIndex) {
+    // „STL gelesen“ heißt: die Datei ist eingelesen → Schritt 1 abhaken.
+    if (_isReadFinished(detail)) setProgressStepStatus('read', 'done', '✓');
+    const ORDER = ['read', 'prepare', 'projection', 'planar', 'cylinder', 'cone', 'sphere', 'volume'];
     const idx   = ORDER.indexOf(stageKey);
     if (idx > 0) {
       ORDER.slice(0, idx).forEach((k) => {
@@ -247,14 +277,32 @@ function _stepDef(key) {
 function _mapToStageKey(detail) {
   if (!detail) return null;
   const l = detail.toLowerCase();
+  // Reihenfolge zählt: die frühen Prüfungen müssen VOR den generischen stehen —
+  // „kon“ steckt in vielen Wörtern, „flächen“ in Flächenzahlen.
+  if (l.includes('stl wird gelesen')) return 'read';
+  if (l.includes('stl gelesen') ||
+      l.includes('mikro-kanten') ||
+      l.includes('netz bereinigt') ||
+      l.includes('vereinfach') ||
+      l.includes('simplify') ||
+      l.includes('cache genutzt') ||
+      l.includes('vorverarbeitung') ||
+      l.includes('vorbereitung') ||
+      l.includes('bounds'))                            return 'prepare';
   if (l.includes('projektion'))                      return 'projection';
   if (l.includes('planar') || l.includes('flächen')) return 'planar';
   if (l.includes('zylind') || l.includes('axial'))   return 'cylinder';
   if (l.includes('kegel')  || l.includes('kon'))     return 'cone';
   if (l.includes('kugel')  || l.includes('sphär'))   return 'sphere';
   if (l.includes('volumen') || l.includes('heightfield')) return 'volume';
-  if (l.includes('vorbereitung') || l.includes('bounds')) return 'prepare';
   return null;
+}
+
+// Meldet der Worker, dass die Datei vollständig eingelesen ist?
+function _isReadFinished(detail) {
+  if (!detail) return false;
+  const l = detail.toLowerCase();
+  return l.includes('stl gelesen') && !l.includes('stl wird gelesen');
 }
 
 function _formatWorkerDetail(processed, total, label = 'Analyse läuft …') {
