@@ -22,7 +22,7 @@ import { pathToFileURL } from 'url';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { GRAVUR_BODIES, buildGravurMesh } from './gravur-bodies.mjs';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
@@ -39,7 +39,6 @@ const { buildVolumeStepBrepV2 } = await import(
 const require = createRequire(import.meta.url);
 const { getOcct } = require('./occt-check.cjs');
 
-const MAX_FACES = 50000;            // wie analysis-worker.js
 // Feine occt-Tessellierung (wie in tests/fixtures-v2/check.mjs)
 const OCCT_PARAMS = { linearUnit: 'millimeter', linearDeflectionType: 'absolute_value', linearDeflection: 0.001, angularDeflection: 0.02 };
 const VOL_TOL = 1e-3;               // |ΔV| / V_mesh
@@ -54,7 +53,8 @@ const quiet = (fn) => { console.log = () => {}; try { return fn(); } finally { c
 // Pipeline wie im Worker (tests/fixtures-v2/check.mjs)
 function pipeline(mesh) {
   mesh = cleanMesh(mesh).mesh;
-  if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified
     .sort((a, b) => b.vertices.length - a.vertices.length);
   const { stats } = recognizePrimitives(groups);

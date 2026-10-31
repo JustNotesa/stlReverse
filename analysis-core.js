@@ -2,6 +2,11 @@
 // hier nur weitergereicht, damit Worker und Tests sie wie bisher aus analysis-core.js holen.
 import { simplifyMesh } from './mesh-simplify.js?v=1';
 
+// Ab welcher Dreieckszahl der Worker vereinfacht und auf welches Ziel — eine Quelle für Worker und Tests.
+// Messwerte und Begründung: TODO.md, Eintrag „Saubere Netz-Vereinfachung“.
+const SIMPLIFY_ABOVE = 100000;
+const SIMPLIFY_TARGET = 100000;
+
 function parseStl(buffer, progressCb) {
   if (!buffer?.byteLength) throw new Error('Leere Datei');
   const bytes = new Uint8Array(buffer);
@@ -570,6 +575,8 @@ export {
   parseStl,
   analyseMesh,
   simplifyMesh,
+  SIMPLIFY_ABOVE,
+  SIMPLIFY_TARGET,
   projectOutline,
   computeBoundingBox
 };

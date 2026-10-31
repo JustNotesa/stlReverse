@@ -46,7 +46,7 @@
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { cleanMesh } from '../mesh-clean.js';
@@ -58,14 +58,14 @@ import { checkStepStrict } from './step-strict.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLES = join(__dirname, '..', 'samples');
-const MAX_FACES = 50000;
 
 
 function exportFor(file) {
   const buf = readFileSync(join(SAMPLES, file));
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   let mesh = cleanMesh(parseStl(ab, () => {})).mesh;   // Netz-Bereinigung wie im Worker
-  if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   let groups = buildNormalGroups(mesh);
   const { unified } = unifyCoplanarGroups(groups);
   groups = unified.sort((a, b) => b.vertices.length - a.vertices.length);

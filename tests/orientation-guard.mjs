@@ -33,7 +33,7 @@
 import { readFileSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
@@ -46,7 +46,6 @@ import * as G from './fixtures-v2/gen.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLES = join(__dirname, '..', 'samples');
-const MAX_FACES = 50000;            // wie analysis-worker.js
 const STRESS = process.argv.includes('--stress');
 const EBIKE_PLAIN = 'fischerEbike - FahrradLicht - mount unter sattel(ohne rundungen).stl';
 const EBIKE = 'fischerEbike - FahrradLicht - mount unter sattel.stl';
@@ -56,7 +55,8 @@ const quiet = (fn) => { console.log = () => {}; try { return fn(); } finally { c
 
 function groupsOf(mesh) {
   mesh = cleanMesh(mesh).mesh;   // Netz-Bereinigung wie im Worker
-  if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   recognizePrimitives(groups);
   detectTubes(groups);

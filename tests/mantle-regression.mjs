@@ -25,7 +25,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { createRequire } from 'module';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
@@ -45,7 +45,8 @@ const quiet = (fn) => { console.log = () => {}; try { return fn(); } finally { c
 // ---- Pipeline wie im Worker
 const groupsOfMesh = (mesh) => {
   mesh = cleanMesh(mesh).mesh;   // Netz-Bereinigung wie im Worker
-  if (mesh.faces.length > 50000) mesh = simplifyMesh(mesh, 50000, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   quiet(() => recognizePrimitives(groups));
   quiet(() => detectTubes(groups));
