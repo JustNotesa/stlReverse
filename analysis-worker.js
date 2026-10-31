@@ -1,4 +1,4 @@
-import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=3';
+import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=4';
 import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=16';
@@ -18,7 +18,10 @@ const sanitizeRatio = (value) => {
   return Math.max(0, Math.min(0.98, value));
 };
 
-const MAX_FACES = 50000;
+// Netz-Vereinfachung (mesh-simplify.js): erst AB dieser Dreieckszahl, dann auf das Ziel. Begründung und
+// Messwerte (Bremsgriff, synthetische 200k/500k-Körper) in TODO.md, Eintrag „Saubere Netz-Vereinfachung“.
+const SIMPLIFY_ABOVE = 100000;
+const SIMPLIFY_TARGET = 100000;
 let cachedMesh = null;
 let cachedFileName = null;
 let cachedClean = null;   // Bericht der Netz-Bereinigung zum gecachten Netz
@@ -86,16 +89,16 @@ self.addEventListener('message', (event) => {
       }
 
       // Simplify if mesh exceeds threshold
-      if (mesh.faces.length > MAX_FACES) {
+      if (mesh.faces.length > SIMPLIFY_ABOVE) {
         self.postMessage({
           id,
           progress: {
             step: 'worker',
-            detail: `Vereinfache Mesh (${mesh.faces.length.toLocaleString?.('de-DE') || mesh.faces.length} → ${MAX_FACES.toLocaleString?.('de-DE') || MAX_FACES})`,
+            detail: `Vereinfache Mesh (${mesh.faces.length.toLocaleString?.('de-DE') || mesh.faces.length} → ${SIMPLIFY_TARGET.toLocaleString?.('de-DE') || SIMPLIFY_TARGET})`,
             ratio: 0.40
           }
         });
-        mesh = simplifyMesh(mesh, MAX_FACES, ({ processed, total }) => {
+        mesh = simplifyMesh(mesh, SIMPLIFY_TARGET, ({ processed, total }) => {
           if (!processed || !total) return;
           self.postMessage({
             id,

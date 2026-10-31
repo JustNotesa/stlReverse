@@ -12,7 +12,7 @@ import {
   initProgressSteps, resetProgressSteps, setProgressStepStatus, setLiveDetail,
   handleWorkerProgress, getActiveStep, getStepByKey, setProgressStepCurrent,
   markProgressStepsFailed
-} from './ui.js?v=4';
+} from './ui.js?v=5';
 import {
   updateStats, resetStats, renderOutlines, clearOutlines
 } from './tables.js';
@@ -108,7 +108,7 @@ let workerCacheReady = false;
 function _createAnalysisWorker() {
   const workerUrl = extensionApi?.runtime?.getURL
     ? extensionApi.runtime.getURL('analysis-worker.js')
-    : 'analysis-worker.js?v=24';
+    : 'analysis-worker.js?v=25';
   const worker = new Worker(workerUrl, { type: 'module' });
 
   worker.onmessage = (event) => {
@@ -493,8 +493,10 @@ async function runAnalysis({ buffer, fileName, reason = 'upload', fileSize = 0 }
     // Die Liste nicht zurücksetzen: fertige Schritte bleiben abgehakt, der
     // gescheiterte wird rot, die folgenden bleiben offen.
     markProgressStepsFailed(step?.key);
-    setStatus(`Fehler beim Einlesen: ${error.message}`, 'error');
-    setLiveDetail('Fehler beim Einlesen');
+    // „beim Einlesen“ nur, wenn es wirklich beim Einlesen scheiterte (sonst irreführend).
+    const where = (!step || step.key === 'read') ? 'beim Einlesen' : 'bei der Analyse';
+    setStatus(`Fehler ${where}: ${error.message}`, 'error');
+    setLiveDetail(`Fehler ${where}`);
     const stepText = step ? `Abgebrochen bei Schritt ${step.index}: ${step.label}` : 'Abgebrochen';
     setProgressStepCurrent(stepText);
     renderVerdictError(error.message, stepText);
