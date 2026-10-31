@@ -1,5 +1,5 @@
 import { formatBytesDe, describeDetailLevel } from './utils.js?v=2';
-import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=50';
+import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=51';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=32';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=22';
@@ -38,8 +38,8 @@ const detailSlider       = document.getElementById('detail-level');
 const detailValueLabel   = document.getElementById('detail-value');
 const detailHint         = document.getElementById('detail-hint');
 
-// Basis-Hilfetext des Schalters „Blech-Biegungen schärfen“ (einmal gelesen).
-const SHARPEN_BENDS_HELP_BASE = (document.getElementById('sharpen-bends-help')?.textContent || '').trim();
+// Basis-Hilfetext des Schalters „Biegungen mit gleicher Wandstärke rund lassen“ (einmal gelesen).
+const KEEP_BENDS_HELP_BASE = (document.getElementById('keep-bends-help')?.textContent || '').trim();
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -72,7 +72,8 @@ let workerJobCounter = 0;
 // Alle vier sind EXPORT-Optionen (Hauptthread, buildVolumeStepBrepV2) und keine
 // Worker-Optionen: eine Änderung rechnet nur das Verdikt neu, nicht die Analyse.
 const _defeatureOn       = () => document.getElementById('defeature-toggle')?.checked !== false;
-const _sharpenBendsOn    = () => document.getElementById('sharpen-bends-toggle')?.checked === true;
+// Standard AN („rund lassen“) → schärfen nur, wenn der Schalter AUS ist.
+const _sharpenBendsOn    = () => document.getElementById('keep-bends-toggle')?.checked === false;
 const _extrusionBandsOn  = () => document.getElementById('extrusion-bands-toggle')?.checked !== false;  // Standard AN
 const _fitSegmentationOn = () => document.getElementById('fit-segmentation-toggle')?.checked === true;  // Standard AUS
 const exportOptions = () => ({
@@ -489,15 +490,15 @@ function setFigStepMeta(faceCount) {
   el.textContent = `${n} Flächen`;
 }
 
-/** Schalter „Blech-Biegungen schärfen“: nur mit „Verrundungen entfernen“ wirksam. */
-function syncSharpenBends() {
-  const toggle = document.getElementById('sharpen-bends-toggle');
-  const help   = document.getElementById('sharpen-bends-help');
+/** Schalter „Biegungen mit gleicher Wandstärke rund lassen“: nur mit „Verrundungen entfernen“ wirksam. */
+function syncKeepBends() {
+  const toggle = document.getElementById('keep-bends-toggle');
+  const help   = document.getElementById('keep-bends-help');
   if (toggle) toggle.disabled = !_defeatureOn();
   if (help) {
     help.textContent = _defeatureOn()
-      ? SHARPEN_BENDS_HELP_BASE
-      : 'Nur zusammen mit „Verrundungen entfernen“ wirksam. ' + SHARPEN_BENDS_HELP_BASE;
+      ? KEEP_BENDS_HELP_BASE
+      : 'Nur zusammen mit „Verrundungen entfernen“ wirksam. ' + KEEP_BENDS_HELP_BASE;
   }
 }
 
@@ -709,7 +710,7 @@ document.getElementById('min-detail-select')?.addEventListener('change', async (
 
 // Gemeinsamer Handler für alle vier Export-Schalter (ui-spec.md 6.1).
 async function onExportOptionChange() {
-  syncSharpenBends();
+  syncKeepBends();
   // Die Schalter wirken nur im Zustand „fertig“ — im Fehler-, Lauf- oder Leerzustand
   // gibt es kein Ergebnis, das neu berechnet werden könnte.
   if (document.body.dataset.state !== 'done') return;
@@ -739,7 +740,7 @@ async function onExportOptionChange() {
 }
 
 document.getElementById('defeature-toggle')?.addEventListener('change', onExportOptionChange);
-document.getElementById('sharpen-bends-toggle')?.addEventListener('change', onExportOptionChange);
+document.getElementById('keep-bends-toggle')?.addEventListener('change', onExportOptionChange);
 document.getElementById('extrusion-bands-toggle')?.addEventListener('change', onExportOptionChange);
 document.getElementById('fit-segmentation-toggle')?.addEventListener('change', onExportOptionChange);
 
@@ -796,7 +797,7 @@ initViewToggle();
 initFullscreen();
 initFormatsMenu();
 initDocumentDrop({ onFile: (file) => handleFile(file) });
-syncSharpenBends();
+syncKeepBends();
 
 initProgressSteps();
 initPreviewEvents();

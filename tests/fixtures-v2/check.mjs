@@ -301,9 +301,13 @@ function bendsSharpVariant(body) {
   const raw = body.bends.pts.map((p) => [p[0], p[1]]);
   const bodyC = { ...body, columns: body.columns.map((cc, i) => (i === col ? { ...cc, profile: raw } : cc)) };
   const tris = f32(buildMesh(bodyC));
+  // Gefaste Stirnseiten (p4/p6/p7): seit v2d (exporters.js, defeatureChamferCorners) wird die Biegung
+  // auch dort scharf, die Fase läuft als Gehrung um die Ecke → Soll = Rohprofil MIT den Fasen (Netz-Volumen
+  // des Körpers mit Rohprofil und denselben Enden); scharfe Enden: Fläche × Höhe wie bisher.
+  const sharpEnds = [c.bottom, c.top].every((sp) => !sp || sp.kind === 'sharp');
   return {
     label: 'Blech-Biegungen scharf (Rohprofil)', sharpCount: 0, sharpMax: 0, planar: true, tris,
-    volume: Math.abs(polyArea(raw)) * (c.z1 - c.z0), tol: tolPlanar, target: true,
+    volume: sharpEnds ? Math.abs(polyArea(raw)) * (c.z1 - c.z0) : meshVolume(tris), tol: tolPlanar, target: true,
   };
 }
 

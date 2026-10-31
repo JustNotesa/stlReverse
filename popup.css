@@ -503,6 +503,12 @@ details.formats { position: relative; }
 }
 .opt--select { grid-template-columns: minmax(0, 1fr); }
 .opt--select > label, .opt--select > select, .opt--select > .opt__help { grid-column: 1; }
+/* Unterpunkt (z. B. „Biegungen … rund lassen“): eingerückt unter „Verrundungen entfernen“. */
+.opt--sub {
+  margin-left: 1.75rem; border-top: 0; padding-top: 0;
+}
+.opt--sub:has(> input:disabled) { opacity: .5; }
+.opt--sub > input:disabled + label { cursor: default; }
 details.opt-adv > summary {
   padding: 10px 0; border-top: 1px solid var(--border);
   font-weight: 600; cursor: pointer;

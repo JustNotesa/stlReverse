@@ -17,6 +17,7 @@
 //   schalen      shell-regression.mjs       — Hohlräume, invertierte Netze, Finnen, berührende Körper,
 //                                             offene Fremdteile, Freigang der Kreis-Umwandlung
 //   lagen        lagen-regression.mjs       — Netz-Bereinigung in 12 Lagen (Spalten-Kollaps ≤ ohne)
+//   eckfasen     eck-fasen-regression.mjs   — gefaste Profil-Eckrundungen (v2d) + Box-Ecken gleicher Wandstärke, 4 Lagen
 //   ocp          ocp-suite.mjs              — volles OpenCascade (OCP, Python) als zweiter Prüfer:
 //                                             alle Samples + Schalen-Körper; ohne OCP übersprungen
 //   freeform     tests/freeform/*.test.mjs  — Freiform-Pfad (Etappe 1): Geometrie, Segmentierung, Snap, Topologie, B-Rep, STEP
@@ -60,6 +61,7 @@ const SUITES = [
     'tests/freeform/topo.test.mjs'] },
   { name: 'gravur',      args: ['tests/gravur-regression.mjs'] },
   { name: 'lagen',       args: ['tests/lagen-regression.mjs'] },
+  { name: 'eckfasen',    args: ['tests/eck-fasen-regression.mjs'] },
 ];
 
 const results = [];
