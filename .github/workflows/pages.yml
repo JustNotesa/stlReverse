@@ -1,0 +1,38 @@
+# Veröffentlicht die Web-Version (dieselben Dateien wie das Add-on) auf GitHub Pages.
+# Nur App-Dateien, keine Tests/Samples. popup.html wird zusätzlich als index.html ausgeliefert.
+name: Web-Version (GitHub Pages)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Seite zusammenstellen
+        run: |
+          mkdir -p _site
+          for f in *.js; do
+            case "$f" in background.js|segmentation.js) ;; *) cp "$f" _site/ ;; esac
+          done
+          cp popup.html popup.css _site/
+          cp popup.html _site/index.html
+          cp -r libs icons _site/
+          touch _site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
