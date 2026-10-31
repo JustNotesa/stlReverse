@@ -25,7 +25,8 @@ export const SIMPLIFY_DEFAULTS = {
   maxDegree: 24,         // F2: maximaler Vertexgrad (je Pass verdoppelt)
   intersectionCheck: true, // F3b: lokale Durchdringungsprüfung je Kollaps
   placement: 'endpoint', // F6: 'endpoint' (nur Endpunkte) | 'optimal'
-  qTol: 0.999            // F1: multiplikative Toleranz der Qualitätsschranke
+  qTol: 0.999,           // F1: multiplikative Toleranz der Qualitätsschranke
+  wallGuard: true        // H2: Dünnwand-Wächter (Kreuzung der gegenüberliegenden Wand)
 };
 
 /** Scratch-Ergebnis der Kostenberechnung (keine Allokation im heißen Loop). */
@@ -533,6 +534,183 @@ function buildQuadrics(T, O) {
   return { Q, fcount, featNbr };
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   H2 — Dünnwand-Wächter: Kreuzung der gegenüberliegenden Wand.
+
+   Problem: bei dünnen Wänden (Rohr, Schale) kann die vereinfachte Fläche die
+   gegenüberliegende Wand überschreiten — der lokale 2-Ring-Test sieht sie nicht.
+
+   Der Wächter arbeitet direkt auf dem ORIGINAL-Mesh: statisches BVH über die
+   Originaldreiecke (normierte Koordinaten; P0/F0 halten den Ausgangszustand
+   fest, weil sich P/F während der Vereinfachung ändern).  Für jedes neue
+   Ringdreieck T' eines Kollapses wird die BBox von T' im BVH abgefragt; jedes
+   dort gefundene Originaldreieck O mit entgegengesetzter Normale
+   (dot(n_T', n_O) < -0.2 — nur die gegenüberliegende Fläche zählt) wird mit dem
+   exakten Dreieck–Dreieck-Test geprüft (T' mit aktuellen, O mit
+   Originalkoordinaten).  Ein Treffer ⇒ Ablehnung (rejected.wall).
+   Der Wächter wird in KEINEM Pass gelockert.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/** Quickselect: arr[lo..hi) so umsortieren, dass arr[k] der k-te Wert ist. */
+function quickSelect(arr, lo, hi, k, coord) {
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    const x = coord[arr[lo]], y = coord[arr[mid]], z = coord[arr[hi - 1]];
+    let pivot;
+    if (x < y) pivot = (y < z) ? y : ((x < z) ? z : x);
+    else pivot = (x < z) ? x : ((y < z) ? z : y);
+    let i = lo, j = hi - 1;
+    while (i <= j) {
+      while (i < hi && coord[arr[i]] < pivot) i++;
+      while (j >= lo && coord[arr[j]] > pivot) j--;
+      if (i <= j) { const t = arr[i]; arr[i] = arr[j]; arr[j] = t; i++; j--; }
+    }
+    if (k <= j) { const nh = j + 1; if (nh >= hi) break; hi = nh; }
+    else if (k >= i) { if (i <= lo) break; lo = i; }
+    else return;
+  }
+}
+
+/** Statisches BVH über die Dreiecke (flache typisierte Arrays, Median-Split). */
+class TriBVH {
+  constructor(F, P, Fc, faceBad) {
+    this.F = F; this.P = P;
+    let n = 0;
+    for (let f = 0; f < Fc; f++) if (!faceBad[f]) n++;
+    this.n = n;
+    this.tri = new Int32Array(n);
+    // Schwerpunkt je Dreiecks-ID (Indexierung wie die Dreiecksliste)
+    this.cx = new Float64Array(Fc); this.cy = new Float64Array(Fc); this.cz = new Float64Array(Fc);
+    // Einheitsnormale je Dreiecks-ID (H2: Gegen-Flächen-Erkennung)
+    this.tn = new Float64Array(3 * Fc);
+    let k = 0;
+    for (let f = 0; f < Fc; f++) {
+      if (faceBad[f]) continue;
+      this.tri[k++] = f;
+      const a = F[3 * f], b = F[3 * f + 1], c = F[3 * f + 2];
+      this.cx[f] = (P[3 * a] + P[3 * b] + P[3 * c]) / 3;
+      this.cy[f] = (P[3 * a + 1] + P[3 * b + 1] + P[3 * c + 1]) / 3;
+      this.cz[f] = (P[3 * a + 2] + P[3 * b + 2] + P[3 * c + 2]) / 3;
+      const ax = P[3 * a], ay = P[3 * a + 1], az = P[3 * a + 2];
+      const ux = P[3 * b] - ax, uy = P[3 * b + 1] - ay, uz = P[3 * b + 2] - az;
+      const vx = P[3 * c] - ax, vy = P[3 * c + 1] - ay, vz = P[3 * c + 2] - az;
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 0) { this.tn[3 * f] = nx / len; this.tn[3 * f + 1] = ny / len; this.tn[3 * f + 2] = nz / len; }
+    }
+    const cap = 2 * n + 4;
+    this.bmin = new Float64Array(3 * cap);
+    this.bmax = new Float64Array(3 * cap);
+    // H2: Box der Einheitsnormalen je Knoten (min/max je Komponente) — damit
+    //     kann ein ganzer Teilbaum übersprungen werden, wenn in ihm kein
+    //     Dreieck gegen die geprüfte Fläche zeigen kann.
+    this.nb = new Float64Array(6 * cap);
+    this.lc = new Int32Array(cap);      // Blatt: Start / Innen: linkes Kind
+    this.rc = new Int32Array(cap);      // Blatt: Anzahl / Innen: rechtes Kind
+    this.leaf = new Uint8Array(cap);    // 1 = Blatt
+    this.nNodes = 0;
+    this.stQ = new Int32Array(128);        // Stack der BBox-Abfrage (keine Allokation)
+    if (n > 0) this._node(0, 0, n);
+  }
+
+  /** Knoten aufbauen (Median-Split auf der längsten Achse, Blatt ≤ 4 Dreiecke). */
+  _node(node, start, count) {
+    const F = this.F, P = this.P, tri = this.tri, cx = this.cx, cy = this.cy, cz = this.cz;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    // Ausdehnung der SCHWERPUNKTE (nicht der BBox): bei langen, schmalen
+    // Dreiecken (Rohrwände, Nadeln) ist die BBox-Achse entartet — der Median-
+    // Split auf der Schwerpunktachse bleibt dagegen räumlich sortiert.
+    let c0 = Infinity, d0 = Infinity, e0 = Infinity, c1 = -Infinity, d1 = -Infinity, e1 = -Infinity;
+    for (let i = start; i < start + count; i++) {
+      const t = tri[i];
+      for (let k = 0; k < 3; k++) {
+        const v = F[3 * t + k];
+        const x = P[3 * v], y = P[3 * v + 1], z = P[3 * v + 2];
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+        if (z < z0) z0 = z; if (z > z1) z1 = z;
+      }
+      const gx = cx[t], gy = cy[t], gz = cz[t];
+      if (gx < c0) c0 = gx; if (gx > c1) c1 = gx;
+      if (gy < d0) d0 = gy; if (gy > d1) d1 = gy;
+      if (gz < e0) e0 = gz; if (gz > e1) e1 = gz;
+    }
+    const b = node * 3;
+    this.bmin[b] = x0; this.bmin[b + 1] = y0; this.bmin[b + 2] = z0;
+    this.bmax[b] = x1; this.bmax[b + 1] = y1; this.bmax[b + 2] = z1;
+    if (count <= 4) { this.leaf[node] = 1; this.lc[node] = start; this.rc[node] = count; this._leafBox(node, start, count); return; }
+    const ex = c1 - c0, ey = d1 - d0, ez = e1 - e0;
+    let coord = cx, e = ex;
+    if (ey > e) { coord = cy; e = ey; }
+    if (ez > e) { coord = cz; e = ez; }
+    const mid = start + (count >> 1);
+    quickSelect(this.tri, start, start + count, mid, coord);
+    const l = this.nNodes++, r = this.nNodes++;
+    this.lc[node] = l; this.rc[node] = r;
+    this._node(l, start, mid - start);
+    this._node(r, mid, start + count - mid);
+    // Normalen-Box der Kinder vereinigen
+    const nb = this.nb, q = node * 6, ql = l * 6, qr = r * 6;
+    for (let i = 0; i < 3; i++) {
+      nb[q + 2 * i] = Math.min(nb[ql + 2 * i], nb[qr + 2 * i]);
+      nb[q + 2 * i + 1] = Math.max(nb[ql + 2 * i + 1], nb[qr + 2 * i + 1]);
+    }
+  }
+
+  /** Normalen-Box eines Blatts (H2: Knoten-Prüfung gegen die Gegenfläche). */
+  _leafBox(node, start, count) {
+    const nb = this.nb, tn = this.tn, tri = this.tri, q = node * 6;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (let i = start; i < start + count; i++) {
+      const t = tri[i];
+      const x = tn[3 * t], y = tn[3 * t + 1], z = tn[3 * t + 2];
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    nb[q] = x0; nb[q + 1] = x1; nb[q + 2] = y0; nb[q + 3] = y1; nb[q + 4] = z0; nb[q + 5] = z1;
+  }
+
+  /**
+   * H2: Dreiecks-IDs, deren BVH-Knoten die angegebene BBox überlappen UND
+   * deren Normale gegen die Prüffläche zeigen können (dot < -0.2).
+   * Traversal mit einem expliziten typisierten Stack (keine Allokation).
+   * @param {number[]} out - Scratch (Dreiecks-IDs)
+   * @returns {number} Anzahl der gefundenen Dreiecke (gekappt auf out.length)
+   */
+  queryBox(x0, y0, z0, x1, y1, z1, nx, ny, nz, out) {
+    const bmin = this.bmin, bmax = this.bmax, lc = this.lc, rc = this.rc;
+    const leaf = this.leaf, tri = this.tri, st = this.stQ, nb = this.nb;
+    let sp = 0, cnt = 0;
+    st[sp++] = 0;
+    while (sp > 0) {
+      const node = st[--sp], b = node * 3;
+      if (bmin[b] > x1 || bmax[b] < x0) continue;
+      if (bmin[b + 1] > y1 || bmax[b + 1] < y0) continue;
+      if (bmin[b + 2] > z1 || bmax[b + 2] < z0) continue;
+      // Untergrenze des Skalarprodukts über die Normalen-Box des Knotens:
+      // ist sie >= -0.2, kann in diesem Teilbaum kein Dreieck gegen die
+      // Prüffläche zeigen ⇒ Teilbaum überspringen.
+      const q = node * 6;
+      const lo = (nx >= 0 ? nb[q] : nb[q + 1]) * nx
+        + (ny >= 0 ? nb[q + 2] : nb[q + 3]) * ny
+        + (nz >= 0 ? nb[q + 4] : nb[q + 5]) * nz;
+      if (lo >= -0.2) continue;
+      if (leaf[node]) {                          // Blatt: Dreiecke übernehmen
+        const s0 = lc[node], c = rc[node];
+        for (let i = s0; i < s0 + c; i++) {
+          if (cnt >= out.length) return cnt;
+          out[cnt++] = tri[i];
+        }
+      } else {                                    // Innen: Kinder pushen
+        st[sp++] = lc[node];
+        st[sp++] = rc[node];
+      }
+    }
+    return cnt;
+  }
+}
+
 /**
  * Edge-Collapse-Simplifizierung mit Quadric Error Metrics.
  *
@@ -546,12 +724,8 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
   if (!mesh?.faces?.length || mesh.faces.length <= maxFaces) return mesh;
 
   const O = { ...SIMPLIFY_DEFAULTS, ...(opts || {}) };
-  // Kompatibilität mit dem Prüf-Harness: globale Regler überschreiben die
-  // entsprechenden Optionen (QTOL skaliert die Qualitätstoleranz, MAXDEG den
-  // Graddeckel). Unendliche Werte (MAXDEG = Infinity) werden ignoriert.
-  const G = typeof globalThis !== 'undefined' ? globalThis : {};
-  if (Number.isFinite(G.QTOL) && G.QTOL > 0) O.qTol = 0.999 * G.QTOL;
-  if (Number.isFinite(G.MAXDEG) && G.MAXDEG > 0) O.maxDegree = G.MAXDEG;
+  // G1: Der Produktionscode liest KEINE globalen Regler — die Optionen kommen
+  //     ausschließlich aus `opts`.
   const t0 = Date.now();
   const src = mesh.faces;
   const inFaces = src.length;
@@ -563,13 +737,25 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
 
   const report = {
     inFaces, outFaces: 0, collapses: 0, lockedVerts: T.lockedVerts,
-    rejected: { link: 0, flip: 0, quality: 0, locked: 0, degree: 0, feature: 0, intersect: 0 },
+    rejected: { link: 0, flip: 0, quality: 0, locked: 0, degree: 0, feature: 0, intersect: 0, wall: 0 },
     passes: 0, ms: 0
   };
   if (Fc === 0 || V === 0) {
     report.ms = Date.now() - t0;
     return { faces: [], vertices: new Float32Array(0), simplifyReport: report };
   }
+
+  // ---------- H2: Dünnwand-Wächter vorbereiten ----------
+  // Statisches BVH über die ORIGINALdreiecke (normierte Koordinaten).  P0/F0
+  // halten den Ausgangszustand fest — P/F ändern sich während der
+  // Vereinfachung (Positionen und Indizes).  Der Wächter vergleicht immer
+  // gegen den Originalzustand.
+  const useWallGuard = O.wallGuard !== false;
+  const P0 = new Float64Array(3 * V);
+  P0.set(P);
+  const F0 = new Int32Array(3 * Fc);
+  F0.set(F);
+  const bvh = useWallGuard ? new TriBVH(F0, P0, Fc, faceBad) : null;
 
   const ver = new Int32Array(V);       // Versionszähler je Vertex (Heap-Invalidierung)
   const dead = new Uint8Array(V);      // 1 = Vertex entfernt
@@ -596,19 +782,18 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
     const tr = q0 + q4 + q7;
 
     // Feature-Ecken: nie verschieben, nie ineinander kollabieren.
-    // F4: ab Pass 3 sind die Eck-/Feature-Regeln gelockert (nur der Quadrik-Term
-    //     bleibt) — sonst erreicht verrauschtes Mesh sein Ziel nicht.
+    // F4/G2: ab Pass 3 werden NUR die Ecken-Regeln gelockert (nur der
+    //     Quadrik-Term bleibt) — sonst erreicht verrauschtes Mesh sein Ziel nicht.
     const fa = fcount[a], fb = fcount[b];
     const relaxed = passes >= 3;
     const aCorner = !relaxed && (fa >= 3 || fa === 1);
     const bCorner = !relaxed && (fb >= 3 || fb === 1);
-    if (!relaxed) {
-      // F3a: Feature-Linie — Kante zwischen zwei Feature-Punkten, die selbst KEINE
-      // Feature-Kante ist, darf nicht kollabiert werden (verhindert Einschnürungen
-      // an dünnen Wänden, wo Außen- und Innenwand an einem Punkt zusammenlaufen).
-      if (fa > 0 && fb > 0 && !isFeatureEdge(a, b)) { _c.skip = true; _c.reason = 2; return; }
-      if (aCorner && bCorner) { _c.skip = true; _c.reason = 1; return; }
-    }
+    // G2: Die F3a-Regel (Feature-Linie) wird in KEINEM Pass gelockert: Kante
+    //     zwischen zwei Feature-Punkten, die selbst KEINE Feature-Kante ist,
+    //     darf nicht kollabiert werden (verhindert Einschnürungen an dünnen
+    //     Wänden, wo Außen- und Innenwand an einem Punkt zusammenlaufen).
+    if (fa > 0 && fb > 0 && !isFeatureEdge(a, b)) { _c.skip = true; _c.reason = 2; return; }
+    if (!relaxed && aCorner && bCorner) { _c.skip = true; _c.reason = 1; return; }
 
     const ax = P[3 * a], ay = P[3 * a + 1], az = P[3 * a + 2];
     const bx = P[3 * b], by = P[3 * b + 1], bz = P[3 * b + 2];
@@ -793,11 +978,11 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
   }
 
   /**
-   * Prüft alle neuen Ringdreiecke (s→t bzw. r→s) gegen den 2. Ring.
-   * @returns {boolean} true, wenn eine echte Durchdringung droht
+   * Neue Ringdreiecke bestimmen (s→t bzw. r→s).  Sie werden sowohl vom
+   * Dünnwand-Wächter (G3) als auch von der Durchdringungsprüfung (F3b) genutzt.
+   * @returns {number} Anzahl der neuen Ringdreiecke
    */
-  function ringIntersects(s, r, f1, f2, tx, ty, tz) {
-    // ---- 1. neue Ringdreiecke bestimmen ----
+  function buildRing(s, r, f1, f2, tx, ty, tz) {
     nNew = 0;
     for (let ring = 0; ring < 2; ring++) {
       const list = ring === 0 ? vf[s] : vf[r];
@@ -820,6 +1005,83 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
         nNew++;
       }
     }
+    return nNew;
+  }
+
+  // ---------- H2: Dünnwand-Wächter (Kreuzung der gegenüberliegenden Wand) ----------
+  // Scratch: T' (aktuelle Koordinaten), O (Originalkoordinaten), BVH-Treffer.
+  const _wt = new Float64Array(9), _wo = new Float64Array(9);
+  let _wq = new Int32Array(2048);
+
+  /** BVH-BBox-Abfrage; vergrößert den Scratch, falls sehr viele Dreiecke treffen. */
+  function wallQuery(x0, y0, z0, x1, y1, z1, nx, ny, nz) {
+    let cnt = bvh.queryBox(x0, y0, z0, x1, y1, z1, nx, ny, nz, _wq);
+    if (cnt >= _wq.length) {
+      const bigger = new Int32Array(_wq.length * 4);
+      cnt = bvh.queryBox(x0, y0, z0, x1, y1, z1, nx, ny, nz, bigger);
+      _wq = bigger;
+    }
+    return cnt;
+  }
+
+  /**
+   * H2: Schneidet eines der neuen Ringdreiecke die gegenüberliegende Wand?
+   * Geprüft wird gegen das ORIGINAL-Mesh (P0/F0 im statischen BVH): es zählen
+   * nur Dreiecke mit entgegengesetzter Normale (dot < -0.2 — gleiche Fläche
+   * oder quer zur Wand sind unkritisch) und ohne gemeinsamen Vertexindex.
+   * @returns {boolean} true, wenn die Gegenwand geschnitten würde
+   */
+  function wallCrosses() {
+    if (!nNew) return false;
+    for (let k = 0; k < nNew; k++) {
+      const po = k * 9, o = k * 3;
+      const i0 = ntI[o], i1 = ntI[o + 1], i2 = ntI[o + 2];
+      const ax = ntP[po], ay = ntP[po + 1], az = ntP[po + 2];
+      const bx = ntP[po + 3], by = ntP[po + 4], bz = ntP[po + 5];
+      const cx = ntP[po + 6], cy = ntP[po + 7], cz = ntP[po + 8];
+      const ux = bx - ax, uy = by - ay, uz = bz - az;
+      const vx = cx - ax, vy = cy - ay, vz = cz - az;
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (!(nl > 0)) continue;                     // entartetes Dreieck
+      nx /= nl; ny /= nl; nz /= nl;
+      // BBox von T' (expandiert)
+      let x0 = ax, x1 = ax, y0 = ay, y1 = ay, z0 = az, z1 = az;
+      if (bx < x0) x0 = bx; if (cx < x0) x0 = cx;
+      if (bx > x1) x1 = bx; if (cx > x1) x1 = cx;
+      if (by < y0) y0 = by; if (cy < y0) y0 = cy;
+      if (by > y1) y1 = by; if (cy > y1) y1 = cy;
+      if (bz < z0) z0 = bz; if (cz < z0) z0 = cz;
+      if (bz > z1) z1 = bz; if (cz > z1) z1 = cz;
+      const e = 1e-12;
+      const cnt = wallQuery(x0 - e, y0 - e, z0 - e, x1 + e, y1 + e, z1 + e, nx, ny, nz);
+      if (!cnt) continue;
+      _wt[0] = ax; _wt[1] = ay; _wt[2] = az;
+      _wt[3] = bx; _wt[4] = by; _wt[5] = bz;
+      _wt[6] = cx; _wt[7] = cy; _wt[8] = cz;
+      for (let q = 0; q < cnt; q++) {
+        const of = _wq[q];
+        // Nur entgegengesetzte Flächen zählen (gleiche Fläche / Querwand egal)
+        const onx = bvh.tn[3 * of], ony = bvh.tn[3 * of + 1], onz = bvh.tn[3 * of + 2];
+        if (nx * onx + ny * ony + nz * onz >= -0.2) continue;
+        const oa = F0[3 * of], ob = F0[3 * of + 1], oc = F0[3 * of + 2];
+        if (oa === i0 || oa === i1 || oa === i2) continue;
+        if (ob === i0 || ob === i1 || ob === i2) continue;
+        if (oc === i0 || oc === i1 || oc === i2) continue;
+        _wo[0] = P0[3 * oa]; _wo[1] = P0[3 * oa + 1]; _wo[2] = P0[3 * oa + 2];
+        _wo[3] = P0[3 * ob]; _wo[4] = P0[3 * ob + 1]; _wo[5] = P0[3 * ob + 2];
+        _wo[6] = P0[3 * oc]; _wo[7] = P0[3 * oc + 1]; _wo[8] = P0[3 * oc + 2];
+        if (triTriOverlap(_wt, _wo, null)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Prüft alle neuen Ringdreiecke (s→t bzw. r→s) gegen den 2. Ring.
+   * @returns {boolean} true, wenn eine echte Durchdringung droht
+   */
+  function ringIntersects(s, r, tx, ty, tz) {
     if (!nNew) return false;
     // ---- 2. Kandidaten (2. Ring) sammeln ----
     // Fan-Knoten (Grad tausende, z.B. per Ear-Clipping abgetastete Deckflächen)
@@ -1037,12 +1299,21 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
     for (let i = 0; i < nq; i++) if (qNew[i] < thr) { qBad = true; break; }
     if (qBad) { rej.quality++; continue; }
 
+    // ---------- neue Ringdreiecke (H2-Wächter und F3b-Prüfung) ----------
+    if (checkIntersect || useWallGuard) buildRing(s, r, f1, f2, tx, ty, tz);
+
+    // ---------- H2: Dünnwand-Wächter (in keinem Pass gelockert) ----------
+    // Die neuen Ringdreiecke dürfen die gegenüberliegende Wand des
+    // ORIGINAL-Meshes nicht schneiden.
+    if (useWallGuard && wallCrosses()) { rej.wall++; continue; }
+
     // ---------- F3b: lokale Durchdringungsprüfung ----------
-    if (checkIntersect && ringIntersects(s, r, f1, f2, tx, ty, tz)) { rej.intersect++; continue; }
+    if (checkIntersect && ringIntersects(s, r, tx, ty, tz)) { rej.intersect++; continue; }
 
     // ---------- Schritt 7: Kollaps r → s an Position t ----------
     const sx = P[3 * s], sy = P[3 * s + 1], sz = P[3 * s + 2];
-    if (tx !== sx || ty !== sy || tz !== sz) {
+    const sMoved = (tx !== sx || ty !== sy || tz !== sz);
+    if (sMoved) {
       // F6: exakte Herkunft des neuen Punktes mitführen
       srcOf[s] = (_c.src >= 0 && srcOf[_c.src] >= 0) ? srcOf[_c.src] : -1;
     }
