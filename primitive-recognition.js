@@ -1038,7 +1038,9 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // facettiert.
   // Split (konservativ, deterministisch): angefasst werden nur Gruppen, die (a) kein
   // übersprungenes entartetes Dreieck enthalten und (b) Facetten von mindestens ZWEI
-  // Primitiven halten. Innerhalb einer solchen Gruppe werden die Facetten über die
+  // Primitiven halten; zusätzlich müssen ALLE Besitzer volle Zylinder (Bohrungen/Mäntel) sein —
+  // Gruppen von Teil-Zylindern (Verrundungen) bleiben unangetastet (siehe unten).
+  // Innerhalb einer solchen Gruppe werden die Facetten über die
   // Manifold-Adjazenz zu Komponenten gruppiert; hat eine Komponente gemischte Besitzer
   // (inkl. „nicht getaggt" = −1), bleibt die Gruppe UNVERÄNDERT. Berühren sich die Teile der
   // Gruppe in einer Ecke/Kante, bleibt die Gruppe ebenfalls UNVERÄNDERT. Sonst entsteht je Besitzer
@@ -1065,6 +1067,13 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       if (own >= 0) owners.add(own);
     }
     if (owners.size < 2) continue;                        // (b) nur EIN Besitzer → unverändert
+    // Nur Gruppen mit Facetten mehrerer VOLL-Zylinder (Bohrungen/Mäntel) werden geteilt — deren
+    // Pfade brauchen exakt die eigene Wand (Rand-Ringe). Gruppen von Teil-Zylindern (Verrundungen)
+    // bleiben wie bisher: die Bogen-/Extrusions-Pfade arbeiten dort ohnehin über die Facetten, ein
+    // Split verschob die Ergebnisse (Fremdteil: Prägung minimal anders, −2.9 mm³).
+    let allFull = true;
+    for (const o of owners) { if (!primitives[o] || primitives[o].full !== true) { allFull = false; break; } }
+    if (!allFull) continue;
     // Komponenten der Gruppe (Zusammenhang über die Manifold-Adjazenz, beschränkt auf die Gruppe)
     const cg = ++compGen;
     const comps = [];
