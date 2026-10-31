@@ -16,10 +16,12 @@
 //                                             gefangen, sauberer Rückfall
 //   schalen      shell-regression.mjs       — Hohlräume, invertierte Netze, Finnen, berührende Körper,
 //                                             offene Fremdteile, Freigang der Kreis-Umwandlung
+//   beruehr      contact-regression.mjs     — berührende Körper (Fläche/Kante/Ecke): wasserdicht,
+//                                             strikte Importer, ΔV ≤ 1e-4, Flächenzahl je Pose gleich
 //   lagen        lagen-regression.mjs       — Netz-Bereinigung in 12 Lagen (Spalten-Kollaps ≤ ohne)
 //   eckfasen     eck-fasen-regression.mjs   — gefaste Profil-Eckrundungen (v2d) + Box-Ecken gleicher Wandstärke, 4 Lagen
 //   ocp          ocp-suite.mjs              — volles OpenCascade (OCP, Python) als zweiter Prüfer:
-//                                             alle Samples + Schalen-Körper; ohne OCP übersprungen
+//                                             alle Samples + Schalen-/Berühr-Körper; ohne OCP übersprungen
 //   freeform     tests/freeform/*.test.mjs  — Freiform-Pfad (Etappe 1): Geometrie, Segmentierung, Snap, Topologie, B-Rep, STEP
 //   gravur       gravur-regression.mjs      — synthetische Gravur-Körper (Extrusions-Wände): wasserdicht, strikte Importer, ΔV ≤ 1e-3
 //
@@ -46,6 +48,7 @@ const SUITES = [
   { name: 'strict',      args: ['tests/step-strict.mjs'] },
   { name: 'orient',      args: ['tests/orientation-guard.mjs'] },
   { name: 'schalen',     args: ['tests/shell-regression.mjs'] },
+  { name: 'beruehr',     args: ['tests/contact-regression.mjs'] },
   { name: 'ocp',         args: ['tests/ocp-suite.mjs'] },
   // Freiform: alle Dateien einzeln (kein Shell-Glob) und nacheinander
   // (--test-concurrency=1), weil gen/brep die STL in tests/freeform/stl neu schreiben,
