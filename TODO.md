@@ -55,6 +55,13 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 
 ## Mittlere Priorität
 
+- [ ] **Organische Teile (Bremsgriff) bleiben facettiert** — User-Fund 2026-10-31. `samples/Brake Handle v15.stl`
+  (183k, Fremdteil: nur lokal, nie committen/an MiniMax) läuft seit 0.2.5 durch (≈ 10 s, wasserdicht), aber 36 694 Flächen;
+  die mit OrcaSlicer vereinfachte Fassung (12k Dreiecke) → 11 228 Flächen, also praktisch nichts erkannt (8 321 Normalen-
+  gruppen). Freiform-Schalter hilft nicht: `buildFreeformBrep` gibt nach 0,8 s `null` zurück → Rückfall. Ziel: glatte
+  Griffflächen als B-Spline-Flächen, Bohrungen/Augen als Zylinder. Erst Ursache des `null` klären (Freiform Etappe 3);
+  MiniMax nur mit synthetischen Ersatzkörpern (organischer Hebel mit Augen) füttern.
+
 - [ ] **Netz-Vereinfachung: Extrusions-Spalten erhalten** — fein tessellierte CAD-Körper > 50k verlieren durch
   `mesh-simplify.js` die übereinanderstehenden Ring-Punkte (Quader 201k: unvereinfacht 3 893, nach 50k 14 068 Export-
   Flächen). Spaltenweiser Kollaps wie in mesh-clean.js oder Zylinder-/Ebenen-Flächen vorab erkennen und schützen.
