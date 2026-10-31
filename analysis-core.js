@@ -697,6 +697,18 @@ function simplifyMesh(mesh, maxFaces = 50000, progressCb) {
   let collapsed = 0;
   const progressEvery = Math.max(1, Math.floor(totalToRemove / 20));
 
+  // Flächen je Wurzel-Punkt: Ein Kollaps rv1 → rv0 kann nur Flächen entarten lassen, die rv1
+  // enthalten. Früher wurde nach JEDEM Kollaps über alle Flächen gelaufen (O(Kollapse · Flächen),
+  // Bremsgriff 183k Dreiecke: ~32 s). Ergebnis identisch: dieselben Flächen sterben in derselben
+  // Reihenfolge, aliveFaces und damit der Abbruchpunkt bleiben gleich.
+  const vertFaces = Array.from({ length: vertCount }, () => []);
+  for (let f = 0; f < faceCount; f++) {
+    const fi = f * 3;
+    vertFaces[indices[fi]].push(f);
+    if (indices[fi + 1] !== indices[fi]) vertFaces[indices[fi + 1]].push(f);
+    if (indices[fi + 2] !== indices[fi] && indices[fi + 2] !== indices[fi + 1]) vertFaces[indices[fi + 2]].push(f);
+  }
+
   // Collapse edges
   for (let ei = 0; ei < edgeList.length && aliveFaces > maxFaces; ei++) {
     const edge = edgeList[ei];
@@ -714,8 +726,10 @@ function simplifyMesh(mesh, maxFaces = 50000, progressCb) {
     const o0 = rv0 * 10, o1 = rv1 * 10;
     for (let i = 0; i < 10; i++) quadrics[o0 + i] += quadrics[o1 + i];
 
-    // Kill degenerate faces
-    for (let f = 0; f < faceCount; f++) {
+    // Kill degenerate faces (nur Flächen an rv1 können entarten)
+    const moved = vertFaces[rv1];
+    const keep = vertFaces[rv0];
+    for (const f of moved) {
       if (!faceAlive[f]) continue;
       const fi = f * 3;
       const a = findRoot(indices[fi]);
@@ -725,8 +739,11 @@ function simplifyMesh(mesh, maxFaces = 50000, progressCb) {
       if (a === b || b === c || a === c) {
         faceAlive[f] = 0;
         aliveFaces--;
+      } else {
+        keep.push(f);
       }
     }
+    vertFaces[rv1] = [];
 
     collapsed++;
     if (progressCb && collapsed % progressEvery === 0) {
