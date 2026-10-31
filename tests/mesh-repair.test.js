@@ -282,3 +282,31 @@ test('40×40 Platte aus Einzelwürfeln: alle inneren Flächen weg', () => {
   expect(volume(out.faces)).toBeCloseTo(1600, 6);
   expect(dt).toBeLessThan(2000);
 });
+
+test('gleiche Kontur, aber nicht ebene Gegenfläche: kein falscher Zwilling', () => {
+  // unterer Würfel: Deckfläche als Fächer um (5,5,10); oberer Quader: Bodenfläche als Fächer um (5,5,10.05)
+  // (flache Delle nach innen) — gleiche Randkanten, aber andere Fläche → nichts entfernen
+  const fan = (c, ring, up) => ring.map((p, i) => { const q = ring[(i + 1) % ring.length]; return up ? [c, p, q] : [c, q, p]; });
+  const R = [[0, 0, 10], [10, 0, 10], [10, 10, 10], [0, 10, 10]];
+  const lower = box([0, 0, 0], [10, 10, 10]).filter((t) => !t.every((p) => p[2] === 10));
+  const upper = box([0, 0, 10], [10, 10, 20]).filter((t) => !t.every((p) => p[2] === 10));
+  const m = meshOf([...lower, ...fan([5, 5, 10], R, true), ...upper, ...fan([5, 5, 10.05], R, false)]);
+  const { report } = repairNonManifold(m);
+  expect(report.nonManifoldEdges).toBeGreaterThan(0);
+  expect(report.removedTris).toBe(0);
+});
+
+test('Ringstapel mit verdreht triangulierter Kontaktfläche, 1000 mm vom Ursprung (Splitter-Fächer)', () => {
+  // Review-Fund: Splitter-Dreiecke (Höhe 7e-4 mm) weit vom Ursprung — die Flächen der Zwillinge wichen um
+  // 1,6e-6 relativ ab und der Vergleich (damals 1e-6) verpasste das Paar
+  const col = (profile, z0, z1) => ({ profile, z0, z1, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } });
+  const rot = (p, k) => p.slice(k).concat(p.slice(0, k));
+  const outer = circleProfile(0, 0, 50, 720), hole = circleProfile(0, 0, 40, 720, true);
+  const base = [...buildMesh({ columns: [col(outer, 0, 10), col(hole, 0, 10)] }),
+    ...buildMesh({ columns: [col(rot(outer, 7), 10, 25), col(rot(hole, 11), 10, 25)] })];
+  const T = makeTransform({ rot: [23, 37, 11], t: [1000, 500, 0] });
+  const { mesh: out, report } = repairNonManifold(meshOf(base.map((t) => t.map((p) => T.apply(p)))));
+  expect(report.removedTris).toBe(2880);
+  expect(report.nonManifoldEdgesAfter).toBe(0);
+  expect(closedManifold(out.faces)).toBe(true);
+});

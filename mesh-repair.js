@@ -114,11 +114,13 @@ export function repairNonManifold(mesh, opts = {}) {
   // Flächen wurden dort nicht mehr als eben erkannt. Also: Toleranz = max(Grundwert, 8·ULP).
   let maxAbs = 0;
   for (let i = 0; i < px.length; i++) { const a = px[i] < 0 ? -px[i] : px[i]; if (a > maxAbs) maxAbs = a; }
-  const tol = Math.max(planeTol, 8 * maxAbs * 2 ** -23);
+  const ulp = maxAbs * 2 ** -23;                     // Rundungsmaß der float32-Koordinaten [mm]
+  const tol = Math.max(planeTol, 8 * ulp);
 
   // ---- 2) Geometrie je Dreieck: Normale aus der Wicklung (Kreuzprodukt), Fläche = |Kreuz|/2
   const nrm = new Float64Array(T * 3);
   const area = new Float64Array(T);
+  const lmax = new Float64Array(T);          // längste Kante [mm] (für die Höhe/Unsicherheit)
   const degen = new Uint8Array(T);
   for (let f = 0; f < T; f++) {
     const a = tri[f * 3], b = tri[f * 3 + 1], c = tri[f * 3 + 2];
@@ -129,6 +131,7 @@ export function repairNonManifold(mesh, opts = {}) {
     const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     const l = Math.hypot(nx, ny, nz);
     area[f] = l / 2;
+    lmax[f] = Math.max(Math.hypot(ux, uy, uz), Math.hypot(vx - ux, vy - uy, vz - uz), Math.hypot(vx, vy, vz));
     if (l > 0) { nrm[f * 3] = nx / l; nrm[f * 3 + 1] = ny / l; nrm[f * 3 + 2] = nz / l; }
   }
 
@@ -226,10 +229,20 @@ export function repairNonManifold(mesh, opts = {}) {
     const nx = nrm[big * 3], ny = nrm[big * 3 + 1], nz = nrm[big * 3 + 2];
     const bp = tri[big * 3] * 3;                       // erster Punkt des großen Dreiecks
     const d0 = nx * px[bp] + ny * px[bp + 1] + nz * px[bp + 2];
+    // Unsicherheit der Referenzebene: ist das Referenzdreieck selbst ein sehr flacher
+    // „Splitter" (Ear-Clipping aus 720…4096 Segmenten), ist die float32-Rundung RELATIV zur
+    // Höhe groß — die aus der Rundung berechnete Normale kippt um ~ulp/height und die
+    // Referenzebene damit ebenfalls. Der erlaubte Abstand wächst deshalb mit dem Hebelarm
+    // |q − p_r|, gedeckelt bei 50·tol (sonst würde die Paarprüfung zur Ebenenprüfung
+    // verkommen — die bleibt beim PATCH-VALIDITY-Test, s. Schritt 6).
+    const hr = 2 * area[big] / lmax[big];              // Höhe des Referenzdreiecks [mm]
+    const angErr = 4 * ulp / hr;                       // Winkelunsicherheit der Normalen [rad]
     for (let k = 0; k < 3; k++) {
       const q = tri[small * 3 + k] * 3;                // Punkte des kleineren Dreiecks
       const dist = nx * px[q] + ny * px[q + 1] + nz * px[q + 2] - d0;
-      if (Math.abs(dist) > tol) return false;
+      const lev = Math.hypot(px[q] - px[bp], px[q + 1] - px[bp + 1], px[q + 2] - px[bp + 2]);
+      const tolPair = Math.min(tol + angErr * lev, 50 * tol);
+      if (Math.abs(dist) > tolPair) return false;
     }
     return true;
   };
@@ -318,7 +331,10 @@ export function repairNonManifold(mesh, opts = {}) {
     const d = A.N[0] * B.N[0] + A.N[1] * B.N[1] + A.N[2] * B.N[2];
     // Die flächengewichteten Normalen sind genau (Reihenfolge: Fläche gewinnt gegen Rundung)
     if (!(d < -COS_1)) return false;
-    const tolArea = 1e-6 * Math.max(A.area, B.area) + 1e-9;
+    // Gleicher Rand + beide eben (tol) + gegenläufig legen das Gebiet schon fest; der Flächen-Vergleich
+    // ist nur Plausibilität. 1e-6 relativ war zu eng: Splitter-Fächer weit vom Ursprung (Rohr R50/R40,
+    // 720 Segmente, 1000 mm Versatz) wichen um 1,6e-6 ab → Zwilling verpasst.
+    const tolArea = 1e-4 * Math.max(A.area, B.area) + 1e-9;
     if (Math.abs(A.area - B.area) > tolArea) return false;
     const bset = new Set(B.boundary.map((r) => `${r.u},${r.v}`));
     for (const r of A.boundary) if (!bset.has(`${r.v},${r.u}`)) return false;
