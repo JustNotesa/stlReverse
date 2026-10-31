@@ -7,7 +7,7 @@ import { simplifyMesh } from '../mesh-simplify.js';
 import {
   uvSphere, torus, boxWithBores, transformMesh, inverseTransformMesh,
   checkClosedManifold, maxDeviation, selfIntersectionSample, planeDeviation, planeDeviationStats,
-  signedVolume,
+  signedVolume, trisToMesh,
 } from './simplify-bodies.mjs';
 
 jest.setTimeout(120000);
@@ -146,6 +146,32 @@ test('no self-intersections', () => {
   console.log('Selbst-Überschneidung Kugel', JSON.stringify(s), 'Quader', JSON.stringify(b));
   expect(s.hits).toBe(0);
   expect(b.hits).toBe(0);
+});
+
+// ── 6b) Der Selbst-Überschneidungsprüfer muss echte Durchdringungen finden ─
+// A = Tetraeder {x,y,z ≥ 0, x+y+z ≤ 10}; B steckt mit seiner Spitze (3,3,3) durch
+// die schräge Fläche x+y+z=10 von A (echte Durchdringung). Wird B um 1 mm entlang
+// der Flächennormalen (1,1,1)/√3 nach außen verschoben, liegen die Körper getrennt.
+const tetraTris = ([a, b, c, d]) => {
+  const det = (p) => (b[0] - a[0]) * ((c[1] - a[1]) * (p[2] - a[2]) - (c[2] - a[2]) * (p[1] - a[1]))
+    - (b[1] - a[1]) * ((c[0] - a[0]) * (p[2] - a[2]) - (c[2] - a[2]) * (p[0] - a[0]))
+    + (b[2] - a[2]) * ((c[0] - a[0]) * (p[1] - a[1]) - (c[1] - a[1]) * (p[0] - a[0]));
+  // nach außen orientierte Flächen (Volumen > 0) bzw. umgekehrt
+  return det(d) > 0
+    ? [[a, c, b], [a, d, c], [a, b, d], [b, c, d]]
+    : [[a, b, c], [a, c, d], [a, d, b], [b, d, c]];
+};
+
+test('self-intersection checker detects a real crossing', () => {
+  const A = [[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]];
+  const B = [[3, 3, 3], [4, 4, 4], [6, 4, 4], [4, 6, 4]];
+  const d = 1 / Math.sqrt(3);                       // 1 mm entlang (1,1,1)/√3
+  const Bsep = B.map((p) => [p[0] + d, p[1] + d, p[2] + d]);
+  const cross = selfIntersectionSample(trisToMesh([...tetraTris(A), ...tetraTris(B)]), 2000);
+  const apart = selfIntersectionSample(trisToMesh([...tetraTris(A), ...tetraTris(Bsep)]), 2000);
+  console.log('Durchdringung', JSON.stringify(cross), 'getrennt', JSON.stringify(apart));
+  expect(cross.hits).toBeGreaterThan(0);
+  expect(apart.hits).toBe(0);
 });
 
 // ── 7) Bereits kleines Netz → unverändert zurück ─────────────────────────
