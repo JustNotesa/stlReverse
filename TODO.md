@@ -182,6 +182,13 @@ Kreis-Kanten teilen.
 
 ## Niedrige Priorität
 
+- [ ] **Berührende Körper — Rest (nach `wt/nmsplit`)**: (1) Kontaktflächen mit VERSCHIEDENER Kontur bzw. ohne
+  gemeinsame Punkte (Teilüberdeckung, T-Stöße) bleiben doppelt — Rändel-Box: Deckel-Innenwand liegt z 70…100 auf
+  der Kasten-Wand (Wandstärke 0) → OCP-BOP meldet 171 Selbstberührungen (gültig, strict 0; CST prüfen). Bräuchte
+  ebene Boolesche Vereinigung. (2) Körper, die sich nur an einer Kante in einer gemeinsamen Ebene berühren
+  (Pyramiden ohne Platte), werden EIN Körper mit Selbstberührung (Region-Growing vereinigt die Grundflächen).
+  (3) „STEP aus Dreiecken“ schreibt Außenhaut + Hohlraum in EINE Schale (strict: shell-connected). (4) cleanMesh
+  indiziert die Punkte jetzt zweimal (Reparatur + Kollaps): +1,5 s bei 1 Mio. Dreiecken — Index teilen.
 - [ ] **Sketch-Rekonstruktion** — 2D-Grundskizze + Extrusionsrichtung aus unified Faces
 - [ ] **FreeCAD .FCStd Export** — Parametrisches Modell
 - [ ] **Playwright E2E-Tests** — File-Upload, Analyse, Export
@@ -191,6 +198,16 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Berührende Körper / non-manifold-Kanten (2026-10-31, `wt/nmsplit`, User-Teil Rändel-Box)** — Box und Deckel
+  stoßen bei z = 70 Fläche an Fläche; die Kontaktfläche steht im Netz doppelt (oben +z, unten −z, z. T. anders
+  trianguliert) → 866 Kanten mit 4 Dreiecken, Export „nicht wasserdicht, 45 non-manifold-Kanten“, 0 Körper. Neu:
+  `mesh-repair.js` (läuft in `cleanMesh` zuerst, auch bei τ = 0): ebene Flicken an non-manifold-Kanten, Paare mit
+  gleichem Rand, gegenläufig, eben und gleich groß = innere Zwillinge → beide entfernt (reguläre Vereinigung);
+  kein Paar, das eine Kante ungerade zurückließe. Rändel-Box: 900 Dreiecke entfernt, wasserdicht, 1 Körper mit
+  Hohlraum, strict 0, OCP gültig (BOP 578 → 171), 17 648 Flächen. Kabelhalter, NozzleBox (127 NM-Kanten,
+  schon vorher dicht), Skoda bit-gleich. Neue Suite `beruehr` (tests/contact-regression.mjs, 14 Körper × 4 Lagen):
+  Rändel-Pyramiden auf Platte vorher kaputt (0 Körper, Volumen lageabhängig) → dicht. Verdikt-Zeile „N
+  non-manifold-Kanten an Berührflächen repariert (K doppelte Dreiecke entfernt)“.
 - [x] **Koaxiale Bohrungen / Lochreihen wurden nicht umgewandelt (2026-10-31, `wt/boxloch`, User-Teil Box_Bottom)** —
   Ursache: `unifyCoplanarGroups` fusioniert koplanare, getrennte Facetten; zwei Bohrungen auf derselben Achse (je
   eine in zwei Laschen) bzw. eine Lochreihe mit n ≡ 2 mod 4 Segmenten teilen sich so Wand-Gruppen. Die Erkennung fand
