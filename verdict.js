@@ -63,6 +63,20 @@ function meshCleanNote(analysis) {
     + (mc.shortAfter ? `, ${mc.shortAfter} kürzere Kante${mc.shortAfter === 1 ? '' : 'n'} geschützt (Ecken, scharfe Kanten, Ebenen)` : '');
 }
 
+/** Berührflächen-Reparatur (Worker, mesh-repair.js): ehrliche Zahlen zur Kontaktflächen-Reparatur. */
+function contactNote(analysis) {
+  const r = analysis?.meshClean?.repair;
+  if (!r) return null;
+  const k = r.removedTris || 0;                       // tatsächlich entfernte Doppel-Dreiecke
+  if (!(k > 0)) return null;                          // ohne Entfernung gibt es nichts zu melden
+  const n = (r.nonManifoldEdges || 0) - (r.nonManifoldEdgesAfter || 0);   // reparierte Kanten
+  const rest = r.nonManifoldEdgesAfter || 0;          // bleibende non-manifold Kanten
+  let txt = `${n} non-manifold-Kante${n === 1 ? '' : 'n'} an Berührflächen repariert `
+    + `(${k} doppelte${k === 1 ? 's' : ''} Dreieck${k === 1 ? '' : 'e'} entfernt)`;
+  if (rest > 0) txt += `; ${rest} bleib${rest === 1 ? 't' : 'en'} (Körper berühren sich nur an Kante/Ecke)`;
+  return txt;
+}
+
 /** Kanten-Phrasen („4 offene Kanten, 1 non-manifold-Kante“) — Wortlaut wie heute. */
 function edgePhrases(report) {
   const parts = [];
@@ -85,6 +99,7 @@ export function buildVerdict(report, analysis, { defeature = false } = {}) {   /
   const solids = finite(report.solids);
   const opens = finite(report.openShells);
   const cleanNote = meshCleanNote(analysis);
+  const contactTxt = contactNote(analysis);
 
   // ── Rohtext: wortgleich zu `setStepWatertightStatus` ─────────────────────────
   let rawText = '';
@@ -96,6 +111,7 @@ export function buildVerdict(report, analysis, { defeature = false } = {}) {   /
     // Flächenzahl mit „Verrundungen entfernen“ so viel kleiner ist.
     const done = [];
     if (cleanNote) done.push(cleanNote);
+    if (contactTxt) done.push(contactTxt);
     if (finite(report.boresConverted)) done.push(`${report.boresConverted} Bohrung${report.boresConverted === 1 ? '' : 'en'} als echter Zylinder`);
     if (finite(report.mantlesConverted)) done.push(`${report.mantlesConverted} ${report.mantlesConverted === 1 ? 'Außenmantel' : 'Außenmäntel'} als echter Zylinder`);
     if (finite(report.mantleConesConverted)) done.push(`${report.mantleConesConverted} ${report.mantleConesConverted === 1 ? 'Kegelmantel' : 'Kegelmäntel'} als echter Kegel`);
@@ -135,7 +151,7 @@ export function buildVerdict(report, analysis, { defeature = false } = {}) {   /
     } else {
       rawText = `⚠ Nicht wasserdicht: ${parts.join(', ')} von ${edgeCount} Kanten (${faceCount} Flächen) → offene Hülle, kein Solid.`;
     }
-    rawDetail = cleanNote || '';
+    rawDetail = [cleanNote, contactTxt].filter(Boolean).join(' · ');
   }
 
   // ── Zustand ─────────────────────────────────────────────────────────────────
@@ -196,6 +212,7 @@ export function buildVerdict(report, analysis, { defeature = false } = {}) {   /
 
   const info = [];
   if (cleanNote) info.push(cleanNote);
+  if (contactTxt) info.push(contactTxt);
   if (finite(report.invertedShells)) info.push('Eingabe-Netz war innen-außen gestülpt — Flächen umgedreht');
   if (finite(report.droppedShells)) info.push(`${report.droppedShells} hauchdünne Schale${report.droppedShells === 1 ? '' : 'n'} (Finne/Mini-Tasche) verworfen`);
 
