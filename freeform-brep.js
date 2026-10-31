@@ -110,12 +110,12 @@ import {
   add, sub, mul, dot, cross, len, norm, project,
 } from './freeform-geom.js';
 import { snapSurfaces } from './freeform-snap.js';
-import { writeFreeformStep } from './freeform-step.js';
+import { writeFreeformStep } from './freeform-step.js?v=2';
 import {
   lineToBspline, evalCurve, reverseCurve, splitCurve, joinCurves, coonsPatch,
   surfaceNormal, surfaceDerivs, projectToSurface, surfaceSamples, evalSurface,
   fitCurveOnSurface, interpPolyline,
-} from './freeform-nurbs.js';
+} from './freeform-nurbs.js?v=1';
 
 // ---- Grenzwerte (Etappe 1) ----
 const ROUNDS_MAX = 12;           // höchstens 12 Runden (Standard; opts.maxRounds)
