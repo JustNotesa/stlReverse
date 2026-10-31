@@ -262,6 +262,8 @@ details.steps-pop[open] > .progress-steps {
 .progress-step.status--active::before { content: '▶'; color: var(--accent); }
 .progress-step.status--done { color: var(--ok); }
 .progress-step.status--done::before { content: '✓'; color: var(--ok); }
+.progress-step.status--error { color: var(--err); font-weight: 700; }
+.progress-step.status--error::before { content: '✕'; color: var(--err); }
 
 .progress-live-detail {
   display: flex; align-items: center; gap: 8px; margin: 8px 0 0;
