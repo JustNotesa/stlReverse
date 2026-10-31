@@ -2,7 +2,7 @@ import { formatBytesDe, describeDetailLevel } from './utils.js?v=2';
 import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolumeStepTriangles } from './exporters.js?v=51';
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=33';
-import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=23';
+import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=24';
 import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=8';
 import { initTabs, initViewToggle, initFullscreen, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=5';
 import { applyFeatureColorVars, buildFeatureLegend } from './feature-colors.js?v=1';

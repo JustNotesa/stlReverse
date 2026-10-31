@@ -596,6 +596,8 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
 }
 .viewer-3d[data-state="loading"]::after { content: 'STEP wird geladen …'; }
 .viewer-3d[data-state="error"]::after { content: 'Fehler beim Laden der STEP-Datei.'; }
+.viewer-3d[data-msg][data-state="loading"]::after,
+.viewer-3d[data-msg][data-state="error"]::after { content: attr(data-msg); white-space: pre-line; line-height: 1.45; padding: 16px 24px; }
 /* WebGL im Browser abgeschaltet (z. B. Hardwarebeschleunigung aus): ehrlich sagen statt „Keine Daten“. */
 .viewer-3d[data-state="nowebgl"]::after {
   content: '3D-Ansicht nicht verfügbar: WebGL ist in diesem Browser abgeschaltet.\A \A So einschalten: Firefox-Einstellungen → „Tabs und Surfen“ (oder oben „Hardware“ suchen) → Leistung → „Empfohlene Leistungseinstellungen“ abwählen und „Hardwarebeschleunigung verwenden, wenn verfügbar“ anhaken, Firefox neu starten. Hilft das nicht: about:config → webgl.force-enabled auf true.\A \A Die STEP-Datei ist trotzdem korrekt.';
