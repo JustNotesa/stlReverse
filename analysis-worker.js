@@ -3,7 +3,7 @@ import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=16';
 import { detectTubes } from './tube-sweep.js?v=4';
-import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=2';
+import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=3';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
 
