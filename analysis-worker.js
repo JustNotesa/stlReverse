@@ -174,8 +174,9 @@ self.addEventListener('message', (event) => {
     }
 
     // Primitiv-Erkennung (Stage 1): zylindrische Flächen (Bohrungen) über Rand-Kreise.
-    // Taggt betroffene Gruppen mit `.primitive` (nur Anzeige) — Vertices/Normalen bleiben
-    // unverändert. In try/catch gekapselt: ein Erkennungs-Fehler darf die geshippte
+    // Taggt betroffene Gruppen mit `.primitive` — Vertices/Normalen bleiben unverändert. Gruppen
+    // mit Wandfacetten mehrerer Voll-Zylinder (koaxiale Bohrungen) werden dabei geteilt (die
+    // Untergruppen hängen am Ende der Liste; sie ist danach nicht mehr nach Größe sortiert). In try/catch gekapselt: ein Erkennungs-Fehler darf die geshippte
     // Pipeline und das Wasserdichtigkeits-Verdikt niemals regressieren.
     try {
       const { primitives, stats } = recognizePrimitives(analysis.normalGroups);
@@ -191,7 +192,7 @@ self.addEventListener('message', (event) => {
       });
     } catch (e) {
       analysis.primitives = [];
-      analysis.primitiveStats = { inputGroups: analysis.normalGroups?.length || 0, cylinders: 0, bores: 0, fillets: 0 };
+      analysis.primitiveStats = { inputGroups: analysis.normalGroups?.length || 0, cylinders: 0, bores: 0, fillets: 0, splitGroups: 0 };
       self.postMessage({
         id,
         progress: { step: 'worker', detail: `Primitiv-Erkennung übersprungen: ${e?.message || e}`, ratio: 0.95 }
