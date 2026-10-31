@@ -110,6 +110,9 @@ const prism = (profile, z0, z1) => G.buildMesh({ columns: [col(profile, z0, z1)]
 // Ring-Rahmen: Außenkontur rr (CCW) + Loch (CW) als zwei Säulen → ein Körper mit Hohlraum
 const RR = G.roundedRectProfile(50, 30, 5, 8);
 const RING_HOLE = G.roundedRectProfile(46, 26, 3, 8).map(([x, y]) => [x + 2, y + 2]).reverse();
+// Soll-Volumen des Ring-Rahmens mit EXAKTEN Eckbögen: seit die Kontaktfläche entfernt ist, laufen die
+// Wände über die ganze Höhe durch und die Profil-Bögen (profile-arcs.js) greifen (vorher 74 Facetten-Flächen)
+const RING_VOL = 25 * ((50 * 30 - (4 - Math.PI) * 25) - (46 * 26 - (4 - Math.PI) * 9));
 const ringBody = (rr, hole, z0, z1) => G.buildMesh({ columns: [col(rr, z0, z1), col(hole, z0, z1)] });
 
 // Rändel-Platte: 6×4 Zellen (2×2 mm, 1 mm hoch) als EINZELNE Quader (Wandflächen doppelt) +
@@ -133,27 +136,31 @@ const knurlPyramids = () => {
 // want: solids/voids (Report), vol ('mesh' = Netz-Volumen oder Zahl),
 // ocpBop: erwartete BRepAlgoAPI_Check-Befunde (OCP-Suite; berührende Körper melden SelfIntersect)
 export const CONTACT_CASES = [
-  { name: 'Würfel gestapelt (Deckfläche doppelt)', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([0, 0, 10], [10, 10, 20])], want: { solids: 1, voids: 0, vol: 2000 } },
-  { name: 'Würfel gestapelt, andere Diagonale', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...boxBottomAlt([0, 0, 10], [10, 10, 20])], want: { solids: 1, voids: 0, vol: 2000 } },
+  { name: 'Würfel gestapelt (Deckfläche doppelt)', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([0, 0, 10], [10, 10, 20])], want: { solids: 1, voids: 0, vol: 2000, faces: { AN: 6, AUS: 6 } } },
+  { name: 'Würfel gestapelt, andere Diagonale', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...boxBottomAlt([0, 0, 10], [10, 10, 20])], want: { solids: 1, voids: 0, vol: 2000, faces: { AN: 6, AUS: 6 } } },
   // 24-Eck-Prisma: die Sehnenlänge (2·R·sin(π/24) = 2,61 mm) ist groß genug für die
   // Kreis-Umwandlung (Freigang der Kreis-Umwandlung, vgl. shell-regression) → der Export liefert
   // einen ZYLINDER R10 × 25 mm, nicht das 24-Eck. Soll daher das Zylinder-Volumen, nicht das
   // Netz-Volumen ('mesh').
-  { name: '24-Eck-Prismen gestapelt, verdrehte Triangulierung', tris: () => [...prism(P24, 0, 10), ...prism(rotProfile(P24, 5), 10, 25)], want: { solids: 1, voids: 0, vol: Math.PI * 100 * 25 } },
-  { name: 'Ring-Rahmen gestapelt', tris: () => [...ringBody(RR, RING_HOLE, 0, 10), ...ringBody(RR, RING_HOLE, 10, 25)], want: { solids: 1, voids: 0, vol: 'mesh' } },
-  { name: 'Ring-Rahmen gestapelt, verdreht', tris: () => [...ringBody(RR, RING_HOLE, 0, 10), ...ringBody(rotProfile(RR, 7), rotProfile(RING_HOLE, 14), 10, 25)], want: { solids: 1, voids: 0, vol: 'mesh' } },
-  { name: 'Kasten aus zwei Bechern (Hohlraum)', tris: () => [...cup(30, 5, 0, 20, true), ...cup(30, 5, 20, 40, false)], want: { solids: 1, voids: 1, vol: 28000 } },
-  { name: 'Kasten aus zwei Bechern, andere Diagonalen', tris: () => [...cup(30, 5, 0, 20, true), ...cup(30, 5, 20, 40, false, 1)], want: { solids: 1, voids: 1, vol: 28000 } },
-  { name: 'zwei Würfel, Berührung an einer Kante', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([10, 0, 10], [20, 10, 20])], want: { solids: 2, voids: 0, vol: 2000 }, ocpBop: { BOPAlgo_SelfIntersect: 3 } },
-  { name: 'zwei Würfel, Berührung in einer Ecke', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([10, 10, 10], [20, 20, 20])], want: { solids: 2, voids: 0, vol: 2000 }, ocpBop: { BOPAlgo_SelfIntersect: 1 } },
+  { name: '24-Eck-Prismen gestapelt, verdrehte Triangulierung', tris: () => [...prism(P24, 0, 10), ...prism(rotProfile(P24, 5), 10, 25)], want: { solids: 1, voids: 0, vol: Math.PI * 100 * 25, faces: { AN: 3, AUS: 3 } } },
+  { name: 'Ring-Rahmen gestapelt', tris: () => [...ringBody(RR, RING_HOLE, 0, 10), ...ringBody(RR, RING_HOLE, 10, 25)], want: { solids: 1, voids: 0, vol: RING_VOL, faces: { AN: 18, AUS: 18 } } },
+  { name: 'Ring-Rahmen gestapelt, verdreht', tris: () => [...ringBody(RR, RING_HOLE, 0, 10), ...ringBody(rotProfile(RR, 7), rotProfile(RING_HOLE, 14), 10, 25)], want: { solids: 1, voids: 0, vol: RING_VOL, faces: { AN: 18, AUS: 18 } } },
+  { name: 'Kasten aus zwei Bechern (Hohlraum)', tris: () => [...cup(30, 5, 0, 20, true), ...cup(30, 5, 20, 40, false)], want: { solids: 1, voids: 1, vol: 28000, faces: { AN: 12, AUS: 12 } } },
+  { name: 'Kasten aus zwei Bechern, andere Diagonalen', tris: () => [...cup(30, 5, 0, 20, true), ...cup(30, 5, 20, 40, false, 1)], want: { solids: 1, voids: 1, vol: 28000, faces: { AN: 12, AUS: 12 } } },
+  { name: 'zwei Würfel, Berührung an einer Kante', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([10, 0, 10], [20, 10, 20])], want: { solids: 2, voids: 0, vol: 2000, faces: { AN: 12, AUS: 12 } }, ocpBop: { BOPAlgo_SelfIntersect: 3 } },
+  { name: 'zwei Würfel, Berührung in einer Ecke', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([10, 10, 10], [20, 20, 20])], want: { solids: 2, voids: 0, vol: 2000, faces: { AN: 12, AUS: 12 } }, ocpBop: { BOPAlgo_SelfIntersect: 1 } },
   // Bügel: 7 Voxel, die über Flächen verbunden sind — zwei davon berühren sich an einer KANTE
   // (die Berühr-Kante ist eine Nicht-manifold-Kante: der Kern meldet dafür Selbstdurchdringungen)
-  { name: 'Bügel mit Berühr-Kante (ein Körper)', tris: () => vox([[0, 0, 0], [1, 1, 0], [-1, 0, 0], [-1, 1, 0], [-1, 2, 0], [0, 2, 0], [1, 2, 0]]), want: { solids: 1, voids: 0, vol: 7000 }, ocpBop: { BOPAlgo_SelfIntersect: 27 } },
+  { name: 'Bügel mit Berühr-Kante (ein Körper)', tris: () => vox([[0, 0, 0], [1, 1, 0], [-1, 0, 0], [-1, 1, 0], [-1, 2, 0], [0, 2, 0], [1, 2, 0]]), want: { solids: 1, voids: 0, vol: 7000, faces: { AN: 14, AUS: 14 } }, ocpBop: { BOPAlgo_SelfIntersect: 27 } },
   // Bügel: 6 Voxel — zwei davon berühren sich an einer Ecke
-  { name: 'Bügel mit Berühr-Ecke (ein Körper)', tris: () => vox([[0, 0, 0], [1, 1, 1], [-1, 0, 0], [-1, 1, 0], [-1, 1, 1], [0, 1, 1]]), want: { solids: 1, voids: 0, vol: 6000 }, ocpBop: { BOPAlgo_SelfIntersect: 18 } },
-  { name: 'Rändel-Pyramiden auf Platte', tris: () => knurlPlate(() => true), want: { solids: 1, voids: 0, vol: 'mesh' } },
-  { name: 'Rändel-Pyramiden im Schachbrett', tris: () => knurlPlate((i, j) => (i + j) % 2 === 0), want: { solids: 1, voids: 0, vol: 'mesh' } },
-  { name: 'Pyramiden stoßen Kante an Kante (ohne Platte)', tris: knurlPyramids, want: { solids: 24, voids: 0, vol: 'mesh' } },
+  { name: 'Bügel mit Berühr-Ecke (ein Körper)', tris: () => vox([[0, 0, 0], [1, 1, 1], [-1, 0, 0], [-1, 1, 0], [-1, 1, 1], [0, 1, 1]]), want: { solids: 1, voids: 0, vol: 6000, faces: { AN: 12, AUS: 12 } }, ocpBop: { BOPAlgo_SelfIntersect: 18 } },
+  { name: 'Rändel-Pyramiden auf Platte', tris: () => knurlPlate(() => true), want: { solids: 1, voids: 0, vol: 'mesh', faces: { AN: 101, AUS: 101 } } },
+  { name: 'Rändel-Pyramiden im Schachbrett', tris: () => knurlPlate((i, j) => (i + j) % 2 === 0), want: { solids: 1, voids: 0, vol: 'mesh', faces: { AN: 65, AUS: 65 } } },
+  // Bekannte Grenze: die 24 Grundflächen liegen in EINER Ebene und stoßen Kante an Kante; Region-Growing
+  // und Flächen-Vereinigung machen daraus eine Rechteck-Fläche → EIN Körper, dessen Seitenflächen sich
+  // entlang der Tal-Kanten berühren (OCP: gültig, aber BOP meldet die Berührungen). Wasserdicht,
+  // strikt sauber, Volumen exakt; getrennte Körper bräuchten eine Topologie-Trennung bis ins Region-Growing.
+  { name: 'Pyramiden stoßen Kante an Kante (ohne Platte)', tris: knurlPyramids, want: { solids: 1, voids: 0, vol: 'mesh', faces: { AN: 97, AUS: 97 } }, ocpBop: { BOPAlgo_SelfIntersect: 53 } },
 ];
 
 // ---- Pipeline wie im Worker
