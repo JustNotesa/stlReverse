@@ -44,6 +44,12 @@
  *     schlechter als vorher; NozzleBox gleich, Skoda-Haken −1. Die erste, nicht transaktionale
  *     Fassung kippte z5 bei reiner Verschiebung von 14 auf ~260 Flächen (halbe Spalten).
  *
+ * Berührflächen-Reparatur (mesh-repair.js): läuft ZUERST — auch bei τ = 0. Zwei Körper, die
+ * sich flächig berühren (Deckel auf Topf), tragen die Kontaktfläche doppelt; jede Kante dieser
+ * Fläche wird von vier Dreiecken benutzt (non-manifold). Die Reparatur entfernt die beiden
+ * Zwillinge, danach sieht der Kollaps ein 2-mannigfaltiges Netz. Abschaltbar mit
+ * opts.repair = false (dann bleibt das Netz, wie es ist).
+ *
  * Standard τ = 0,02 mm (gemessen 2026-10-27): der Härtetest (61 Körper) bleibt exakt wie ohne
  * Bereinigung; bei 0,05 mm verlieren die fein tessellierten Rundungen m64 (Kanten 0,037 mm) und
  * x9 ihre exakte Schärfung (nur noch ≤ 0,01 mm) und das eBike seine Kanal-Stückelung (47 → 44
@@ -52,8 +58,11 @@
  * Bögen mit r 0,1–3 mm), der Schutz erodierte Kette um Kette über die Durchläufe (nicht stabil).
  *
  * Ergebnis: { mesh, report }. Ohne Kollaps wird das EINGABE-Netz (dasselbe Objekt) zurück-
- * gegeben; unveränderte Dreiecke behalten ihr Objekt und ihre exakten Koordinaten.
+ * gegeben — nach der Berührflächen-Reparatur ggf. das reparierte Netz; unveränderte Dreiecke
+ * behalten ihr Objekt und ihre exakten Koordinaten.
  */
+
+import { repairNonManifold } from './mesh-repair.js?v=1';
 
 export const DEFAULT_MIN_DETAIL_MM = 0.02;
 const SHARP_DEG = 25;              // Diederwinkel ab dem eine Kante als scharf gilt
@@ -75,15 +84,24 @@ const vtxKey = (v) => `${fz(v[0])},${fz(v[1])},${fz(v[2])}`;
 
 /**
  * @param {{faces: Array<{normal:number[], vertices:number[][], area?:number}>}} mesh
- * @param {{minDetailMm?: number, trace?: Array, columns?: boolean}} [opts]
- *        trace: Liste für Diagnose (je Kollaps ein Eintrag); columns: false = Spalten-Kollaps aus
+ * @param {{minDetailMm?: number, trace?: Array, columns?: boolean, repair?: boolean}} [opts]
+ *        trace: Liste für Diagnose (je Kollaps ein Eintrag); columns: false = Spalten-Kollaps aus;
+ *        repair: false = Berührflächen-Reparatur (mesh-repair.js) aus
  */
 export function cleanMesh(mesh, opts = {}) {
   const tau = opts.minDetailMm ?? DEFAULT_MIN_DETAIL_MM;
+  // Berührflächen-Reparatur zuerst (mesh-repair.js): sie läuft auch bei τ = 0, damit der
+  // Kollaps danach ein 2-mannigfaltiges Netz sieht. Ohne Reparatur bleibt das Netz, wie es ist.
+  let repair = null;
+  if (opts.repair !== false && mesh?.faces?.length) {
+    const rr = repairNonManifold(mesh);
+    mesh = rr.mesh;
+    repair = rr.report;
+  }
   const faces = mesh?.faces || [];
   const T = faces.length;
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-  const report = { minDetailMm: tau, inputTris: T, removedTris: 0, collapses: 0, shortBefore: 0, shortAfter: 0, minEdgeAfter: null, columnCollapses: 0, columnBroken: 0, columnFallback: 0, ms: 0 };
+  const report = { minDetailMm: tau, inputTris: T, removedTris: 0, collapses: 0, shortBefore: 0, shortAfter: 0, minEdgeAfter: null, columnCollapses: 0, columnBroken: 0, columnFallback: 0, ms: 0, repair };
   if (!(tau > 0) || !T) return { mesh, report };
 
   // ---- Indiziertes Netz

@@ -87,7 +87,11 @@ export const CASES = [
   { name: 'Platte mit Bohrung + loses Dreieck', tris: () => [...plateWithBore(), looseTri], want: { solids: 1, open: 1, bores: 1, vol: 40 * 30 * 10 - PI * 16 * 10 } },
   { name: 'zwei Würfel, Berührung an einer Kante', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([10, 0, 10], [20, 10, 20])], want: { solids: 2, vol: 2000 }, ocpBop: { BOPAlgo_SelfIntersect: 3 } },
   { name: 'zwei Würfel, Berührung in einer Ecke', tris: () => [...box([0, 0, 0], [10, 10, 10]), ...box([10, 10, 10], [20, 20, 20])], want: { solids: 2, vol: 2000 }, ocpBop: { BOPAlgo_SelfIntersect: 1 } },
-  { name: 'Würfel mit Netz-Finne', tris: cubeWithFin, want: { solids: 1, dropped: 1, vol: 1000 } },
+  // Seit mesh-repair.js entfernt schon die Netz-Reparatur die doppelseitige Finne (zwei deckungsgleiche,
+  // gegenläufige Dreieckspaare) — der Export sieht nur noch den Würfel. Den Verwerf-Pfad des Exporters
+  // (hauchdünne Schale) prüft die Variante ohne Netz-Reparatur (repair: false).
+  { name: 'Würfel mit Netz-Finne', tris: cubeWithFin, want: { solids: 1, dropped: 0, vol: 1000 } },
+  { name: 'Würfel mit Netz-Finne (ohne Netz-Reparatur)', tris: cubeWithFin, repair: false, want: { solids: 1, dropped: 1, vol: 1000 } },
   { name: 'invertierter Würfel', tris: () => box([0, 0, 0], [10, 10, 10], true), want: { solids: 1, inverted: 1, vol: 1000 } },
   // Freigang der Kreis-Umwandlung: dünner Steg → facettiert (Volumen = Netz), dicker Steg → Kreis
   { name: 'zwei Bohrungen, Steg 0.2 mm', tris: () => twoBores(0.2), want: { solids: 1, bores: 0, vol: 'mesh' } },
@@ -99,9 +103,10 @@ export const CASES = [
 ];
 
 // ---- Pipeline wie im Worker
-export function groupsOfTris(tris) {
+// opts.repair = false: Berührflächen-Reparatur (mesh-repair.js) aus — für Fälle, die den Exporter selbst prüfen
+export function groupsOfTris(tris, opts = {}) {
   const buf = G.toBinaryStl(tris, 'schalen');
-  const mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh;
+  const mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {}), { repair: opts.repair !== false }).mesh;
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   quiet(() => recognizePrimitives(groups));
   quiet(() => detectTubes(groups));
@@ -134,7 +139,7 @@ if (isMain) {
 
   for (const cs of CASES) {
     const tris = cs.tris();
-    const groups = groupsOfTris(tris);
+    const groups = groupsOfTris(tris, cs);
     const vSoll = wantVolume(cs, tris);
     for (const def of [true, false]) {
       const res = exportCase(groups, def);

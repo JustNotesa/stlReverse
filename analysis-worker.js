@@ -70,18 +70,25 @@ self.addEventListener('message', (event) => {
       });
 
       // Netz-Bereinigung „Kleinste Detailgröße“ (mesh-clean.js): Mikro-Kanten kollabieren, bevor
-      // Region-Growing sie zu STEP-Kanten macht. 0 = aus. Gleiche Funktion wie in den Node-Tests.
+      // Region-Growing sie zu STEP-Kanten macht; zusätzlich werden Berührflächen repariert
+      // (mesh-repair.js), damit der Kollaps ein 2-mannigfaltiges Netz sieht.
       mesh = rawMesh;
       const tau = Number.isFinite(minDetailMm) ? minDetailMm : DEFAULT_MIN_DETAIL_MM;
       cachedClean = null;
-      if (tau > 0) {
-        self.postMessage({ id, progress: { step: 'worker', detail: `Mikro-Kanten < ${tau} mm werden entfernt …`, ratio: 0.39 } });
-        const { mesh: cleaned, report } = cleanMesh(rawMesh, { minDetailMm: tau });
+      {
+        const detail = tau > 0
+          ? `Mikro-Kanten < ${tau} mm werden entfernt …`
+          : 'Mikro-Kanten-Bereinigung aus, Berührflächen werden geprüft …';
+        self.postMessage({ id, progress: { step: 'worker', detail, ratio: 0.39 } });
+        const { mesh: cleaned, report } = cleanMesh(rawMesh, { minDetailMm: tau > 0 ? tau : 0 });
         mesh = cleaned;
         cachedClean = report;
+        const beruehrt = report.repair?.contactPairs > 0
+          ? `, ${report.repair.nonManifoldEdges - report.repair.nonManifoldEdgesAfter} Berührkanten verschweißt`
+          : '';
         self.postMessage({
           id,
-          progress: { step: 'worker', detail: `Netz bereinigt: ${report.removedTris} Mikro-Dreiecke entfernt`, ratio: 0.40 }
+          progress: { step: 'worker', detail: `Netz bereinigt: ${report.removedTris} Mikro-Dreiecke entfernt${beruehrt}`, ratio: 0.40 }
         });
       }
 
