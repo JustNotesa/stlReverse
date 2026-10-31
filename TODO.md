@@ -191,6 +191,22 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Box-Ecken + gefaste Eckrundungen (2026-10-31, `wt/innenrundungen`)** — „Verrundungen entfernen“ jetzt Standard AUS
+  (Chip „Rundungen bleiben erhalten“, verdict.js-Default aus). Neuer Unterpunkt „Biegungen mit gleicher Wandstärke rund
+  lassen“ (Standard an, ausgegraut ohne „Verrundungen entfernen“; intern `sharpenBends` invertiert). exporters.js:
+  v2d `defeatureChamferCorners` schärft senkrechte Eckrundungen, an denen oben/unten eine Fase oder nach innen geneigte
+  Schräge anliegt (Wände → senkrechte Kante, Fasen → Gehrung; exakte Ebenen, 3-Ebenen-Schnitt an Deckflächen, ein
+  Punkt-Objekt je Ecke). `findCornerPairAxes`: Box-Ecke = konvexe + konkave Eckrundung mit gleicher Wandstärke auf beiden
+  Schenkeln (nicht koaxial, Bögen direkt gegenüber, ≥ 4 Sehnen ≤ 22°) bleibt mit dem Unterpunkt rund (v1/v2/v2b/v2d),
+  `report.cornerPairsKept`. box1: AUS 107 | AN 35 (19 Ebenen + 8 Zylinder + 8 Kegel, keine Facetten) | AN ohne Unterpunkt
+  19 Ebenen (alles scharf); lid 1203 | 35 | 19. Kabelhalter/NozzleBox/Skoda unverändert. Neue Suite `eckfasen`
+  (tests/eck-fasen-regression.mjs, 7 Körper × 4 Lagen). check.mjs: Rohprofil-Soll mit Fasen (p4/p6/p7 AN+B jetzt scharf).
+  Offen: box2 (Trennwand) bleibt AN/AUS facettiert — Bodenband scheitert an der Eck-Kugel (Bandtiefe ungleich,
+  Facetten der senkrechten r2-Rundung reichen tiefer); grobe Bögen (3 Segmente) → profile-arcs passt in AUS Riesen-
+  Zylinder an (Altlast); diag-taschen alles scharf in verschobener Lage: 1× loop-overlap aus v2b (Altlast);
+  Kegel-Paare (Formschräge) in findBendGroups nicht umgesetzt (kein reales Teil, box1 hat keine Formschräge);
+  Kabelhalter AN+B: v2d an 8 gefasten Profilecken wird per Rückfall verworfen (Ergebnis = vorher).
+
 - [x] **UI-Überarbeitung „Maker-Ablauf+“ (2026-10-29, `wt/ui-neu`)** — zwei Entwürfe (Maker-Ablauf / CAD-Werkbank), Jury,
   Umsetzung durch MiniMax, zwei unabhängige Prüfrunden. Ergebnis-Karte (Verdikt, STEP-Download ohne Scrollen, Kennzahlen,
   „Facettiert geblieben“ mit Grund), Optionen-Spalte mit Erklärsätzen, neue Schalter „Gravur als Extrusion“ (an) und

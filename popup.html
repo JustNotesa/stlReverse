@@ -62,7 +62,7 @@
         <p>… und als <abbr title="Austauschformat für echte CAD-Körper, öffnet in Fusion 360, FreeCAD, CST">STEP</abbr>-Volumenkörper herunterladen.</p>
         <button type="button" class="btn btn--primary btn--lg" id="file-pick-button">Datei auswählen …</button>
         <input id="file-input" class="visually-hidden" type="file" accept=".stl,model/stl" tabindex="-1" aria-hidden="true">
-        <ul class="chips"><li>Bleibt auf deinem Rechner</li><li>ASCII &amp; binär</li><li>Verrundungen werden entfernt</li></ul>
+        <ul class="chips"><li>Bleibt auf deinem Rechner</li><li>ASCII &amp; binär</li><li>Rundungen bleiben erhalten</li></ul>
       </div>
     </section>
 
@@ -114,11 +114,11 @@
       <h2 id="options-title">Optionen</h2>
       <p class="micro muted" id="options-note" aria-live="polite">Wirken sofort auf das Ergebnis.</p>
       <div class="opt opt--main">
-        <input type="checkbox" class="switch" id="defeature-toggle" checked>
+        <input type="checkbox" class="switch" id="defeature-toggle">
         <label for="defeature-toggle">Verrundungen entfernen</label>
         <p class="opt__help">Abgerundete Kanten werden scharf, Rundungen am Lochrand werden zur
-          <abbr title="schräg angeschnittene Kante">Fase</abbr>. Aus: Rundungen bleiben als
-          <abbr title="viele kleine ebene Dreiecksflächen – im CAD schlecht bearbeitbar">Facetten</abbr> erhalten.</p>
+          <abbr title="schräg angeschnittene Kante">Fase</abbr>. Aus (Standard): Rundungen bleiben erhalten, wo möglich als echte Zylinder-/Kegelflächen statt
+          <abbr title="viele kleine ebene Dreiecksflächen – im CAD schlecht bearbeitbar">Facetten</abbr>.</p>
       </div>
       <div class="opt opt--sub">
         <input type="checkbox" class="switch" id="keep-bends-toggle" checked>

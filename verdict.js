@@ -78,7 +78,7 @@ function edgePhrases(report) {
  * @param {object|null} analysis Analyseergebnis (für meshClean, tubeStats, meta.triangles, boundingBox)
  * @param {{defeature?: boolean}} opts
  */
-export function buildVerdict(report, analysis, { defeature = true } = {}) {
+export function buildVerdict(report, analysis, { defeature = false } = {}) {   // Standard wie UI: „Verrundungen entfernen“ AUS
   if (!report) return null;
 
   const { watertight, boundaryEdges, nonManifoldEdges, orientationDefects, edgeCount, faceCount } = report;

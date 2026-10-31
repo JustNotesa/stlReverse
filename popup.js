@@ -3,7 +3,7 @@ import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolume
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=32';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=22';
-import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=6';
+import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=7';
 import { initTabs, initViewToggle, initFullscreen, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=5';
 import { applyFeatureColorVars, buildFeatureLegend } from './feature-colors.js?v=1';
 import {
@@ -71,7 +71,7 @@ let workerJobCounter = 0;
 // ── Export-Optionen (ui-spec.md 6.1) ───────────────────────────────────────
 // Alle vier sind EXPORT-Optionen (Hauptthread, buildVolumeStepBrepV2) und keine
 // Worker-Optionen: eine Änderung rechnet nur das Verdikt neu, nicht die Analyse.
-const _defeatureOn       = () => document.getElementById('defeature-toggle')?.checked !== false;
+const _defeatureOn       = () => document.getElementById('defeature-toggle')?.checked === true;   // Standard AUS
 // Standard AN („rund lassen“) → schärfen nur, wenn der Schalter AUS ist.
 const _sharpenBendsOn    = () => document.getElementById('keep-bends-toggle')?.checked === false;
 const _extrusionBandsOn  = () => document.getElementById('extrusion-bands-toggle')?.checked !== false;  // Standard AN
