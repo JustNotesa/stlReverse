@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>STL Reverse</title>
-  <link rel="stylesheet" href="popup.css?v=7">
+  <link rel="stylesheet" href="popup.css?v=8">
 </head>
 <body data-state="empty" data-verdict="">
   <a class="skip" href="#main">Zum Inhalt</a>
@@ -120,10 +120,10 @@
           <abbr title="schräg angeschnittene Kante">Fase</abbr>. Aus: Rundungen bleiben als
           <abbr title="viele kleine ebene Dreiecksflächen – im CAD schlecht bearbeitbar">Facetten</abbr> erhalten.</p>
       </div>
-      <div class="opt">
-        <input type="checkbox" class="switch" id="sharpen-bends-toggle">
-        <label for="sharpen-bends-toggle">Blech-Biegungen schärfen</label>
-        <p class="opt__help" id="sharpen-bends-help">Biegungen mit gleicher Wandstärke werden zu scharfen Ecken. Aus: sie bleiben rund (echte Zylinderstücke).</p>
+      <div class="opt opt--sub">
+        <input type="checkbox" class="switch" id="keep-bends-toggle" checked>
+        <label for="keep-bends-toggle">Biegungen mit gleicher Wandstärke rund lassen</label>
+        <p class="opt__help" id="keep-bends-help">Gebogene Profile wie Blechwinkel oder Box-Ecken mit gleich dicker Wand behalten ihre Rundung (echte Zylinder-/Kegelflächen). Aus: auch sie werden scharf.</p>
       </div>
       <details class="opt-adv" id="options-advanced">
         <summary>Erweitert</summary>
@@ -236,6 +236,6 @@
   </main>
 
   <div class="drop-overlay" id="drop-overlay" hidden aria-hidden="true">Loslassen ersetzt die aktuelle Datei</div>
-  <script type="module" src="popup.js?v=14"></script>
+  <script type="module" src="popup.js?v=15"></script>
 </body>
 </html>

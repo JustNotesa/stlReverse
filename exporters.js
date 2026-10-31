@@ -2266,10 +2266,13 @@ export function buildVolumeStepBrepV2(analysis) {
         featureOps.push(op);
         return true;
       };
+      // Box-Ecken gleicher Wandstärke (s. findCornerPairAxes) bleiben wie Biegungen rund
+      const pairAxesV1 = SHARPEN_BENDS ? null : findCornerPairAxes();
       for (const entry of filletById.values()) {
         // Biegung eines Blechprofils (Innen-/Außenbogen koaxial): bleibt per Default rund
-        // (Schalter „Blech-Biegungen schärfen“); nur mit SHARPEN_BENDS wird sie geschärft.
+        // (Schalter „Biegungen mit gleicher Wandstärke rund lassen“); nur mit SHARPEN_BENDS wird sie geschärft.
         if (entry.groups.some((g) => bendGroups.has(g))) continue;
+        if (pairAxesV1 && Array.isArray(entry.prim.axis) && Array.isArray(entry.prim.axisPoint) && axisProtected(pairAxesV1, _norm3(entry.prim.axis), entry.prim.axisPoint)) continue;
         try { if (defeatureOne(entry)) filletsDefeatured++; } catch (_) { /* Guard */ }
       }
       if (defeaturedGroups.size) faceDefs = faceDefs.filter(fd => !defeaturedGroups.has(fd.group));
@@ -2416,7 +2419,26 @@ export function buildVolumeStepBrepV2(analysis) {
     // senkrechten Profil-Eckrundungen) — die bleiben v2b (defeatureProfileCorners).
     // gesperrte Rundungen (Rückfall je Merkmal) bleiben stehen
     // gesperrte Rundungen (Rückfall je Merkmal) und Biegungen von Blechprofilen bleiben stehen
-    const bandBlocked = (plan) => { for (const fi of plan.band) if (fds[fi].group && (blockedGroups.has(fds[fi].group) || bendGroups.has(fds[fi].group))) return true; return false; };
+    // Box-Ecken gleicher Wandstärke (s. findCornerPairAxes): ein Band, das NUR aus Facetten eines solchen
+    // Eck-Bogens besteht (senkrechte Eckrundung als offenes Band einer Wand), bleibt rund
+    const pairAxesV2 = SHARPEN_BENDS ? null : findCornerPairAxes();
+    const onPairAxis = (fd) => {
+      const n = _norm3(fd.normal), c = fd.centroid;
+      if (!c) return false;
+      for (const a of pairAxesV2) {
+        if (Math.abs(_dot3(a.d, n)) > 0.05) continue;
+        // Facette eines Drehkörpers um die Achse: die Normale durch den Schwerpunkt trifft die Achse
+        const w = _sub3(c, a.c), cr = _cross3(a.d, n), l = Math.hypot(cr[0], cr[1], cr[2]);
+        if (!(l > 1e-9)) continue;
+        if (Math.abs(_dot3(w, cr)) / l <= Math.max(0.05, 0.03 * a.r)) return true;
+      }
+      return false;
+    };
+    const bandBlocked = (plan) => {
+      for (const fi of plan.band) if (fds[fi].group && (blockedGroups.has(fds[fi].group) || bendGroups.has(fds[fi].group))) return true;
+      if (pairAxesV2 && pairAxesV2.length && plan.band.size && [...plan.band].every((fi) => onPairAxis(fds[fi]))) return true;
+      return false;
+    };
     const evalLoop = (pi, L, multiOk) => {
       const info = { runs: 1 };
       for (let run = 0; run < info.runs; run++) { const plan = evaluateBand(pi, L, run, info, multiOk); if (plan && !bandBlocked(plan)) return plan; }
@@ -3303,6 +3325,134 @@ export function buildVolumeStepBrepV2(analysis) {
   // als die Nachbarkante), wird der kurze Bogenabschnitt bis zur Ecke mitgenommen.
   // (Aufruf in runPipeline() unten.)
   let cornersDefeatured = 0;
+  // ---- Box-Ecken mit gleich dicker Wand bleiben rund (Schalter „Biegungen mit gleicher Wandstärke rund
+  // lassen“, = !SHARPEN_BENDS) ----
+  // findBendGroups erkennt nur KOAXIALE Zylinder-Paare (Blechbiegung) — und nur, wenn die Primitiv-Erkennung
+  // die Bögen überhaupt als Zylinder sieht (an gefasten Stirnseiten oft nicht). Eine Box-Ecke ist ein Paar aus
+  // konvexer Außen- und konkaver Innen-Eckrundung, deren anschließende Wände auf BEIDEN Schenkeln parallel im
+  // gleichen Abstand t liegen; die Bögen müssen dabei NICHT koaxial sein (Box: außen r 7, innen r 7, Mittelpunkte
+  // um (4;4) versetzt, Wand 4 mm). Gesucht wird in den Konturen der Deckflächen (Rand, Stirnseite): dort liegen
+  // beide Bögen derselben Ecke in EINER Fläche. Ergebnis: Achsen { d, c, r } beider Bögen; v2b und v2d lassen
+  // jeden Bogenlauf, dessen Kreismitte auf so einer Achse liegt, unverändert (die Bogen-Pfade machen daraus
+  // echte Zylinder-/Kegelstücke). Koaxiale Paare (Blech) erfüllen die Regel genauso (t = r_außen − r_innen).
+  let cornerPairsKept = 0;
+  const cornerPairKeys = new Set();
+  // Kåsa-Kreis-Fit in 2D → { c: [x, y], r, dev } | null
+  const fitCircle2 = (pts) => {
+    const n = pts.length; if (n < 3) return null;
+    let mx = 0, my = 0; for (const p of pts) { mx += p[0]; my += p[1]; } mx /= n; my /= n;
+    let sxx = 0, sxy = 0, syy = 0, sxz = 0, syz = 0;
+    for (const p of pts) { const x = p[0] - mx, y = p[1] - my, z = x * x + y * y; sxx += x * x; sxy += x * y; syy += y * y; sxz += x * z; syz += y * z; }
+    const det = sxx * syy - sxy * sxy;
+    if (!(Math.abs(det) > 1e-18)) return null;
+    const a = (sxz * syy - syz * sxy) / (2 * det), b = (syz * sxx - sxz * sxy) / (2 * det);
+    const c = [mx + a, my + b];
+    let r = 0; for (const p of pts) r += Math.hypot(p[0] - c[0], p[1] - c[1]); r /= n;
+    let dev = 0; for (const p of pts) dev = Math.max(dev, Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r));
+    return { c, r, dev };
+  };
+  // Bogenläufe einer Kontur (wie v2b: kleine gleichsinnige Knicke zwischen zwei langen Kanten) → [{ j, m, sg }]
+  const arcRunsOf = (q) => {
+    const n = q.length, out = [];
+    if (n < 6) return out;
+    const len = [], dir = [];
+    for (let i = 0; i < n; i++) { const a = q[i], b = q[(i + 1) % n], l = Math.hypot(b[0] - a[0], b[1] - a[1]); len.push(l); dir.push(l > 0 ? [(b[0] - a[0]) / l, (b[1] - a[1]) / l] : [0, 0]); }
+    const turn = [];
+    for (let i = 0; i < n; i++) { const a = dir[(i - 1 + n) % n], b = dir[i]; turn.push(Math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]) * 180 / Math.PI); }
+    const isArc = (i) => Math.abs(turn[i]) >= 0.3 && Math.abs(turn[i]) <= 35;
+    const sortedLen = len.slice().sort((x, y) => x - y);
+    let iLong = 0; for (let i = 1; i < n; i++) if (len[i] > len[iLong]) iLong = i;
+    if (len[iLong] < 3 * sortedLen[Math.floor(n / 2)]) return out;
+    const s0 = (iLong + 1) % n;
+    for (let k = 0; k < n; ) {
+      const i0 = (s0 + k) % n;
+      if (!isArc(i0)) { k++; continue; }
+      const sg = Math.sign(turn[i0]);
+      let e = i0, cnt = 1;
+      const ch = [];
+      while (k + cnt < n && isArc((e + 1) % n) && Math.sign(turn[(e + 1) % n]) === sg) {
+        // ein Lauf endet an jeder LANGEN Kante (zwei Eckrundungen mit gerader Kante dazwischen, wie v2b)
+        if (ch.length) { const srt = ch.slice().sort((x, y) => x - y); if (len[e] > 2.5 * srt[srt.length >> 1]) break; }
+        ch.push(len[e]); e = (e + 1) % n; cnt++;
+      }
+      k += cnt;
+      if (cnt < 2) continue;
+      const j = i0, m = e;
+      const chords = []; for (let i = j; i !== m; i = (i + 1) % n) chords.push(len[i]);
+      chords.sort((x, y) => x - y);
+      const Lc = chords[Math.floor(chords.length / 2)] || 0;
+      if (len[(j - 1 + n) % n] < 3 * Lc || len[m] < 3 * Lc) continue;
+      out.push({ j, m, sg });
+    }
+    return out;
+  };
+  const runPts = (q, j, m) => { const pts = []; for (let i = j; ; i = (i + 1) % q.length) { pts.push(q[i]); if (i === m) break; } return pts; };
+  const findCornerPairAxes = () => {
+    const axes = [];
+    for (const fd of faceDefs) {
+      const d = _norm3(fd.normal);
+      if (!(Math.hypot(d[0], d[1], d[2]) > 0.5)) continue;
+      const u = computeRefDir(d), v = _norm3(_cross3(d, u));
+      const arcs = [];
+      for (const L of [fd.outer, ...fd.inner]) {
+        if (L.circleRim || L.length < 6) continue;
+        const q = L.map((p) => [_dot3(p, u), _dot3(p, v)]);
+        let h = 0; for (const p of L) h += _dot3(d, p); h /= L.length;
+        for (const { j, m, sg } of arcRunsOf(q)) {
+          const pts = runPts(q, j, m);
+          if (pts.length < 3) continue;
+          const f = fitCircle2(pts);
+          if (!f || !(f.r > 0) || f.dev > Math.max(0.01, 0.02 * f.r)) continue;
+          const nrm2 = (p) => { const x = p[0] - f.c[0], y = p[1] - f.c[1], l = Math.hypot(x, y); return [x / l, y / l]; };
+          arcs.push({ c: f.c, r: f.r, sg, s: nrm2(q[j]), e: nrm2(q[m]), h });
+        }
+      }
+      const ang = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1]))) * 180 / Math.PI;
+      for (let i = 0; i < arcs.length; i++) for (let k = i + 1; k < arcs.length; k++) {
+        const A = arcs[i], B = arcs[k];
+        if (A.sg === B.sg) continue;                                            // konvex + konkav
+        const same = (ang(A.s, B.s) <= 3 && ang(A.e, B.e) <= 3) || (ang(A.s, B.e) <= 3 && ang(A.e, B.s) <= 3);
+        if (!same) continue;
+        const leg = (n2) => Math.abs((A.c[0] * n2[0] + A.c[1] * n2[1] + A.r) - (B.c[0] * n2[0] + B.c[1] * n2[1] + B.r));
+        const tA = leg(A.s), tB = leg(A.e);
+        if (tA < 0.1 || tB < 0.1 || Math.abs(tA - tB) > Math.max(0.02, 0.02 * Math.max(tA, tB))) continue;
+        if (Math.max(tA, tB) > 3 * Math.max(A.r, B.r) + 10) continue;
+        for (const X of [A, B]) axes.push({ d, c: [u[0] * X.c[0] + v[0] * X.c[1] + d[0] * X.h, u[1] * X.c[0] + v[1] * X.c[1] + d[1] * X.h, u[2] * X.c[0] + v[2] * X.c[1] + d[2] * X.h], r: X.r });
+      }
+    }
+    return axes;
+  };
+  // Achse (Einheitsvektor ax durch Punkt ap) = Achse eines Box-Ecken-Bogens? Zählt jede Achse einmal.
+  const axisProtected = (axes, ax, ap) => {
+    for (const a of axes) {
+      if (Math.abs(_dot3(a.d, ax)) < 0.9999) continue;
+      const w = _sub3(a.c, ap), al = _dot3(w, ax);
+      if (Math.hypot(w[0] - ax[0] * al, w[1] - ax[1] * al, w[2] - ax[2] * al) <= Math.max(0.05, 0.03 * a.r)) {
+        const key = a.c.map((x) => x.toFixed(2)).join(',');
+        if (!cornerPairKeys.has(key)) { cornerPairKeys.add(key); cornerPairsKept++; }
+        return true;
+      }
+    }
+    return false;
+  };
+  // Bogenlauf (2D-Punkte q[j…m] in der Ebene u/v von P, Normale d) geschützt? Zählt jede Achse einmal.
+  const pairProtected = (axes, q, j, m, u, v, d, L) => {
+    if (!axes || !axes.length) return false;
+    const f = fitCircle2(runPts(q, j, m));
+    if (!f) return false;
+    let h = 0; for (const p of L) h += _dot3(d, p); h /= L.length;
+    const c3 = [u[0] * f.c[0] + v[0] * f.c[1] + d[0] * h, u[1] * f.c[0] + v[1] * f.c[1] + d[1] * h, u[2] * f.c[0] + v[2] * f.c[1] + d[2] * h];
+    for (const a of axes) {
+      if (Math.abs(_dot3(a.d, d)) < 0.9999) continue;
+      const w = _sub3(c3, a.c), al = _dot3(w, a.d);
+      if (Math.hypot(w[0] - a.d[0] * al, w[1] - a.d[1] * al, w[2] - a.d[2] * al) <= Math.max(0.05, 0.03 * a.r)) {
+        const key = a.c.map((x) => x.toFixed(2)).join(',');
+        if (!cornerPairKeys.has(key)) { cornerPairKeys.add(key); cornerPairsKept++; }
+        return true;
+      }
+    }
+    return false;
+  };
   function defeatureProfileCorners() {
     const WALL_COS = 1e-3, PARALLEL_COS = 0.9999;
     const ARC_MIN_DEG = 0.3, ARC_MAX_DEG = 35;
@@ -3319,6 +3469,7 @@ export function buildVolumeStepBrepV2(analysis) {
     function findCorner() {
       const fds = faceDefs;
       const nrm = fds.map((fd) => _norm3(fd.normal));
+      const pairAxes = SHARPEN_BENDS ? null : findCornerPairAxes();
       const edgeOwners = new Map();
       fds.forEach((fd, fi) => {
         for (const L of [fd.outer, ...fd.inner]) {
@@ -3393,6 +3544,7 @@ export function buildVolumeStepBrepV2(analysis) {
             while (ext < 3 && len[m] <= 1.5 * Lc) { m = (m + 1) % n; ext++; }
             const ia = (j - 1 + n) % n, ib = m;                // Kante A (endet in q[j]), Kante B (beginnt in q[m])
             if (len[ia] < 3 * Lc || len[ib] < 3 * Lc) continue;
+            if (pairProtected(pairAxes, q, j, m, u, v, d, L)) continue;   // Box-Ecke gleicher Wandstärke bleibt rund
             const dA = dir[ia], dB = dir[ib];
             const cr = dA[0] * dB[1] - dA[1] * dB[0];
             const dotAB = dA[0] * dB[0] + dA[1] * dB[1];
@@ -3555,6 +3707,410 @@ export function buildVolumeStepBrepV2(analysis) {
       }
       faceDefs = faceDefs.filter((_, i) => !removeSet.has(i));
       if (newWall) faceDefs.push(newWall);
+    }
+  }
+
+  // ---- Body-Defeaturing v2d: Eckrundungen, an denen eine FASE anliegt ----
+  // v2b (defeatureProfileCorners) schärft die senkrechte Profil-Eckrundung: der Bogenlauf in der
+  // Kontur einer Deckfläche P kollabiert auf den Schnittpunkt der verlängerten Wände A und B. Das
+  // setzt voraus, dass die Nachbarflächen der Laufkanten senkrechte Wände sind (⊥ P) und die
+  // Deckfläche selbst (∥ P) — sonst bricht v2b ab (`else { ok = false; break; }`) und die Ecke
+  // bleibt rund (Zylinder + Fasen-Kegel). Typischer Fall: Box mit Rundrechteck-Grundriss, unten
+  // 45°-Fase, oben schräge Stapel-Fase.
+  // Dieser Pass schärft GENAU solche Ecken:
+  //   – Region R = die Flächen JENSEITS des Bogenlaufs (die Fasen-Lagen um die Ecke), gefunden per
+  //     Breitensuche über gemeinsame Kanten. Nur Flächen, deren Azimut zwischen den Wänden A und B
+  //     liegt (der Eck-Quadrant), gehören dazu.
+  //   – Lage = Neigung tilt = d·nrm (0 = senkrecht, 1 = parallel zur Deckfläche). Jede Lage braucht
+  //     Wand A UND Wand B derselben Neigung → daraus folgt je Lage die scharfe Gehrungs-Ecke
+  //     (Schnittpunkt der Ebenen A′/B′ auf der Höhe des Punktes).
+  //   – Die Rand-Flächen (Deckflächen, Wände A/B) bekommen an ihren Eck-Punkten die neuen Lagen:
+  //     die Deckfläche genau EINE scharfe Ecke, die Wände die scharfe senkrechte Kante.
+  // Grenzen: nur der Fall „cross" (A und B schneiden sich in der Profilebene); nur Regionen mit
+  // mindestens einer schrägen Lage (rein senkrechte Ecken bleiben Sache von v2b — dessen Verhalten
+  // ändert sich NICHT); nur wenn die Lagen widerspruchsfrei sind (alle berechneten Punkte einer
+  // Lage liegen ≤ PT_TOL auseinander). Der Rückfall je Merkmal läuft über op.kind 'v2b'.
+  // (Aufruf in runPipeline() unten.)
+  function defeatureChamferCorners() {
+    const PARALLEL_COS = 0.9999;            // Deckfläche (∥ P)
+    const AZI_TOL = 0.5;                    // Grad: Azimut-Toleranz (Familie A/B, inR)
+    const TILT_TOL = 0.02;                  // Neigung (d·nrm) einer Lage
+    const PROJ_MIN = 0.2;                   // Mindestlänge der 2D-Projektion einer Fläche
+    const ARC_MIN_DEG = 0.3, ARC_MAX_DEG = 35;
+    const MIN_LINE_SIN = Math.sin(10 * Math.PI / 180);
+    const PT_TOL = 1e-4;                    // mm: Punkt-Toleranz
+    const MAX_REGION = 5000;                // Flächen in der Region R (Laufzeit-Schutz)
+    let done = 0;
+    for (let guard = 0; guard < 500; guard++) {
+      const plan = findPlan();
+      if (!plan) break;
+      applyPlan(plan);
+      done++;
+    }
+    return done;
+
+    function findPlan() {
+      const fds = faceDefs;
+      const nrm = fds.map((fd) => _norm3(fd.normal));
+      const pairAxes = SHARPEN_BENDS ? null : findCornerPairAxes();
+      // Kanten-Besitzer (edgeKeyFn → [fi]) wie in v2b und Punkt-Index (vtxKey → Set(fi)) über ALLE
+      // Loops aller Flächen (circleRim-Loops zählen mit — ihre Kanten sind keine Kanten-Besitzer).
+      const edgeOwners = new Map();
+      const vtxFaces = new Map();
+      fds.forEach((fd, fi) => {
+        for (const L of [fd.outer, ...fd.inner]) {
+          for (const p of L) {
+            const k = vtxKey(p);
+            let s = vtxFaces.get(k);
+            if (!s) { s = new Set(); vtxFaces.set(k, s); }
+            s.add(fi);
+          }
+          if (L.circleRim) continue;
+          for (let i = 0; i < L.length; i++) {
+            const k = edgeKeyFn(L[i], L[(i + 1) % L.length]);
+            let o = edgeOwners.get(k); if (!o) { o = []; edgeOwners.set(k, o); }
+            o.push(fi);
+          }
+        }
+      });
+      for (let pi = 0; pi < fds.length; pi++) {
+        const P = fds[pi], d = nrm[pi];
+        const u = computeRefDir(d), v = _norm3(_cross3(d, u));
+        const to2 = (p) => [_dot3(p, u), _dot3(p, v)];
+        const ang2 = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1]))) * 180 / Math.PI;
+        // 2D-Normale einer Fläche (Projektion auf die Ebene von P) — nur gültig, wenn die Projektion
+        // lang genug ist (sonst ist die Fläche ⊥ zur Ebene von P und hat keinen Azimut).
+        const azOf = (f) => {
+          const x = _dot3(nrm[f], u), y = _dot3(nrm[f], v);
+          const l = Math.hypot(x, y);
+          return l >= PROJ_MIN ? [x / l, y / l] : null;
+        };
+        for (const L of [P.outer, ...P.inner]) {
+          if (L.circleRim || L.length < 6) continue;
+          // Bogenlauf-Erkennung EXAKT wie in v2b — nur ohne die Forderung „Nachbarn sind Wände“.
+          const n = L.length;
+          const q = L.map(to2);
+          const len = [], dir = [];
+          for (let i = 0; i < n; i++) {
+            const a = q[i], b = q[(i + 1) % n];
+            const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            len.push(l); dir.push(l > 0 ? [(b[0] - a[0]) / l, (b[1] - a[1]) / l] : [0, 0]);
+          }
+          const turn = [];
+          for (let i = 0; i < n; i++) {
+            const a = dir[(i - 1 + n) % n], b = dir[i];
+            turn.push(Math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]) * 180 / Math.PI);
+          }
+          const isArc = (i) => Math.abs(turn[i]) >= ARC_MIN_DEG && Math.abs(turn[i]) <= ARC_MAX_DEG;
+          // Vollkreis (Loch): keine Kante ist deutlich länger als die übrigen → kein gerader Nachbar
+          const sortedLen = len.slice().sort((x, y) => x - y);
+          let iLong = 0; for (let i = 1; i < n; i++) if (len[i] > len[iLong]) iLong = i;
+          if (len[iLong] < 3 * sortedLen[Math.floor(n / 2)]) continue;
+          const s0 = (iLong + 1) % n;
+          for (let k = 0; k < n; ) {
+            const i0 = (s0 + k) % n;
+            if (!isArc(i0)) { k++; continue; }
+            const sg = Math.sign(turn[i0]);
+            let e = i0, cnt = 1;
+            const ch = [];
+            while (k + cnt < n && isArc((e + 1) % n) && Math.sign(turn[(e + 1) % n]) === sg) {
+              if (ch.length) { const srt = ch.slice().sort((x, y) => x - y); if (len[e] > 2.5 * srt[srt.length >> 1]) break; }
+              ch.push(len[e]); e = (e + 1) % n; cnt++;
+            }
+            k += cnt;
+            if (cnt < 2) continue;
+            const chords = [];
+            for (let c = 0, i = i0; c < cnt - 1; c++, i = (i + 1) % n) chords.push(len[i]);
+            chords.sort((x, y) => x - y);
+            const Lc = chords[Math.floor(chords.length / 2)];
+            // Kurze Bogenkanten an den Enden mitnehmen (Bogen läuft ohne Tangente in eine Ecke)
+            let j = i0, m = e, ext = 0;
+            while (ext < 3 && len[(j - 1 + n) % n] <= 1.5 * Lc) { j = (j - 1 + n) % n; ext++; }
+            ext = 0;
+            while (ext < 3 && len[m] <= 1.5 * Lc) { m = (m + 1) % n; ext++; }
+            const ia = (j - 1 + n) % n, ib = m;          // Kante A (endet in q[j]), Kante B (beginnt in q[m])
+            if (len[ia] < 3 * Lc || len[ib] < 3 * Lc) continue;
+            if (pairProtected(pairAxes, q, j, m, u, v, d, L)) continue;   // Box-Ecke gleicher Wandstärke bleibt rund
+            const dA = dir[ia], dB = dir[ib];
+            const cr = dA[0] * dB[1] - dA[1] * dB[0];
+            if (Math.abs(cr) < MIN_LINE_SIN) continue;   // nur Fall „cross"
+            const wx = q[m][0] - q[j][0], wy = q[m][1] - q[j][1];
+            const t = (wx * dB[1] - wy * dB[0]) / cr;     // q[j] + t·dA = q[m] + s·dB
+            const s = (wx * dA[1] - wy * dA[0]) / cr;
+            if (t < -1e-6 || s > 1e-6) continue;          // C muss A nach vorn und B nach hinten verlängern
+            let pathLen = 0; for (let i = j; i !== m; i = (i + 1) % n) pathLen += len[i];
+            if (t > 2 * pathLen + 1e-6 || -s > 2 * pathLen + 1e-6) continue;   // Plausibilität
+            const plan = evalRun({ pi, L, n, j, m, ia, ib, d, u, v, to2, ang2, azOf, nrm });
+            if (plan) return plan;
+          }
+        }
+      }
+      return null;
+
+      // ---- Ein Bogenlauf: Region R suchen, Lagen bestimmen, Rand-Flächen umbauen
+      function evalRun(ctx) {
+        const { pi, L, n, j, m, ia, ib, d, u, v, to2, ang2, azOf, nrm } = ctx;
+        const fds = faceDefs;
+        // (3) Nachbarflächen an den Laufkanten: A0 an Kante ia, B0 an Kante ib
+        const osA = (edgeOwners.get(edgeKeyFn(L[ia], L[(ia + 1) % n])) || []).filter((fi) => fi !== pi);
+        if (osA.length !== 1) return null;
+        const osB = (edgeOwners.get(edgeKeyFn(L[ib], L[(ib + 1) % n])) || []).filter((fi) => fi !== pi);
+        if (osB.length !== 1) return null;
+        const nA2 = azOf(osA[0]), nB2 = azOf(osB[0]);
+        if (!nA2 || !nB2) return null;
+        const wAB = ang2(nA2, nB2);
+        if (wAB < 10) return null;                       // Winkel(nA2, nB2) ≥ 10°
+        // (4) inR: Fläche im Azimut-Quadrant zwischen A und B
+        // Auch der GEGENÜBERLIEGENDE Quadrant (−nA2 … −nB2) zählt: eine nach innen geneigte Schräge um
+        // die Ecke (Stapelrand: Außenwand-Eckrundung → Grat → nach innen abfallende Schräge) hat den
+        // umgekehrten Azimut. side(f) = +1 / −1 trennt die beiden Richtungen (Lage = Neigung + Seite).
+        const negA = [-nA2[0], -nA2[1]], negB = [-nB2[0], -nB2[1]];
+        const bis = [nA2[0] + nB2[0], nA2[1] + nB2[1]];
+        const sideOf = (f) => { const a = azOf(f); return a && a[0] * bis[0] + a[1] * bis[1] < 0 ? -1 : 1; };
+        const inQuad = (a, x, y) => { const wA = ang2(x, a), wB = ang2(a, y); return wA > AZI_TOL && wB > AZI_TOL && wA + wB <= wAB + 0.5; };
+        const inR = (f) => {
+          if (f === pi) return false;
+          const a = azOf(f);
+          if (!a) return false;
+          return inQuad(a, nA2, nB2) || inQuad(a, negA, negB);
+        };
+        // (5) Saat: die Flächen jenseits der Laufkanten j … m−1
+        const R = new Set();
+        for (let i = j; i !== m; i = (i + 1) % n) {
+          for (const fj of (edgeOwners.get(edgeKeyFn(L[i], L[(i + 1) % n])) || [])) {
+            if (fj !== pi && inR(fj)) R.add(fj);
+          }
+        }
+        if (!R.size) return null;
+        // Region R per Breitensuche über gemeinsame Kanten
+        const queue = [...R];
+        while (queue.length) {
+          const fj = queue.pop();
+          for (const Lx of [fds[fj].outer, ...fds[fj].inner]) {
+            if (Lx.circleRim) continue;
+            for (let i = 0; i < Lx.length; i++) {
+              const ek = edgeKeyFn(Lx[i], Lx[(i + 1) % Lx.length]);
+              for (const fk of (edgeOwners.get(ek) || [])) {
+                if (fk === pi || R.has(fk) || !inR(fk)) continue;
+                R.add(fk); queue.push(fk);
+              }
+            }
+          }
+          if (R.size > MAX_REGION) return null;
+        }
+        // (6) Rand-Flächen (mit einem Punkt aus R) und ihre Klassifikation
+        const Rkeys = new Set();
+        for (const fj of R) for (const Lx of [fds[fj].outer, ...fds[fj].inner]) for (const p of Lx) Rkeys.add(vtxKey(p));
+        const Bd = new Set();
+        for (const k of Rkeys) for (const fj of (vtxFaces.get(k) || [])) if (!R.has(fj)) Bd.add(fj);
+        const deckF = new Set(), famA = [], famB = [];
+        for (const fj of Bd) {
+          if (Math.abs(_dot3(nrm[fj], d)) >= PARALLEL_COS) { deckF.add(fj); continue; }
+          const a = azOf(fj);
+          if (!a) return null;                           // nicht klassifizierbar → Kandidat verwerfen
+          if (ang2(a, nA2) <= AZI_TOL || ang2(a, negA) <= AZI_TOL) { famA.push(fj); continue; }
+          if (ang2(a, nB2) <= AZI_TOL || ang2(a, negB) <= AZI_TOL) { famB.push(fj); continue; }
+          return null;                                   // alles andere → Kandidat verwerfen
+        }
+        // (7) Lagen: Neigung je Fläche — jede Lage braucht Wand A und Wand B
+        const tilt = (f) => _dot3(d, nrm[f]);
+        // gleiche Lage: Neigung UND Seite (s. sideOf)
+        const sameLayer = (f, t, sd) => Math.abs(tilt(f) - t) <= TILT_TOL && sideOf(f) === sd;
+        let slant = false;
+        for (const fj of R) {
+          const t = tilt(fj), sd = sideOf(fj);
+          if (Math.abs(t) > 0.05) slant = true;
+          if (!famA.some((fk) => sameLayer(fk, t, sd))) return null;
+          if (!famB.some((fk) => sameLayer(fk, t, sd))) return null;
+          const g = fds[fj].group;
+          if (g && (blockedGroups.has(g) || bendGroups.has(g))) return null;   // gesperrt
+        }
+        if (!slant) return null;                          // rein senkrechte Ecke → Sache von v2b
+        // (8) Ebenen der Rand-Flächen und neue Lage je R-Punkt
+        const planeCache = new Map();
+        // Exakte Ebene (wie truePlane in v2): das Region-Growing schlägt oft die erste Facette eines
+        // Fasen-Kegels der Fasen-EBENE zu → nrm ist dann um ~0.02° verkippt und die Gehrungs-Ecken zweier
+        // gleichwertiger Wände weichen um ~0.02 mm ab. Echte Ebene = die Netz-Dreiecke mit der Normale des
+        // größten Dreiecks (± 0.05°), flächengewichtet, wenn sie ≥ 50 % der Fläche ausmachen.
+        const PLANE_COS = Math.cos(0.05 * Math.PI / 180);
+        const planeOf = (fj) => {
+          if (planeCache.has(fj)) return planeCache.get(fj);
+          const nn = nrm[fj], Lx = fds[fj].outer;
+          let pl = null;
+          const vs = fds[fj].group?.vertices;
+          if (Array.isArray(vs) && vs.length >= 3) {
+            const tris = []; let aTot = 0, big = null;
+            for (let t = 0; t + 2 < vs.length; t += 3) {
+              const c = _cross3(_sub3(vs[t + 1], vs[t]), _sub3(vs[t + 2], vs[t]));
+              const l = Math.hypot(c[0], c[1], c[2]);
+              if (!(l > 0)) continue;
+              const tr = { n: [c[0] / l, c[1] / l, c[2] / l], a: l / 2, p: [(vs[t][0] + vs[t + 1][0] + vs[t + 2][0]) / 3, (vs[t][1] + vs[t + 1][1] + vs[t + 2][1]) / 3, (vs[t][2] + vs[t + 1][2] + vs[t + 2][2]) / 3] };
+              tris.push(tr); aTot += tr.a;
+              if (!big || tr.a > big.a) big = tr;
+            }
+            if (big && _dot3(big.n, nn) > 0.99) {
+              const sel = tris.filter((tr) => _dot3(tr.n, big.n) >= PLANE_COS);
+              let sx = 0, sy = 0, sz = 0, aSel = 0;
+              for (const tr of sel) { sx += tr.n[0] * tr.a; sy += tr.n[1] * tr.a; sz += tr.n[2] * tr.a; aSel += tr.a; }
+              if (aSel >= 0.5 * aTot) {
+                const n2 = _norm3([sx, sy, sz]), p0 = [0, 0, 0];
+                for (const tr of sel) for (let i = 0; i < 3; i++) p0[i] += tr.p[i] * tr.a / aSel;
+                pl = { n: n2, c: _dot3(n2, p0) };
+              }
+            }
+          }
+          if (!pl && Lx.length) {
+            let c = 0; for (const p of Lx) c += _dot3(nn, p);
+            pl = { n: nn, c: c / Lx.length };
+          }
+          planeCache.set(fj, pl);
+          return pl;
+        };
+        const rpts = new Map();                            // Schlüssel → { p, h, tilts: [{ t, sd }] }
+        for (const fj of R) {
+          const t = tilt(fj), sd = sideOf(fj);
+          for (const Lx of [fds[fj].outer, ...fds[fj].inner]) for (const p of Lx) {
+            const k = vtxKey(p);
+            let e = rpts.get(k);
+            if (!e) { e = { p, h: _dot3(d, p), tilts: [] }; rpts.set(k, e); }
+            e.tilts.push({ t, sd });
+          }
+        }
+        let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        for (const e of rpts.values()) for (let i = 0; i < 3; i++) { if (e.p[i] < lo[i]) lo[i] = e.p[i]; if (e.p[i] > hi[i]) hi[i] = e.p[i]; }
+        const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        const newPts = new Map();
+        const reps = [], MERGE_TOL = 1e-3;                 // mm — getrennte Ecken liegen ≥ Fasenbreite auseinander
+        // Schnittpunkt dreier Ebenen { n, c } (Cramer) | null
+        const solve3p = (p1, p2, p3) => {
+          const a = p1.n, b = p2.n, c = p3.n;
+          const bc = _cross3(b, c), ca = _cross3(c, a), ab = _cross3(a, b);
+          const det = _dot3(a, bc);
+          if (!(Math.abs(det) > 1e-6)) return null;
+          return [0, 1, 2].map((i) => (p1.c * bc[i] + p2.c * ca[i] + p3.c * ab[i]) / det);
+        };
+        for (const [k, e] of rpts) {
+          const cands = [];
+          let pc = null;
+          for (const fj of (vtxFaces.get(k) || [])) if (deckF.has(fj)) { pc = planeOf(fj); break; }
+          for (const { t, sd } of e.tilts) {
+            // alle A-Flächen und alle B-Flächen DIESER Lage
+            const As = famA.filter((fk) => sameLayer(fk, t, sd));
+            const Bs = famB.filter((fk) => sameLayer(fk, t, sd));
+            for (const fa of As) {
+              for (const fb of Bs) {
+                const pa = planeOf(fa), pb = planeOf(fb);
+                if (!pa || !pb) continue;
+                if (pc) {
+                  // Punkt einer Deckfläche: exakter Schnitt der drei Ebenen A, B, Deckfläche — für alle
+                  // Laufpunkte dieser Deckfläche DERSELBE Punkt (float32-Höhenrauschen spielt keine Rolle)
+                  const x = solve3p(pa, pb, pc);
+                  if (x) cands.push(x);
+                  continue;
+                }
+                const a11 = _dot3(pa.n, u), a12 = _dot3(pa.n, v);
+                const b11 = _dot3(pb.n, u), b12 = _dot3(pb.n, v);
+                const det = a11 * b12 - a12 * b11;
+                if (Math.abs(det) < 1e-3) continue;        // 2×2-System singulär
+                const ra = pa.c - e.h * _dot3(pa.n, d);
+                const rb = pb.c - e.h * _dot3(pb.n, d);
+                const a = (ra * b12 - a12 * rb) / det;
+                const b = (a11 * rb - ra * b11) / det;
+                cands.push([e.h * d[0] + a * u[0] + b * v[0], e.h * d[1] + a * u[1] + b * v[1], e.h * d[2] + a * u[2] + b * v[2]]);
+              }
+            }
+          }
+          if (!cands.length) return null;
+          // alle berechneten Punkte müssen ≤ PT_TOL auseinanderliegen (sonst: Kandidat verwerfen)
+          for (const x of cands) if (Math.hypot(x[0] - cands[0][0], x[1] - cands[0][1], x[2] - cands[0][2]) > PT_TOL) return null;
+          let x = cands[0];
+          if (Math.hypot(x[0] - e.p[0], x[1] - e.p[1], x[2] - e.p[2]) > 3 * diag) return null;   // Plausibilität
+          // Dieselbe Ecke aus verschiedenen R-Punkten (float32-Höhenrauschen, gedrehte Lage) → EIN Punkt-Objekt;
+          // sonst landen zwei µm-verschiedene Punkte auf beiden Seiten einer Rundungsgrenze von vtxKey (offene Kante)
+          const rep = reps.find((r) => Math.hypot(r[0] - x[0], r[1] - x[1], r[2] - x[2]) <= MERGE_TOL);
+          if (rep) x = rep; else reps.push(x);
+          newPts.set(k, x);
+        }
+        // (9) Änderungen je Rand-Fläche
+        const edits = [];
+        const newLagen = [];
+        for (const fj of Bd) {
+          const fd = fds[fj];
+          const isDeck = deckF.has(fj);
+          for (const Lx of [fd.outer, ...fd.inner]) {
+            const inK = Lx.map((p) => Rkeys.has(vtxKey(p)));
+            const cntK = inK.filter(Boolean).length;
+            if (!cntK) continue;                            // Keiner → weiter
+            if (cntK === Lx.length) return null;            // Alle → continue
+            if (Lx.circleRim) return null;                  // circleRim-Loop mit Treffer → continue
+            // Die Treffer müssen EINEN zusammenhängenden (zyklischen) Lauf bilden
+            let st = 0; while (!(inK[st] && !inK[(st - 1 + Lx.length) % Lx.length])) { st++; if (st >= Lx.length) return null; }
+            for (let r = 0; r < cntK; r++) if (!inK[(st + r) % Lx.length]) return null;
+            // Neuer Loop: der Lauf wird durch die neuen Lagen seiner Punkte ersetzt
+            const raw = [];
+            for (let r = 0; r < Lx.length; r++) {
+              const idx = (st + r) % Lx.length;
+              if (inK[idx]) raw.push({ p: newPts.get(vtxKey(Lx[idx])), run: true });
+              else raw.push({ p: Lx[idx], run: false });
+            }
+            // aufeinanderfolgende Duplikate entfernen (auch zyklisch letzter/erster)
+            const keep = [];
+            for (const e of raw) {
+              if (keep.length && vtxKey(keep[keep.length - 1].p) === vtxKey(e.p)) { keep[keep.length - 1].run = keep[keep.length - 1].run || e.run; continue; }
+              keep.push(e);
+            }
+            while (keep.length > 1 && vtxKey(keep[keep.length - 1].p) === vtxKey(keep[0].p)) {
+              const last = keep.pop();
+              keep[0].run = keep[0].run || last.run;
+            }
+            if (keep.length < 3) return null;              // Ergebnis < 3 Punkte → continue
+            if (isDeck) {
+              // Deckfläche: der Lauf muss genau EIN Punkt sein, die Kontur einfach bleiben
+              if (keep.filter((e) => e.run).length !== 1) return null;
+              const o2 = keep.map((e) => to2(e.p)), no = o2.length;
+              const ori = (a, b, c2) => (b[0] - a[0]) * (c2[1] - a[1]) - (b[1] - a[1]) * (c2[0] - a[0]);
+              for (let a = 0; a < no; a++) for (let b = a + 2; b < no; b++) {
+                if (a === 0 && b === no - 1) continue;
+                const p1 = o2[a], p2 = o2[(a + 1) % no], p3 = o2[b], p4 = o2[(b + 1) % no];
+                const d1 = ori(p3, p4, p1), d2 = ori(p3, p4, p2), d3 = ori(p1, p2, p3), d4 = ori(p1, p2, p4);
+                if (((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12))) return null;
+              }
+            } else {
+              // Familie A/B: jeder neue Punkt muss auf der Ebene von F liegen
+              const pl = planeOf(fj);
+              for (const e of keep) if (e.run && Math.abs(_dot3(pl.n, e.p) - pl.c) > PT_TOL) return null;
+            }
+            edits.push({ fi: fj, loop: Lx, out: keep.map((e) => e.p), pl: planeOf(fj) });
+            for (const e of keep) if (e.run) newLagen.push(e.p);
+          }
+        }
+        return { R, edits, Rkeys, newPts: newLagen };
+      }
+    }
+
+    function applyPlan(plan) {
+      const { R, edits, newPts } = plan;
+      // Operation registrieren (Rückfall je Merkmal): entfernte Fasen-Lagen + neue Eckpunkte
+      const op = { kind: 'v2b', groups: [...R].map((fi) => faceDefs[fi].group).filter(Boolean), keys: new Set() };
+      for (const fi of R) addLoopKeys(op.keys, faceDefs[fi]);
+      for (const q of newPts) op.keys.add(vtxKey(q));
+      featureOps.push(op);
+      for (const e of edits) markOp(faceDefs[e.fi], op);
+      const sabotage = breakNow('v2b', op.groups) ? edits[0] : null;
+      for (const e of edits) {
+        if (e === sabotage) continue;
+        e.loop.length = 0; e.loop.push(...e.out);
+      }
+      // Schwerpunkte und Normalen der editierten Flächen nachziehen: die neuen Punkte liegen auf der
+      // EXAKTEN Ebene (planeOf); die alte Normale kann durch eine mitgezählte Kegel-Facette verkippt sein
+      // (sonst gilt die Fläche danach als uneben → Rückfall je Merkmal, Kabelhalter)
+      for (const e of edits) {
+        const fd = faceDefs[e.fi];
+        const ct = loopCentroid([fd.outer, ...fd.inner]);
+        if (ct) fd.centroid = ct;
+        if (e.pl && _dot3(e.pl.n, _norm3(fd.normal)) > 0.99) fd.normal = e.pl.n.slice();
+      }
+      faceDefs = faceDefs.filter((_, i) => !R.has(i));
     }
   }
 
@@ -4920,7 +5476,7 @@ export function buildVolumeStepBrepV2(analysis) {
     finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set(); chamferZonesHit = new Set(); chamferZoneAngles = new Map();
     boreNotes = new Map();
     preSplitStats = null;
-    filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; coneBandsDefeatured = 0; featureOps = [];
+    filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; coneBandsDefeatured = 0; featureOps = []; cornerPairsKept = 0; cornerPairKeys.clear();
     if (!DEFEATURE) {
       // Toggle AUS — bisheriger Ablauf unverändert: Bohrungs-Pläne aus den Original-Dreiecken,
       // Bohrungs-Gruppen vorerst überspringen, nur Direkt-Treffer; gescheiterte Pläne bekommen
@@ -4960,6 +5516,11 @@ export function buildVolumeStepBrepV2(analysis) {
         cornersDefeatured = defeatureProfileCorners();
       } catch (_) { cornersDefeatured = 0; /* Guard: jede Ecke wird erst nach allen Prüfungen angewandt */ }
     }
+    // Eckrundungen MIT anliegender Fase (v2d): die Wände treffen sich in einer senkrechten Kante,
+    // die Fasen in einer Gehrungskante — unabhängig von bandsDefeatured.
+    try {
+      cornersDefeatured += defeatureChamferCorners();
+    } catch (_) { /* Guard: jede Ecke wird erst nach allen Prüfungen angewandt */ }
     // Kegel-Bänder (v2c): Verrundungen an schrägen Wänden (Kegel/Fase) schärfen — danach
     // erkennt convertMantleCones() die scharfe Kegelwand als CONICAL_SURFACE.
     try {
@@ -6758,6 +7319,7 @@ export function buildVolumeStepBrepV2(analysis) {
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.coneBandsDefeatured = coneBandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
+    a.report.cornerPairsKept = cornerPairsKept;
     // UI-Zähler (Randbänder, nicht Facetten): war das Band eine RUNDUNG (Normalen streuen) oder
     // eine echte FASE (Normalen gleich)? Eine Rundung wird als Kegel = Fase geschrieben — sie
     // zählt NICHT als entfernte Verrundung, sondern als „→ Fase“.
@@ -7100,6 +7662,7 @@ export function buildVolumeStepBrepV2(analysis) {
     base.report.bandsDefeatured = 0;
     base.report.coneBandsDefeatured = 0;
     base.report.cornersDefeatured = 0;
+    base.report.cornerPairsKept = 0;
     base.report.rimFilletsToChamfer = 0; // UI-Zähler
     base.report.rimChamfersKept = 0;     // UI-Zähler
     planarReport(base.report, pl.st);
