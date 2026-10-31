@@ -594,6 +594,8 @@ figure.vw figcaption { font-size: .9rem; font-weight: 600; }
 }
 .viewer-3d[data-state="loading"]::after { content: 'STEP wird geladen …'; }
 .viewer-3d[data-state="error"]::after { content: 'Fehler beim Laden der STEP-Datei.'; }
+/* WebGL im Browser abgeschaltet (z. B. Hardwarebeschleunigung aus): ehrlich sagen statt „Keine Daten“. */
+.viewer-3d[data-state="nowebgl"]::after { content: '3D-Ansicht nicht verfügbar: WebGL ist in diesem Browser abgeschaltet (about:support → WebGL). Die STEP-Datei ist trotzdem korrekt.'; padding: 16px; }
 .viewer-3d[data-state="ready"]::after,
 .viewer-3d[data-state="loaded"]::after,
 .viewer-3d[data-state="imported"]::after { content: ''; }

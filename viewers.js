@@ -201,7 +201,7 @@ export function initPipelineViewers() {
       stlControls = s.controls; stlResizeObs = s.resizeObserver; stlAnimId = s.animFrameId;
       // Ansichts-Kopplung: STL ist die Quelle, das STEP-Modell folgt.
       registerSyncViewer('stl', s.camera, s.controls);
-    } catch (e) { console.warn('STL viewer init failed:', e.message); }
+    } catch (e) { console.warn('STL viewer init failed:', e.message); stlContainer.dataset.state = 'nowebgl'; }
   }
 
   if (featuresContainer) {
@@ -209,7 +209,7 @@ export function initPipelineViewers() {
       const s = createThreeJsViewer(featuresContainer, 0x5fa8ff);
       featuresRenderer = s.renderer; featuresScene = s.scene; featuresCamera = s.camera;
       featuresControls = s.controls; featuresResizeObs = s.resizeObserver; featuresAnimId = s.animFrameId;
-    } catch (e) { console.warn('Features viewer init failed:', e.message); }
+    } catch (e) { console.warn('Features viewer init failed:', e.message); featuresContainer.dataset.state = 'nowebgl'; }
   }
 
   if (brepContainer) {
@@ -217,7 +217,7 @@ export function initPipelineViewers() {
       const s = createThreeJsViewer(brepContainer, 0xffc75f);
       brepRenderer = s.renderer; brepScene = s.scene; brepCamera = s.camera;
       brepControls = s.controls; brepResizeObs = s.resizeObserver; brepAnimId = s.animFrameId;
-    } catch (e) { console.warn('B-Rep viewer init failed:', e.message); }
+    } catch (e) { console.warn('B-Rep viewer init failed:', e.message); brepContainer.dataset.state = 'nowebgl'; }
   }
 }
 
