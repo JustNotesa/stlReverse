@@ -207,10 +207,15 @@ Kreis-Kanten teilen.
   profile-arcs/spline-fit jetzt einheitlich versioniert (keine doppelten Modul-Kopien mehr). Popup-Memo des Pakets verworfen
   (main hat currentExport). Offen: Export in den Web-Worker verlegen (blockiert bei großen Teilen ~5 s die UI); toter Code
   det3/solve3 (Matrix-Varianten) in profile-arcs.js; vtxKey-Symbol ist aufzählbar.
-- [ ] **Kabelhalter-Reste (`wt/kabelhalter-rest`, NICHT gemergt):** Spalten-Kollaps in mesh-clean.js (142/151 statt 218/233),
-  Prüfung: lagenabhängig — z5 verschoben/gedreht kippt AN auf ~255 Flächen, Kabelhalter schräg AN 752 → 1642. Kein Rückfall auf
-  Einzel-Kollaps, Mikro-Kanten bleiben. Erst lagenstabil machen, Härtetest in mehreren Lagen. Unit-Tests insertRulings/guardCorner
-  aus dem Branch sind brauchbar und können separat übernommen werden.
+- [x] **Kabelhalter-Reste (2026-10-31, `wt/kabelhalter-rest`)** — Spalten-Kollaps in mesh-clean.js: Mantellinien extrudierter
+  Wände bleiben bei der Netz-Bereinigung erhalten (beidseitig, transaktional mit snapshot/restore, Endzustand geprüft,
+  Rückfall Einzel-Kollaps < τ/2, gerundete Sortierung). Kabelhalter AN/AUS 218/233 → 104/123, in 5 Lagen besser
+  (z.B. gedreht 45/30/60: 5914 → 100/125), OCP gültig, strict 0, kürzeste Kante 0,0093 → 0,112 mm. NozzleBox gleich,
+  Skoda −1. Neue Suite `lagen` (tests/lagen-regression.mjs). Unit-Tests insertRulings/guardCorner.
+- [ ] **Spalten-Kollaps: Gegenbeispiele der Prüfung** — synthetische Körper werden in einzelnen Lagen schlechter als mit
+  `columns:false`: tf2 rot(3,5,7)+t(256,0,0) 382 statt 270; lfil weit draußen gedreht 607 statt 173/537; tfjit
+  rot(61,47,−83)+t AN 212 statt 14; disk im Ursprung AUS 5954 statt 5698 (Sortierung/Tangentenregel). Über 512 mm kaum
+  Spalten. Harness: scratchpad mcrev/. Idee: beide Netze auswerten und das bessere nehmen (doppelte Analysezeit).
 - [x] **Freiform Etappe 2 (2026-10-31, `wt/freiform2`)** — Verrundungen/kleine Regionen, deren Fit-Fläche die Nachbarn nicht
   exakt trifft, werden zu EINER B-Spline-Fläche (Coons-Patch über den Randkurven) statt zu Facetten; B_SPLINE_SURFACE_WITH_KNOTS
   im Schreiber und in step-strict (orient-bspline, neu bspline-knots: Knoten streng steigend, Vielfachheiten); robuste Projektion

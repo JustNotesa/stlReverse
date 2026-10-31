@@ -18,7 +18,7 @@ import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArc
 // Gravur (extrusion-bands.js): Schriftzüge (Wand-Streifen) → B-Spline-Kurven
 import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=2';
 // Gravur (extrusion-plans.js): Pläne der Extrusionsbänder (SURFACE_OF_LINEAR_EXTRUSION) + Rand-Aufweitung
-import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=2';
+import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=3';
 // [freiform1] Einhängepunkt: Freiform-Pfad (fit-basierte Segmentierung → eigenes B-Rep → STEP)
 import { chooseFreeform } from './freeform-brep.js?v=2';
 
