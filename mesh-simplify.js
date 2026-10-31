@@ -26,7 +26,14 @@ export const SIMPLIFY_DEFAULTS = {
   intersectionCheck: true, // F3b: lokale Durchdringungsprüfung je Kollaps
   placement: 'endpoint', // F6: 'endpoint' (nur Endpunkte) | 'optimal'
   qTol: 0.999,           // F1: multiplikative Toleranz der Qualitätsschranke
-  wallGuard: true        // H2: Dünnwand-Wächter (Kreuzung der gegenüberliegenden Wand)
+  wallGuard: true,       // H2: Dünnwand-Wächter (Kreuzung der gegenüberliegenden Wand)
+  maxErrorMm: 0.02       // Fehlerschranke in Eingabe-Einheiten (mm): RMS-Abstand √(err/Gewicht) des Zielpunkts
+                         // zu den Ebenen der zusammengefassten Ursprungsflächen. Teurere Kollapse entfallen —
+                         // lieber das Ziel verfehlen als verzerren (harte Regeln wie Gradgrenze und Merkmals-
+                         // linien zwingen sonst den Rest des Netzes zu langen Sehnen; dünnes Rohr 240k → 50k:
+                         // Hausdorff 0,64 mm bei 0,4 mm Wand). Gleiche Größe wie mesh-clean.js
+                         // DEFAULT_MIN_DETAIL_MM: die Vereinfachung verfälscht nicht mehr als die kleinste
+                         // Detailgröße. 0 = aus.
 };
 
 /** Scratch-Ergebnis der Kostenberechnung (keine Allokation im heißen Loop). */
@@ -737,7 +744,7 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
 
   const report = {
     inFaces, outFaces: 0, collapses: 0, lockedVerts: T.lockedVerts,
-    rejected: { link: 0, flip: 0, quality: 0, locked: 0, degree: 0, feature: 0, intersect: 0, wall: 0 },
+    rejected: { link: 0, flip: 0, quality: 0, locked: 0, degree: 0, feature: 0, intersect: 0, wall: 0, error: 0 },
     passes: 0, ms: 0
   };
   if (Fc === 0 || V === 0) {
@@ -772,6 +779,8 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
   const checkIntersect = O.intersectionCheck !== false;
 
   // ---------- Schritt 4: Zielpunkt und Kosten einer Kante (a,b) ----------
+  const maxErrN = O.maxErrorMm > 0 ? O.maxErrorMm / scale : 0;   // normalisiert (Diagonale = 1)
+  const maxErr2 = maxErrN * maxErrN;
   function edgeCost(a, b) {
     _c.reason = 0;
     const oa = a * 10, ob = b * 10;
@@ -848,6 +857,8 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
         else { tx = bx; ty = by; tz = bz; best = errB; src = b; }
       }
     }
+    // Fehlerschranke (normalisierte Einheiten: Diagonale = 1)
+    if (maxErr2 > 0 && best > tr * maxErr2) { _c.skip = true; _c.reason = 3; return; }
     const tb = tieBreak * len;
     _c.key = best + tr * tb * tb;
     _c.tx = tx; _c.ty = ty; _c.tz = tz;
@@ -1203,7 +1214,7 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
     if (ver[a] !== heap.rva || ver[b] !== heap.rvb) continue;
 
     edgeCost(a, b);
-    if (_c.skip) { if (_c.reason === 2) rej.feature++; continue; }
+    if (_c.skip) { if (_c.reason === 2) rej.feature++; else if (_c.reason === 3) rej.error++; continue; }
     const tx = _c.tx, ty = _c.ty, tz = _c.tz;
     // Rolle: Überlebender = der Endpunkt, dessen Position behalten wird
     const s = (tx === P[3 * b] && ty === P[3 * b + 1] && tz === P[3 * b + 2]) ? b : a;
