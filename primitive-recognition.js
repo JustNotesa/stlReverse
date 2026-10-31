@@ -1040,7 +1040,8 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   // übersprungenes entartetes Dreieck enthalten und (b) Facetten von mindestens ZWEI
   // Primitiven halten. Innerhalb einer solchen Gruppe werden die Facetten über die
   // Manifold-Adjazenz zu Komponenten gruppiert; hat eine Komponente gemischte Besitzer
-  // (inkl. „nicht getaggt" = −1), bleibt die Gruppe UNVERÄNDERT. Sonst entsteht je Besitzer
+  // (inkl. „nicht getaggt" = −1), bleibt die Gruppe UNVERÄNDERT. Berühren sich die Teile der
+  // Gruppe in einer Ecke/Kante, bleibt die Gruppe ebenfalls UNVERÄNDERT. Sonst entsteht je Besitzer
   // eine Untergruppe (flache Kopie der Originalgruppe mit den Facetten-Vertices dieses
   // Besitzers) → jede Bohrung behält ihr eigenes Tag. Alle anderen Gruppen bleiben unangetastet.
   const inputGroups = normalGroups.length;
@@ -1097,6 +1098,25 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       if (mixed) break;
     }
     if (mixed) continue;                                 // nicht eindeutig zuordenbar → unverändert
+    // Berührung: Teile, die sich in einem Punkt/einer Kante berühren — z. B. ein Stab, den die
+    // Erkennung an einer nicht-manifolden Naht in zwei koaxiale Stücke teilt — bleiben eine Gruppe;
+    // getrennt werden nur räumlich getrennte Teile wie die Bohrungen zweier Laschen.
+    // Prüfung über die gecachten Vertex-Keys (triKeys, dieselben wie in der Adjazenz): wird eine
+    // Ecke von Facetten ZWEIER VERSCHIEDENER Besitzer benutzt, liegt Berührung vor → kein Split.
+    const vOwner = new Map();                            // Vertex-Key → erster Besitzer
+    let touched = false;
+    for (let k = 0; k < facets.length && !touched; k++) {
+      const ti = facets[k];
+      const own = triOwner[ti];
+      const tk = triKeys[ti];
+      for (let c = 0; c < 3; c++) {
+        const vk = tk[c];
+        const prev = vOwner.get(vk);
+        if (prev === undefined) { vOwner.set(vk, own); continue; }
+        if (prev !== own) { touched = true; break; }
+      }
+    }
+    if (touched) continue;                               // Teile berühren sich → unverändert
     // Facetten je Besitzer (in der Originalreihenfolge der Gruppe)
     const byOwner = new Map();
     for (let k = 0; k < facets.length; k++) {
