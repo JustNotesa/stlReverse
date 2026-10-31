@@ -38,11 +38,11 @@
 //   extGeomSamples(geom, n)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { arcSamples, edgeCanonKey } from './profile-arcs.js?v=5';
+import { arcSamples, edgeCanonKey } from './profile-arcs.js?v=6';
 import {
   interpolateCubic, evalSpline, derivSpline, splineSamples,
   spanDeviation, translateSpline, nearestParam,
-} from './spline-fit.js';
+} from './spline-fit.js?v=2';
 
 /** Vorgaben der Extrusions-Planung. */
 export const EXT_PLAN_DEFAULTS = {

@@ -88,22 +88,27 @@ function evalCurve(deg, U, ctrl, u) {
   if (t <= lo) return ctrl[0].slice();
   if (t >= hi) return ctrl[n - 1].slice();
   const span = findSpan(t, deg, U, n);
-  const d = new Array(deg + 1);
-  for (let j = 0; j <= deg; j++) d[j] = ctrl[span - deg + j].slice();
+  // Skalare Arbeitsarrays statt Array-of-Arrays: spart je Kurvenpunkt (deg+1) Punkt-Arrays.
+  // Hot-Path ist nearestParam (Raster + Golden-Section) — dort wird extrem oft evaluiert.
+  const dx = new Array(deg + 1), dy = new Array(deg + 1), dz = new Array(deg + 1);
+  for (let j = 0; j <= deg; j++) {
+    const c = ctrl[span - deg + j];
+    dx[j] = c[0]; dy[j] = c[1]; dz[j] = c[2];
+  }
   for (let r = 1; r <= deg; r++) {
     for (let j = deg; j >= r; j--) {
       const den = U[span + 1 + j - r] - U[span - deg + j];
       const alpha = den !== 0 ? (t - U[span - deg + j]) / den : 0;
-      const a = d[j - 1], b = d[j];
-      d[j] = [
-        (1 - alpha) * a[0] + alpha * b[0],
-        (1 - alpha) * a[1] + alpha * b[1],
-        (1 - alpha) * a[2] + alpha * b[2],
-      ];
+      // d[j−1] und d[j] VOR dem Überschreiben von d[j] lesen (j läuft abwärts).
+      const ax = dx[j - 1], bx = dx[j];
+      const ay = dy[j - 1], by = dy[j];
+      const az = dz[j - 1], bz = dz[j];
+      dx[j] = (1 - alpha) * ax + alpha * bx;
+      dy[j] = (1 - alpha) * ay + alpha * by;
+      dz[j] = (1 - alpha) * az + alpha * bz;
     }
   }
-  const res = d[deg];                       // Ergebnis der de-Boor-Rekursion
-  return [res[0], res[1], res[2]];
+  return [dx[deg], dy[deg], dz[deg]];      // Ergebnis der de-Boor-Rekursion
 }
 
 // ── Lineares System ─────────────────────────────────────────────────────────
@@ -396,6 +401,13 @@ export function translateSpline(sp, v, A, B) {
 }
 
 /**
+ * Grob-Raster (cnt+1 Stützstellen) je Spline zwischenspeichern: nearestParam wird beim
+ * Bandaufbau viele Male auf derselben Kurve aufgerufen, das Raster selbst ändert sich dabei
+ * nie. WeakMap → der Eintrag stirbt mit der Kurve.
+ */
+const gridCache = new WeakMap();
+
+/**
  * Parameter u, bei dem die Kurve dem Punkt p am nächsten liegt: grober Raster-Scan über n
  * Stützstellen, danach Golden-Section-Verfeinerung im Nachbarintervall.
  * → u | null
@@ -404,16 +416,29 @@ export function nearestParam(sp, p, n = 200) {
   if (!sp || !p || !sp.ctrl || !sp.U) return null;
   const cnt = Math.max(2, n | 0);
   const lo = sp.U[sp.degree], hi = sp.U[sp.U.length - sp.degree - 1];
+  // Raster holen; neu bauen, wenn Kurve oder Rasterweite gegenüber dem Cache-Eintrag wechselten.
+  let grid = gridCache.get(sp);
+  if (!grid || grid.ctrl !== sp.ctrl || grid.U !== sp.U
+      || grid.degree !== sp.degree || grid.cnt !== cnt) {
+    const gus = new Array(cnt + 1);
+    const gq = new Float64Array(3 * (cnt + 1));
+    for (let i = 0; i <= cnt; i++) {
+      const u = lo + (hi - lo) * (i / cnt);
+      gus[i] = u;
+      const c = evalSpline(sp, u);
+      gq[3 * i] = c[0]; gq[3 * i + 1] = c[1]; gq[3 * i + 2] = c[2];
+    }
+    grid = { ctrl: sp.ctrl, U: sp.U, degree: sp.degree, cnt, us: gus, q: gq };
+    gridCache.set(sp, grid);
+  }
+  const us = grid.us, q = grid.q;
   const distAt = (u) => {
-    const q = evalSpline(sp, u);
-    return Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+    const s = evalSpline(sp, u);
+    return Math.hypot(s[0] - p[0], s[1] - p[1], s[2] - p[2]);
   };
   let bestIdx = 0, bestD = Infinity;
-  const us = new Array(cnt + 1);
   for (let i = 0; i <= cnt; i++) {
-    const u = lo + (hi - lo) * (i / cnt);
-    us[i] = u;
-    const d = distAt(u);
+    const d = Math.hypot(q[3 * i] - p[0], q[3 * i + 1] - p[1], q[3 * i + 2] - p[2]);
     if (d < bestD) { bestD = d; bestIdx = i; }
   }
   // Golden-Section im Intervall um die beste Rasterstelle

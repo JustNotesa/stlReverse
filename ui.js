@@ -7,6 +7,7 @@ const progressStepsEl  = document.getElementById('progress-steps');
 const liveDetail       = document.getElementById('progress-live-detail');
 const liveDetailLabel  = document.getElementById('progress-live-detail-label');
 const liveDetailStats  = document.getElementById('progress-live-detail-stats');
+const progressStepCurrent = document.getElementById('progress-step-current');
 
 const copyBtn            = document.getElementById('copy-json');
 const downloadBtn        = document.getElementById('download-json');
@@ -31,6 +32,7 @@ const stepElements = new Map();
 
 let currentProgressValue = 0;
 let indeterminateTimer   = null;
+let activeStepKey        = null;   // zuletzt aktiver Schritt (für „Abgebrochen bei Schritt N“)
 
 const DEFAULT_LABEL = 'Bereit';
 const DEFAULT_STATS = '–';
@@ -39,6 +41,8 @@ const nextFrame = () =>
   new Promise((resolve) => {
     const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 0);
     raf(resolve);
+    // Hintergrund-Tab: requestAnimationFrame ruht dort, die Analyse darf trotzdem nicht stehen bleiben.
+    setTimeout(resolve, 100);
   });
 
 // ── Status banner ───────────────────────────────────────────────────────────
@@ -73,8 +77,8 @@ export function setProgress(value, label) {
   }
   const clamped = Math.max(0, Math.min(1, currentProgressValue));
   progressBar.style.width = `${clamped * 100}%`;
-  const pct = `${Math.round(clamped * 100)}%`;
-  progressText.textContent = label ? `${pct} · ${label}` : `Fortschritt: ${pct}`;
+  // Nur der Prozentwert — der Text steht separat in #progress-step-current.
+  progressText.textContent = `${Math.round(clamped * 100)} %`;
 }
 
 export async function progressStep(value, label) {
@@ -120,6 +124,11 @@ export function initProgressSteps() {
 }
 
 export function resetProgressSteps(reason = 'upload', sizeLabel = '') {
+  // Aktiven Schritt und Textzeile zuerst zurücksetzen — die folgenden Aufrufe
+  // setzen nur den Listen-Zustand und niemals den Text.
+  activeStepKey = null;
+  setProgressStepCurrent('');
+
   STEP_DEFS.forEach(({ key }) => setProgressStepStatus(key, 'pending', ''));
   if (reason === 'detail') {
     setProgressStepStatus('read', 'done', 'Cache');
@@ -130,12 +139,47 @@ export function resetProgressSteps(reason = 'upload', sizeLabel = '') {
 }
 
 export function setProgressStepStatus(key, status, detailText = '') {
+  // Der aktive Schritt wird auch ohne Listen-Element geführt (Fehlerzeile „Abgebrochen bei Schritt N“).
+  if (status === 'active') {
+    activeStepKey = key;
+    const def = _stepDef(key);
+    if (def && progressStepCurrent) {
+      progressStepCurrent.textContent = `${def.label} (${def.index + 1}/${STEP_DEFS.length})`;
+    }
+  }
+
   const entry = stepElements.get(key);
   if (!entry) return;
   const { element, detailEl } = entry;
   element.classList.remove('status--pending', 'status--active', 'status--done');
   element.classList.add(`status--${status}`);
   if (detailEl) detailEl.textContent = detailText || '';
+}
+
+/**
+ * Ein Schritt anhand seines Schlüssels (z. B. 'read').
+ * @param {string} key  Schlüssel aus STEP_DEFS
+ * @returns {{key: string, label: string, index: number, total: number}|null} index ist 1-basiert
+ */
+export function getStepByKey(key) {
+  const def = _stepDef(key);
+  if (!def) return null;
+  return { key: def.key, label: def.label, index: def.index + 1, total: STEP_DEFS.length };
+}
+
+/**
+ * Der aktuell (zuletzt) aktive Schritt.
+ * @returns {{key: string, label: string, index: number, total: number}|null} index ist 1-basiert
+ */
+export function getActiveStep() {
+  if (!activeStepKey) return null;
+  return getStepByKey(activeStepKey);
+}
+
+/** Text der Zeile „aktueller Schritt“ setzen ('' leert sie). */
+export function setProgressStepCurrent(text) {
+  if (!progressStepCurrent) return;
+  progressStepCurrent.textContent = text ?? '';
 }
 
 // ── Live detail ─────────────────────────────────────────────────────────────
@@ -192,6 +236,13 @@ export function handleWorkerProgress(payload) {
 }
 
 // ── Private helpers ─────────────────────────────────────────────────────────
+
+// Schrittdefinition zu einem Schlüssel suchen (index = 0-basiert).
+function _stepDef(key) {
+  const index = STEP_DEFS.findIndex((def) => def.key === key);
+  if (index < 0) return null;
+  return { key, label: STEP_DEFS[index].label, index };
+}
 
 function _mapToStageKey(detail) {
   if (!detail) return null;
