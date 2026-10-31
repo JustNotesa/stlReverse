@@ -210,13 +210,16 @@ Kreis-Kanten teilen.
   (Toleranz ×0,999), Rand-/non-manifold-/inkonsistente/Ausreißer-Punkte gesperrt, Merkmalskanten (> 30°) als Zusatz-
   Quadriken, Ecken wandern nie, Kante zwischen zwei Merkmalslinien nur, wenn sie selbst Merkmalskante ist; Gradgrenze 24
   (je Pass ×2) gegen quadratische Laufzeit an Fächer-Naben; lokale Durchdringungsprüfung im 2-Ring und Gegenwand-Prüfung
-  gegen die ORIGINAL-Gegenseite (statisches BVH); Fehlerschranke `maxErrorMm` 0,02 mm (= kleinste Detailgröße) — lieber
-  Ziel verfehlen als verzerren. Platzierung Standard „nur Endpunkte“: jeder Ausgabepunkt ist ein exakter Eingabepunkt
+  gegen die ORIGINAL-Gegenseite (statisches BVH; koplanare Berührflächen zählen nicht); Fehlerschranke RMS
+  min(max(0,02 mm, 1e-4·D), 1e-3·D) (0,02 mm = kleinste Detailgröße, D = BBox-Diagonale) — lieber Ziel verfehlen als
+  verzerren. Platzierung Standard „nur Endpunkte“: jeder Ausgabepunkt ist ein exakter Eingabepunkt
   (Ebenen/Zylinder bleiben exakt; Quader 201k→100k: 6678 statt 23768 Export-Flächen gegenüber QEM-Optimum).
   Prüfungen: `tests/simplify.test.js` (manifold, Ziel, Ebenen exakt eben, Ecken exakt, gedreht/verschoben, keine
   Kippung/Durchdringung, offenes Netz, Fortschritt, Laufzeit), Körper/Prüfer `tests/simplify-bodies.mjs`, Messung
   `node tests/simplify-bench.mjs [--big]`; adversariale Prüfung (Sub-Agent) mit Gegenbeispielen (Splitter-Stift,
-  Fächer-Naben, dünne Rohre, Rauschen, Ausreißer, Topologie-Sonderfälle) eingearbeitet.
+  Fächer-Naben, dünne Rohre, Rauschen, Ausreißer, Topologie-Sonderfälle) eingearbeitet; 2. Runde: BVH-Wurzel wurde
+  überschrieben (Gegenwand-Prüfung sah nur die halbe Fläche) → behoben, berührende Körper (Fehlalarme) und
+  Größenabhängigkeit der Schranke → behoben; Lage-Sweep (7 Lagen × 5 Körper): Drehung/Verschiebung ohne Einfluss.
   **Messung (Node, Worker-Pipeline, Export AUS):** Bremsgriff 182 840 Dr. → 50k: vorher 34 938 Flächen NICHT wasserdicht,
   jetzt 36 694 wasserdicht (AN auch), Vereinfachung ~1,2 s, Analyse ~5 s, Export ~2 s; → 100k: 67 865 Fl., Export ~7 s;
   ohne Vereinfachung 100 889 Fl., Analyse 9 s, Export 12 s. Synthetisch 200k/500k (Kugel, Torus, Quader mit 4 Bohrungen,
@@ -232,7 +235,9 @@ Kreis-Kanten teilen.
   Offen: (1) Vereinfachung zerstört die Spalten-Struktur fein tessellierter Extrusionen → Bohrungs-/Bogen-Erkennung
   schlechter (Quader 201k: unvereinfacht 3 893 Flächen, → 50k 14 068) — spaltenweiser Kollaps wie in mesh-clean.js
   wäre der nächste Schritt; (2) Wände dünner als ~2 × 0,02 mm können sich bei starker Reduktion noch durchdringen
-  (Kugelschale 0,02 mm), keine globale Durchdringungsprüfung; (3) gedrehter Quader liefert schon unvereinfacht 52k statt
+  (Kugelschale 0,02 mm; Torus-Schale 0,03 mm: 1196 Schnitte, 0,1 mm: keine — beide vereinfachten Wände kreuzen sich,
+  geprüft wird nur gegen die ORIGINAL-Gegenseite), keine globale Durchdringungsprüfung; float32-gerundete Eingaben
+  weit vom Ursprung (1e4 mm) sind schon vorher selbstdurchdringend, die Vereinfachung verstärkt das; (3) gedrehter Quader liefert schon unvereinfacht 52k statt
   3,9k Flächen (Erkennung lageabhängig, unabhängig von der Vereinfachung); (4) verrauschte Scans erreichen das Ziel ggf. nicht.
 
 - [x] **Berührende Körper / non-manifold-Kanten (2026-10-31, `wt/nmsplit`, User-Teil Rändel-Box)** — Box und Deckel
