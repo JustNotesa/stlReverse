@@ -7,7 +7,7 @@
  * deshalb derselbe Ablauf wie im Worker (vgl. analysis-worker.js bzw.
  * tests/pipeline.cjs):
  *
- *   parseStl → simplifyMesh (>50k) → buildNormalGroups (region-growing.js)
+ *   parseStl → simplifyMesh (> SIMPLIFY_ABOVE) → buildNormalGroups (region-growing.js)
  *   → unifyCoplanarGroups (face-unification.js)
  *   → recognizePrimitives (primitive-recognition.js)
  *   → detectTubes (tube-sweep.js)
@@ -30,6 +30,8 @@ import {
   parseStl,
   analyseMesh,
   simplifyMesh,
+  SIMPLIFY_ABOVE,
+  SIMPLIFY_TARGET,
   computeBoundingBox,
   projectOutline
 } from '../analysis-core.js';
