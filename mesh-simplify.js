@@ -615,7 +615,7 @@ class TriBVH {
     this.lc = new Int32Array(cap);      // Blatt: Start / Innen: linkes Kind
     this.rc = new Int32Array(cap);      // Blatt: Anzahl / Innen: rechtes Kind
     this.leaf = new Uint8Array(cap);    // 1 = Blatt
-    this.nNodes = 0;
+    this.nNodes = 1;                       // Knoten 0 = Wurzel (sonst überschreibt das erste Kind die Wurzel)
     this.stQ = new Int32Array(128);        // Stack der BBox-Abfrage (keine Allokation)
     if (n > 0) this._node(0, 0, n);
   }
