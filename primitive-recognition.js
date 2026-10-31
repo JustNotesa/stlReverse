@@ -15,9 +15,14 @@
  * Dadurch löst sich ein Zylinder sauber von tangential anschließenden EBENEN ab — die
  * deren Punkte driften vom Mantel weg / deren Normale ist nicht ⊥ Achse.
  *
- * Ändert NUR die Anzeige: betroffene Gruppen werden mit `group.primitive` getaggt
- * (gemeinsame Referenz pro Zylinder). normalGroups werden NICHT gemergt, Vertices/Normalen
- * NICHT verändert → STEP-Exporter und Wasserdichtigkeits-Verdikt bleiben unberührt.
+ * Reichweite: getaggt werden die GRUPPEN (`group.primitive`, gemeinsame Referenz pro
+ * Zylinder) — die VERTICES/NORMALEN der Dreiecke werden NIE verändert. Die Gruppenliste
+ * selbst wird aber an einer Stelle strukturell geändert: eine Gruppe, die die Wandfacetten
+ * MEHRERER VOLLER Zylinder hält (koaxiale Bohrungen, deren koplanare Facetten
+ * unifyCoplanarGroups verschmolzen hat), wird am Ende aufgeteilt — die erste Untergruppe
+ * ersetzt die Originalgruppe an Ort und Stelle, die übrigen werden am Ende der Liste
+ * angehängt (die Liste ist danach NICHT mehr nach Größe sortiert). Genau dieser Split ist
+ * die Voraussetzung dafür, dass der STEP-Exporter jede Bohrung analytisch wandeln kann.
  */
 
 const DEG = Math.PI / 180;
@@ -357,7 +362,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const BOOT_MAX     = opts.bootMax       ?? 70;                 //                  + Größenkappe
   const COS_BOOT     = Math.cos((opts.bootAngleDeg ?? 50) * DEG); // dihedral-Schwelle fürs Bootstrap (inkl. 45°-Facetten)
 
-  const empty = { groups: normalGroups || [], primitives: [], stats: { inputGroups: normalGroups?.length || 0, cylinders: 0, fillets: 0, bores: 0 } };
+  const empty = { groups: normalGroups || [], primitives: [], stats: { inputGroups: normalGroups?.length || 0, cylinders: 0, fillets: 0, bores: 0, splitGroups: 0 } };
   if (!Array.isArray(normalGroups) || !normalGroups.length) return empty;
 
   // 1) Dreiecke flachklopfen (mit Gruppen-Index + frischer Normale)
@@ -1056,6 +1061,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
   const compStamp = new Int32Array(T);   // Komponenten-Markierung je Facette (Generationsstempel)
   let compGen = 0;
   const appendedGroups = [];
+  const replacements = [];               // [Gruppen-Index, Untergruppen] — erst NACH der Schleife angewandt
   let splitGroups = 0;
   for (let gi = 0; gi < inputGroups; gi++) {
     const facets = groupFacets[gi];
@@ -1151,9 +1157,18 @@ export function recognizePrimitives(normalGroups, opts = {}) {
       else delete part.primitive;
       subs.push(part);
     }
-    normalGroups[gi] = subs[0];                         // erste Untergruppe ersetzt die Originalgruppe
-    for (let k = 1; k < subs.length; k++) appendedGroups.push(subs[k]);
+    // Ersetzung NICHT in der Schleife: die Schleife liest normalGroups[gi] als Quelle der
+    // Untergruppen und sammelt das Ergebnis nur — angewandt wird alles in EINEM Schritt
+    // NACH der Schleife (unten). Ergebnis identisch zum früheren Direktzugriff.
+    replacements.push([gi, subs]);
     splitGroups++;
+  }
+  // EIN Schritt nach der Schleife: die erste Untergruppe ersetzt die Originalgruppe an Ort
+  // und Stelle, die restlichen Untergruppen werden (in derselben Reihenfolge wie vorher)
+  // am Ende der Liste angehängt → die Liste ist danach NICHT mehr nach Größe sortiert.
+  for (const [gi, subs] of replacements) {
+    normalGroups[gi] = subs[0];
+    for (let k = 1; k < subs.length; k++) appendedGroups.push(subs[k]);
   }
   for (const g of appendedGroups) normalGroups.push(g);  // weitere Untergruppen erst danach anhängen
 

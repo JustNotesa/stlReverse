@@ -29,6 +29,13 @@
 // muss analytisch umgewandelt werden: boresConverted === Anzahl Bohrungen und
 // mindestens so viele CYLINDRICAL_SURFACE im STEP.
 //
+// SYNTHETIK (dritter Abschnitt): eine Platte mit einer REIHE von Durchgangsbohrungen — bei
+// n ≡ 2 (mod 4) liegen je zwei Wandfacetten eines Lochs in einer Ebene mit den entsprechenden
+// Facetten der ANDEREN Löcher (unifyCoplanarGroups verschmilzt sie zu EINER Gruppe), und nur
+// der Gruppen-Split in recognizePrimitives (stats.splitGroups) sorgt dafür, dass jede der
+// Bohrungen einzeln analytisch gewandelt wird; der Kontrollfall n ≡ 0 (mod 4) hat diese
+// Koplanarität nicht.
+//
 // Läuft ohne Browser/Worker: spiegelt die Worker-Pipeline
 //   parseStl → cleanMesh → simplifyMesh → buildNormalGroups → unifyCoplanarGroups →
 //   recognizePrimitives → buildVolumeStepBrepV2
@@ -46,7 +53,7 @@ import { cleanMesh } from '../mesh-clean.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
-import { buildMesh, circleProfile, checkManifold } from './fixtures-v2/gen.mjs';
+import { buildMesh, circleProfile, rectProfile, checkManifold } from './fixtures-v2/gen.mjs';
 import { checkStepStrict } from './step-strict.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -187,39 +194,24 @@ function exportTris(tris, defeature) {
   });
 }
 
-// Defaults: 2 Laschen, Dicke t=6, Spalte g=14, Platte 20×10, Steg a=4,
-// Bohrung (12, 5) R=2 mit n Segmenten, Achse ‖ z.
-const SYNTH = [
-  { name: 'gabel-z-24',        note: 'Bohrungsachse ‖ z, 24 Segmente, 2 Laschen' },
-  { name: 'gabel-x-24',        note: 'Bohrungsachse ‖ x (wie Box_Bottom), 24 Segmente', params: { transform: { rot: [0, 90, 0] } } },
-  { name: 'gabel-y-24',        note: 'Bohrungsachse ‖ y, 24 Segmente', params: { transform: { rot: [90, 0, 0] } } },
-  { name: 'gabel-schraeg-24',  note: 'schräg im Raum (23°/37°/11°), 24 Segmente', params: { transform: { rot: [23, 37, 11], t: [-60, 80, 15] } } },
-  { name: 'gabel-x-12',        note: 'grob: 12 Segmente, Achse ‖ x', params: { n: 12, transform: { rot: [0, 90, 0] } } },
-  { name: 'gabel-x-48-klein',  note: 'fein: 48 Segmente, R=1,05 (wie Box_Bottom), Achse ‖ x', params: { n: 48, R: 1.05, t: 6, transform: { rot: [0, 90, 0] } } },
-  { name: 'gabel-3laschen',    note: 'drei koaxiale Bohrungen, Achse ‖ x', params: { k: 3, g: 6, transform: { rot: [0, 90, 0] } } },
-  { name: 'gabel-randnah',     note: 'STRESS: Bohrung 0,4 mm vom Rand — nur Wasserfestigkeit + Striktheit', params: { cy: 7.6, transform: { rot: [0, 90, 0] } }, stress: true },
-  { name: 'einzel-lasche',     note: 'Kontrolle: eine Lasche, eine Bohrung, kein Steg', params: { k: 1 } },
-];
-
-console.log('\nSynthetik: koaxiale Bohrungen in getrennten Laschen');
-
-for (const { name, note, params = {}, stress = false } of SYNTH) {
-  const k = params.k ?? 2;
+// Gemeinsamer Fall-Ablauf: Körper bauen → Manifold prüfen → AN/AUS exportieren → Checks.
+// `bores` = erwartete Anzahl Bohrungen (boresConverted === bores, CYLINDRICAL_SURFACE ≥ bores).
+// `expectSplit` = erwarteter stats.splitGroups (null = nicht geprüft).
+// `stress` = nur Wasserfestigkeit + Striktheit (keine Bohrungs-Assertions).
+const runSynthCase = ({ name, note, build, bores, stress = false, expectSplit = null }) => {
   console.log(`\n${name} — ${note}`);
   let tris;
-  try {
-    const body = clevis(params);
-    tris = buildMesh(body);
-  } catch (e) {
+  try { tris = build(); }
+  catch (e) {
     console.log(`  FAIL  Generator-Fehler: ${e.message}`);
     failures++;
-    continue;
+    return;
   }
   const man = checkManifold(tris);
   if (!man.ok) {
     console.log(`  FAIL  Generator: Netz nicht manifold (${man.badEdges} Kanten, ${man.degenerate} entartet)`);
     failures++;
-    continue;
+    return;
   }
   for (const [label, defeature] of [['AN', true], ['AUS', false]]) {
     let out;
@@ -237,15 +229,89 @@ for (const { name, note, params = {}, stress = false } of SYNTH) {
     if (strict.violations.length) {
       for (const v of strict.violations.slice(0, 5)) console.log(`        ${v.kind}: ${v.msg}`);
     }
+    if (expectSplit !== null) {
+      check(`${label}: splitGroups === ${expectSplit}`, stats && stats.splitGroups === expectSplit);
+    }
     if (stress) continue;                       // Stresskörper: nur Wasserfestigkeit + Striktheit
-    const okBores = r.boresConverted === k;
-    check(`${label}: boresConverted === ${k} (JEDE Bohrung analytisch umgewandelt)`, okBores);
-    check(`${label}: STEP enthält ≥${k} CYLINDRICAL_SURFACE`, cyl >= k);
+    const okBores = r.boresConverted === bores;
+    check(`${label}: boresConverted === ${bores} (JEDE Bohrung analytisch umgewandelt)`, okBores);
+    check(`${label}: STEP enthält ≥${bores} CYLINDRICAL_SURFACE`, cyl >= bores);
     if (!okBores) {
       console.log(`        boreNotes: ${JSON.stringify(r.boreNotes || [])}`);
       console.log(`        (Bohrungen blieben facettiert — Gruppen-Split in recognizePrimitives hat nicht gegriffen)`);
     }
   }
+};
+
+// Defaults: 2 Laschen, Dicke t=6, Spalte g=14, Platte 20×10, Steg a=4,
+// Bohrung (12, 5) R=2 mit n Segmenten, Achse ‖ z.
+const SYNTH = [
+  { name: 'gabel-z-24',        note: 'Bohrungsachse ‖ z, 24 Segmente, 2 Laschen' },
+  { name: 'gabel-x-24',        note: 'Bohrungsachse ‖ x (wie Box_Bottom), 24 Segmente', params: { transform: { rot: [0, 90, 0] } } },
+  { name: 'gabel-y-24',        note: 'Bohrungsachse ‖ y, 24 Segmente', params: { transform: { rot: [90, 0, 0] } } },
+  { name: 'gabel-schraeg-24',  note: 'schräg im Raum (23°/37°/11°), 24 Segmente', params: { transform: { rot: [23, 37, 11], t: [-60, 80, 15] } } },
+  { name: 'gabel-x-12',        note: 'grob: 12 Segmente, Achse ‖ x', params: { n: 12, transform: { rot: [0, 90, 0] } } },
+  { name: 'gabel-x-48-klein',  note: 'fein: 48 Segmente, R=1,05 (wie Box_Bottom), Achse ‖ x', params: { n: 48, R: 1.05, t: 6, transform: { rot: [0, 90, 0] } } },
+  { name: 'gabel-3laschen',    note: 'drei koaxiale Bohrungen, Achse ‖ x', params: { k: 3, g: 6, transform: { rot: [0, 90, 0] } } },
+  { name: 'gabel-randnah',     note: 'STRESS: Bohrung 0,4 mm vom Rand — nur Wasserfestigkeit + Striktheit', params: { cy: 7.6, transform: { rot: [0, 90, 0] } }, stress: true },
+  { name: 'einzel-lasche',     note: 'Kontrolle: eine Lasche, eine Bohrung, kein Steg', params: { k: 1 }, expectSplit: 0 },
+];
+
+console.log('\nSynthetik: koaxiale Bohrungen in getrennten Laschen');
+
+for (const { name, note, params = {}, stress = false, expectSplit = null } of SYNTH) {
+  const k = params.k ?? 2;
+  runSynthCase({ name, note, build: () => buildMesh(clevis(params)), bores: k, stress, expectSplit });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Synthetik: Lochreihe in einer Platte (koplanare Wandfacetten)
+//
+// EINE Platte (Rechteck L×W, Dicke t) mit m Durchgangsbohrungen in einer Reihe entlang x
+// (Mittelpunkte (pitch·(i+1), W/2), Radius R, n Segmente). Die Löcher sind PARALLEL, aber
+// NICHT koaxial: ihre Wandfacetten sind deshalb nur TEILWEISE koplanar — und zwar genau dann,
+// wenn n ≡ 2 (mod 4) ist: die Facetten-Normalen liegen bei (i+0,5)·(360°/n), also bei
+// ±90° genau dann, wenn n/4 eine halbe Ganze ist. Die Facetten mit Normalen ±y liegen dann
+// je Loch in einer Ebene, die ALLE Löcher gemeinsam haben → unifyCoplanarGroups verschmilzt
+// sie zu EINER Gruppe (über die Löcher hinweg) → recognizePrimitives muss diese Gruppe je
+// Primitiv aufteilen (stats.splitGroups > 0). Ohne diesen Split blieben die Löcher
+// facettiert (boresConverted = 0). Der Kontrollfall n ≡ 0 (mod 4) hat diese Koplanarität
+// nicht (alle Facetten-Normalen liegen neben ±90°) — dort greift der Split gar nicht.
+//
+// Lokales System: Bohrungsachse = +z, Plattenprofil = rectProfile(0, 0, L, W) (CCW),
+// Lochprofil = circleProfile(..., true) (CW → Loch). Die Deckflächen kommen aus den
+// Default-Caps (gen.mjs: je Außensäule oben/unten, Löcher = alle CW-Säulen) — die
+// Durchgangsbohrungen sind damit voll durchbohrt.
+// ─────────────────────────────────────────────────────────────────────────────
+function lochreihe({ m, n, R = 2, pitch = 8, L, W = 10, t = 4, transform = null } = {}) {
+  const Lp = L ?? pitch * (m + 1);                        // Plattenlänge: je pitch Rand um die Lochreihe (Rand pitch−R)
+  const columns = [{
+    name: 'platte', profile: rectProfile(0, 0, Lp, W), z0: 0, z1: t,
+    bottom: { kind: 'sharp' }, top: { kind: 'sharp' },
+  }];
+  for (let i = 0; i < m; i++) {
+    columns.push({
+      name: `loch${i}`, profile: circleProfile(pitch * (i + 1), W / 2, R, n, true),
+      z0: 0, z1: t, bottom: { kind: 'sharp' }, top: { kind: 'sharp' },
+    });
+  }
+  const body = { columns };
+  if (transform) body.transform = transform;
+  return body;
+}
+
+// Defaults: Platte L = pitch·(m+1), W = 10, Dicke t = 4, Löcher R = 2, pitch = 8.
+const LOCHREIHE = [
+  { name: 'lochreihe-2x30',        note: '2 Löcher, 30 Segmente (n ≡ 2 mod 4 → je zwei Wandfacetten je Loch liegen mit den Facetten des anderen Lochs in einer Ebene)', params: { m: 2, n: 30 } },
+  { name: 'lochreihe-3x18',        note: '3 Löcher, 18 Segmente (n ≡ 2 mod 4 → koplanare Wandfacetten über die Löcher hinweg)', params: { m: 3, n: 18 } },
+  { name: 'lochreihe-3x18-schraeg', note: '3 Löcher, 18 Segmente, schräg im Raum (23°/37°/11°)', params: { m: 3, n: 18, transform: { rot: [23, 37, 11], t: [-60, 80, 15] } } },
+  { name: 'lochreihe-4x24',        note: 'Kontrolle: 4 Löcher, 24 Segmente (n ≡ 0 mod 4 → keine koplanaren Wandfacetten über die Löcher hinweg)', params: { m: 4, n: 24 } },
+];
+
+console.log('\nSynthetik: Lochreihe in einer Platte (koplanare Wandfacetten)');
+
+for (const { name, note, params = {} } of LOCHREIHE) {
+  runSynthCase({ name, note, build: () => buildMesh(lochreihe(params)), bores: params.m });
 }
 
 console.log(`\n${failures === 0 ? '✅ alle Bohrungs-Regressionen grün' : `❌ ${failures} Assertion(en) fehlgeschlagen`}`);
