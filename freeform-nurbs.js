@@ -519,24 +519,79 @@ export function makeCompatible(a, b) {
   const a2 = elevateCurve(a1, D);
   const b2 = elevateCurve(b1, D);
   if (!a2 || !b2) return null;
-  // Ziel-Knotenvektor: Vereinigung der Werte, Vielfachheit = Maximum
-  const vals = [];
+  // Ziel-Knotenvektor: Vereinigung der Werte, Vielfachheit = Maximum.
+  // Die Toleranz ist jetzt RELATIV (1e-9 · max(1, Spannweite)): zwei Knoten, die sich
+  // um weniger unterscheiden, sind derselbe Knoten. Mit der alten absoluten Toleranz
+  // (1e-12) blieben solche Paare getrennt — im STEP standen dann zwei fast gleiche
+  // Knotenwerte; ISO 10303-42 verlangt streng steigende, verschiedene Knotenwerte.
+  const lo = Math.min(a2.knots[0], b2.knots[0]);
+  const hi = Math.max(a2.knots[a2.knots.length - 1], b2.knots[b2.knots.length - 1]);
+  const tol = 1e-9 * Math.max(1, hi - lo);
+  // Alle Knoten beider Kurven sammeln, nach Wert sortieren und in Gruppen fassen:
+  // Anker = kleinster Wert der Gruppe, ein Knoten gehört dazu, wenn er höchstens
+  // tol vom Anker entfernt ist (kein Verketteln über mehrere Stufen — so bleiben
+  // die Zielwerte um mehr als tol voneinander entfernt).
+  const all = [];
   for (const c of [a2, b2]) {
+    for (let i = 0; i < c.knots.length; i++) all.push({ v: c.knots[i], m: c.mults[i], c: c === a2 ? 0 : 1 });
+  }
+  all.sort((x, y) => x.v - y.v);
+  const groups = [];
+  for (const k of all) {
+    const g = groups.length ? groups[groups.length - 1] : null;
+    if (g && Math.abs(k.v - g.anchor) <= tol) g.items.push(k);
+    else groups.push({ anchor: k.v, items: [k] });
+  }
+  const tKnots = groups.map((g) => g.anchor);
+  // Vielfachheit je Gruppe: Maximum der Beiträge beider Kurven (ein Knoten zählt je
+  // Kurve nur einmal) — wie bisher, nur mit der relativen Toleranz zusammengefasst.
+  const tMults = groups.map((g) => {
+    const contrib = [0, 0];
+    for (const it of g.items) contrib[it.c] += it.m;
+    return Math.max(contrib[0], contrib[1]);
+  });
+  // Kurven auf die Zielwerte snappen: ein Knoten, der vom Zielwert abweicht, rückt auf
+  // ihn (Δ ≤ tol → Geometrieänderung in der Größenordnung 1e-9). Ohne das Snappen
+  // bliebe im Zielvektor ein zweiter, fast gleicher Knoten stehen (und die beiden
+  // Kurven hätten unterschiedliche Knotenvektoren — der Coons-Patch wäre dann nicht
+  // konsistent).
+  const snap = (c) => {
+    const knots = [];
+    const mults = [];
     for (let i = 0; i < c.knots.length; i++) {
       const v = c.knots[i];
-      let hit = -1;
-      for (let k = 0; k < vals.length; k++) if (Math.abs(vals[k].v - v) < 1e-12) { hit = k; break; }
-      if (hit < 0) vals.push({ v, m: c.mults[i] });
-      else vals[hit].m = Math.max(vals[hit].m, c.mults[i]);
+      let gi = -1;
+      for (let k = 0; k < groups.length; k++) if (Math.abs(groups[k].anchor - v) <= tol) { gi = k; break; }
+      if (gi < 0) { knots.push(v); mults.push(c.mults[i]); continue; }
+      const a = groups[gi].anchor;
+      if (knots.length && knots[knots.length - 1] === a) { mults[mults.length - 1] += c.mults[i]; continue; }
+      knots.push(a); mults.push(c.mults[i]);
     }
-  }
-  vals.sort((x, y) => x.v - y.v);
-  const tKnots = vals.map((e) => e.v);
-  const tMults = vals.map((e) => e.m);
-  const a3 = refineTo(a2, tKnots, tMults);
-  const b3 = refineTo(b2, tKnots, tMults);
+    return makeCurve(c.degree, c.ctrl.map((p) => p.slice()), { knots, mults }, c.params);
+  };
+  const a3 = refineTo(snap(a2), tKnots, tMults);
+  const b3 = refineTo(snap(b2), tKnots, tMults);
   if (!a3 || !b3) return null;
+  // Endkontrolle: beide Kurven brauchen denselben, streng steigenden Knotenvektor mit
+  // gültigen Vielfachheiten (sonst ist der Coons-Patch nicht konsistent).
+  if (!knotVecOk(a3) || !knotVecOk(b3)) return null;
   return [a3, b3];
+}
+
+// Knotenvektor gültig? Streng steigend, Vielfachheit ≥ 1, innen ≤ Grad und an den
+// Enden ≤ Grad+1, Summe der Vielfachheiten = Stützpunkte + Grad + 1 (ISO 10303-42).
+function knotVecOk(c) {
+  const k = c.knots, m = c.mults, p = c.degree;
+  if (!k.length || k.length !== m.length) return false;
+  for (let i = 0; i < k.length; i++) {
+    if (!(m[i] >= 1)) return false;
+    if (i > 0 && !(k[i] > k[i - 1])) return false;
+    const maxM = (i === 0 || i === k.length - 1) ? p + 1 : p;
+    if (m[i] > maxM) return false;
+  }
+  let sum = 0;
+  for (const x of m) sum += x;
+  return sum === c.ctrl.length + p + 1;
 }
 
 // ── Coons-Patch ──────────────────────────────────────────────────────────────

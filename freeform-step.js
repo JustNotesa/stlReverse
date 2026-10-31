@@ -75,6 +75,54 @@ const toStepDir = (v) => {
   return t.includes('.') ? t : t + '.';
 };
 
+// Knotenwerte: volle Doppelpräzision (String(v) = kürzeste exakte Darstellung),
+// immer mit Dezimalpunkt, ohne Exponentform. Mit 9 Nachkommastellen (wie die
+// Koordinaten) fielen verschiedene Knoten auf denselben Text — ISO 10303-42
+// verlangt aber streng steigende, verschiedene Knotenwerte.
+const expandExp = (s) => {
+  const m = /^(-?)(\d*)(?:\.(\d*))?[eE]([+-]?\d+)$/.exec(s);
+  if (!m) return s;
+  const sign = m[1], intPart = m[2] || '0', frac = m[3] || '', exp = parseInt(m[4], 10);
+  const digits = intPart + frac;
+  const pos = intPart.length + exp;
+  let out;
+  if (pos <= 0) out = '0.' + '0'.repeat(-pos) + digits;
+  else if (pos >= digits.length) out = digits + '0'.repeat(pos - digits.length) + '.';
+  else out = digits.slice(0, pos) + '.' + digits.slice(pos);
+  out = out.replace(/(\.\d*?)0+$/, '$1');
+  return sign + out;
+};
+const toStepKnot = (v) => {
+  if (!Number.isFinite(v)) return '0.';
+  const s = expandExp(String(v));
+  return s.includes('.') ? s : s + '.';
+};
+
+// Knotenvektor → STEP-Text (Werte mit voller Präzision, Vielfachheiten).
+// Sicherheitsnetz: zwei nach dem Formatieren gleiche Werte werden zu einem Knoten
+// zusammengefasst (Vielfachheiten addiert), solange die Vielfachheit erlaubt bleibt
+// (innen ≤ Grad, an den Enden ≤ Grad+1). Sonst Abbruch mit Ausnahme — der Aufrufer
+// (buildFreeformBrep) fängt sie und fällt auf den alten Weg zurück.
+const knotVector = (knots, mults, degree) => {
+  const vals = [];
+  const ms = [];
+  let start = 0;
+  for (let i = 0; i < knots.length; i++) {
+    const s = toStepKnot(knots[i]);
+    const m = Number.isFinite(mults[i]) ? Math.round(mults[i]) : 1;
+    if (vals.length && vals[vals.length - 1] === s) {
+      const isEnd = start === 0 || i === knots.length - 1;
+      const sum = ms[ms.length - 1] + m;
+      if (sum > (isEnd ? degree + 1 : degree)) throw new Error('knot vector not strictly increasing');
+      ms[ms.length - 1] = sum;
+      continue;
+    }
+    vals.push(s); ms.push(m);
+    start = i;
+  }
+  return { vals, ms };
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Schreiber: B-Rep → STEP-Text + Zählwerk
 //
@@ -132,8 +180,9 @@ export function writeFreeformStep(brep, opts = {}) {
     return cid;
   };
   const addBSpline = (degree, ctrlIds, knots, mults) => {
+    const kv = knotVector(knots, mults, degree);
     const bid = id++;
-    entities.push(`#${bid}=B_SPLINE_CURVE_WITH_KNOTS('',${degree},(${ctrlIds.map((c) => `#${c}`).join(',')}),.UNSPECIFIED.,.F.,.F.,(${mults.join(',')}),(${knots.map(toStep).join(',')}),.UNSPECIFIED.);`);
+    entities.push(`#${bid}=B_SPLINE_CURVE_WITH_KNOTS('',${degree},(${ctrlIds.map((c) => `#${c}`).join(',')}),.UNSPECIFIED.,.F.,.F.,(${kv.ms.join(',')}),(${kv.vals.join(',')}),.UNSPECIFIED.);`);
     return bid;
   };
   const addEdgeCurve = (sv, ev, curveId) => {
@@ -226,12 +275,12 @@ export function writeFreeformStep(brep, opts = {}) {
       // ISO 10303-42 control_points_list; Polynom, beidseitig geklemmt.
       const rows = (s.ctrl || []).map((row) => row.map((p) => addPoint(p)));
       const list = rows.map((row) => `(${row.map((c) => `#${c}`).join(',')})`).join(',');
-      const mu = (s.multsU || []).join(',');
-      const mv = (s.multsV || []).join(',');
-      const ku = (s.knotsU || []).map(toStep).join(',');
-      const kv = (s.knotsV || []).map(toStep).join(',');
+      // Knotenwerte mit voller Präzision (eigener Formatter, nicht toStep) — sonst
+      // könnten verschiedene Knoten auf denselben Text fallen.
+      const ku = knotVector(s.knotsU || [], s.multsU || [], s.du ?? 3);
+      const kv = knotVector(s.knotsV || [], s.multsV || [], s.dv ?? 3);
       surfId = id++;
-      entities.push(`#${surfId}=B_SPLINE_SURFACE_WITH_KNOTS('',${s.du ?? 3},${s.dv ?? 3},(${list}),.UNSPECIFIED.,.F.,.F.,.F.,(${mu}),(${mv}),(${ku}),(${kv}),.UNSPECIFIED.);`);
+      entities.push(`#${surfId}=B_SPLINE_SURFACE_WITH_KNOTS('',${s.du ?? 3},${s.dv ?? 3},(${list}),.UNSPECIFIED.,.F.,.F.,.F.,(${ku.ms.join(',')}),(${kv.ms.join(',')}),(${ku.vals.join(',')}),(${kv.vals.join(',')}),.UNSPECIFIED.);`);
       bump(surfaceCounts, 'B_SPLINE_SURFACE_WITH_KNOTS');
     } else {
       const n = norm3(s.n || [0, 0, 1]);
