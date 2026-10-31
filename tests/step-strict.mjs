@@ -29,6 +29,10 @@
 //                    legen die Fläche in entgegengesetzte Drehrichtung (auch bei Bögen ≥ 180°);
 //                    tangentiale Kante zwischen zwei gekrümmten Flächen: keine Faltung (beide
 //                    Flächen liegen auf verschiedenen Seiten der Kante)
+//   orient-bspline   B-Spline-Fläche (B_SPLINE_SURFACE_WITH_KNOTS, Tensorprodukt/Polynom) mit
+//                    EINEM Rand: im Parameterraum (u,v) läuft der Rand gegen den Uhrzeigersinn,
+//                    wenn die Fläche links liegt (natürliche Normale Su×Sv) — passend zu
+//                    same_sense (.T. → CCW, .F. → CW)
 //   loop-overlap     Ebene: Ränder schneiden/berühren sich nicht, jedes Loch liegt im Außenrand, Löcher
 //                    nicht ineinander (Kreise exakt, sonst Polygone; Kurven dicht abgetastet)
 //   shell-connected  jede CLOSED_SHELL/OPEN_SHELL hängt über gemeinsame Kanten zusammen
@@ -36,11 +40,19 @@
 //   shell-volume     jede Außenschale eines Körpers umschließt V > 0 (Divergenzsatz über die Flächen,
 //                    ohne Heilung) und ist kein Blech ohne Volumen; Hohlräume stehen als
 //                    ORIENTED_CLOSED_SHELL(.F.) einer positiven CLOSED_SHELL im BREP_WITH_VOIDS
-//                    (Ebene, Zylinder, Kegel, Torus, Kugel; andere Flächenarten → Schale übersprungen)
+//                    (Ebene, Zylinder, Kegel, Torus, Kugel, B-Spline-Fläche; andere Flächenarten →
+//                    Schale übersprungen)
 //   shared-topology  kein VERTEX_POINT und keine EDGE_CURVE in zwei Schalen (getrennte Körper, Hohlraum
 //                    und Außenschale teilen nichts)
+//   bspline-knots    B-Spline-Knotenvektor (B_SPLINE_SURFACE_WITH_KNOTS in beiden Richtungen,
+//                    B_SPLINE_CURVE_WITH_KNOTS): Knotenwerte streng steigend (keine Doppelknoten),
+//                    Vielfachheit ≥ 1, innere Vielfachheit ≤ Grad, Randvielfachkeit ≤ Grad+1,
+//                    Summe der Vielfachkeiten = Stützpunkte + Grad + 1 (ISO 10303-42)
 //
-// Nutzung als Modul:  checkStepStrict(stepText) → { violations: [...], stats }
+// Unterstützte Flächenarten: PLANE, CYLINDRICAL_/CONICAL_/SPHERICAL_/TOROIDAL_SURFACE,
+// SURFACE_OF_LINEAR_EXTRUSION, SURFACE_OF_REVOLUTION, B_SPLINE_SURFACE_WITH_KNOTS.
+//
+// Nutzung als Modul:  checkStepStrict(stepText) → { violations: [...], stats, volumes: [{shell,V,thick}] }
 // CLI:                node tests/step-strict.mjs [datei.step …]    (ohne Argument: alle Samples
 //                     wie der Worker exportieren, Toggle AN und AUS)  — Exit 1 bei Verstößen
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,8 +87,55 @@ export function parseStep(text) {
   const body = text.replace(/\r/g, '');
   const re = /#(\d+)\s*=\s*([A-Z_0-9]+)\s*(\((?:[^;']|'(?:[^']|'')*')*\))\s*;/g;
   let m;
-  while ((m = re.exec(body))) ents.set(+m[1], { type: m[2], args: parseArgs(m[3]) });
+  while ((m = re.exec(body))) ents.set(+m[1], { id: +m[1], type: m[2], args: parseArgs(m[3]) });
   return ents;
+}
+
+// ---- B-Spline-Knotenvektor (ISO 10303-42) ----------------------------------
+// Ein Knotenvektor ist gültig, wenn
+//   * die Knotenwerte streng steigend sind (verschiedene Werte, keine Doppelknoten)
+//   * jede Vielfachheit ≥ 1 ist
+//   * eine innere Vielfachheit ≤ Grad und eine Randvielfachkeit ≤ Grad+1 ist
+//   * die Summe der Vielfachkeiten = Stützpunkte + Grad + 1 ist
+// Liefert die Liste der Meldungen (leer = gültig).
+function knotProblems(vals, mults, degree, nCtrl, label) {
+  const out = [];
+  if (!Array.isArray(vals) || !Array.isArray(mults)) {
+    out.push(`${label}: Knoten- oder Vielfachheitsliste fehlt`);
+    return out;
+  }
+  if (vals.length !== mults.length) {
+    out.push(`${label}: ${vals.length} Knotenwerte, aber ${mults.length} Vielfachheiten`);
+    return out;
+  }
+  if (!(degree >= 1)) { out.push(`${label}: Grad ${degree} ist kleiner als 1`); return out; }
+  // Knotenwerte streng steigend
+  for (let i = 1; i < vals.length; i++) {
+    if (!(vals[i] > vals[i - 1])) {
+      out.push(`${label}: Knotenwert ${vals[i]} (Index ${i}) ist nicht größer als ${vals[i - 1]} (Index ${i - 1})`);
+    }
+  }
+  // Vielfachheiten je Knotenwert (gleiche Werte werden zusammengefasst)
+  const groups = [];
+  for (let i = 0; i < vals.length; i++) {
+    const last = groups.length ? groups[groups.length - 1] : null;
+    if (last && last.v === vals[i]) last.m += mults[i];
+    else groups.push({ v: vals[i], m: mults[i] });
+  }
+  for (let i = 0; i < groups.length; i++) {
+    const isEnd = (i === 0) || (i === groups.length - 1);
+    const maxM = isEnd ? degree + 1 : degree;
+    if (!(groups[i].m >= 1)) out.push(`${label}: Vielfachheit ${groups[i].m} am Knoten ${groups[i].v} ist kleiner als 1`);
+    else if (groups[i].m > maxM) {
+      out.push(`${label}: Vielfachheit ${groups[i].m} am ${isEnd ? 'Randknoten' : 'inneren Knoten'} ${groups[i].v} ist größer als ${maxM}`);
+    }
+  }
+  let sum = 0;
+  for (const m of mults) sum += m;
+  if (sum !== nCtrl + degree + 1) {
+    out.push(`${label}: Summe der Vielfachheiten ${sum} ist nicht Stützpunkte + Grad + 1 (${nCtrl + degree + 1})`);
+  }
+  return out;
 }
 
 // ---- Vektoren
@@ -88,6 +147,92 @@ const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a
 const len = (a) => Math.hypot(a[0], a[1], a[2]);
 const norm = (a) => { const l = len(a); return l > 0 ? mul(a, 1 / l) : [0, 0, 0]; };
 const rot = (v, a, u) => { const c = Math.cos(u), s = Math.sin(u), d = dot(a, v) * (1 - c), x = cross(a, v); return [v[0] * c + x[0] * s + a[0] * d, v[1] * c + x[1] * s + a[1] * d, v[2] * c + x[2] * s + a[2] * d]; };
+// 8-Punkt-Gauß-Legendre auf [−1,1]: [Knoten, Gewicht]
+const GAUSS8 = [
+  [-0.9602898564975363, 0.1012285362903763], [-0.7966664774136267, 0.2223810344533745],
+  [-0.5255324099163290, 0.3137066458778873], [-0.1834346424956498, 0.3626837833783620],
+  [0.1834346424956498, 0.3626837833783620], [0.5255324099163290, 0.3137066458778873],
+  [0.7966664774136267, 0.2223810344533745], [0.9602898564975363, 0.1012285362903763],
+];
+
+// ---- B-Spline-Flächen: Knotenspannen (Startwerte der Projektion) ----------
+//
+// Die Parametrisierung einer Blend-Fläche ist stark ungleichförmig: die Seiten
+// sind aus Randkurven zusammengesetzt und nach Kontrollpolygonlänge
+// parametrisiert. Ein Randstück kann < 1 % des u-Bereichs belegen, eine
+// Polseite (dreiseitiges Patch) kollabiert. Ein gleichmäßiges Raster über die
+// Domäne verfehlt solche Spuren — die Projektion blieb in einem Nebenminimum
+// hängen und meldete Punkte, die exakt auf der Fläche liegen, als 2e-3 … 1e-2 mm
+// daneben. Deshalb: Startwerte je Knotenspan.
+
+// Spannen (Intervalle mit K[k+1] > K[k]) im gültigen Bereich [p, nCtrl-1]
+function knotSpans(K, p, nCtrl) {
+  const out = [];
+  for (let k = p; k < nCtrl; k++) if (K[k + 1] > K[k]) out.push({ k, a: K[k], b: K[k + 1] });
+  return out;
+}
+
+// Stützstellen je Span verteilen: mindestens eine, der Rest proportional zum
+// geometrischen Gewicht (Sehne über die Kontrollpunkte des Spans)
+function allocSpan(weights, total) {
+  const n = weights.length;
+  const cnt = new Array(n).fill(1);
+  const sum = weights.reduce((a, b) => a + b, 0);
+  const left = total - n;
+  if (left > 0 && sum > 0) {
+    const exact = weights.map((w) => (left * w) / sum);
+    let used = 0;
+    for (let i = 0; i < n; i++) { const c = Math.max(1, Math.floor(exact[i])); cnt[i] = c; used += c; }
+    const order = exact.map((e, i) => ({ i, f: e - Math.floor(e) })).sort((a, b) => b.f - a.f);
+    for (let k = 0; used < total && k < order.length; k++) { cnt[order[k].i]++; used++; }
+  }
+  return cnt;
+}
+
+// Stützstellenwerte je Span (Spannenenden eingeschlossen; bei einer
+// Stützstelle die Spanmitte)
+function spanValues(spans, cnt) {
+  const out = [];
+  for (let i = 0; i < spans.length; i++) {
+    const { a, b } = spans[i];
+    const c = cnt[i];
+    if (c <= 1) { out.push(0.5 * (a + b)); continue; }
+    for (let k = 0; k < c; k++) out.push(a + ((b - a) * k) / (c - 1));
+  }
+  return out;
+}
+
+// Minimum einer eindimensionalen Funktion: grobe Suche + goldener Schnitt
+function scanMin1D(f, a, b) {
+  const N = 32;
+  const ts = new Float64Array(N + 1);
+  let bt = a;
+  let bd = Infinity;
+  let bi = 0;
+  for (let i = 0; i <= N; i++) {
+    const t = a + ((b - a) * i) / N;
+    ts[i] = t;
+    const d = f(t);
+    if (d < bd) { bd = d; bt = t; bi = i; }
+  }
+  let lo = ts[Math.max(0, bi - 1)];
+  let hi = ts[Math.min(N, bi + 1)];
+  if (hi > lo) {
+    const g = (Math.sqrt(5) - 1) / 2;
+    let x1 = hi - g * (hi - lo);
+    let x2 = lo + g * (hi - lo);
+    let f1 = f(x1);
+    let f2 = f(x2);
+    for (let k = 0; k < 50 && hi - lo > 1e-14 * (1 + Math.abs(lo)); k++) {
+      if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - g * (hi - lo); f1 = f(x1); }
+      else { lo = x1; x1 = x2; f1 = f2; x2 = lo + g * (hi - lo); f2 = f(x2); }
+    }
+    const t = 0.5 * (lo + hi);
+    const d = f(t);
+    if (d < bd) { bd = d; bt = t; }
+  }
+  return { t: bt, d: bd };
+}
 
 export function checkStepStrict(text, opts = {}) {
   const TOL = opts.tol ?? 1e-4;          // mm — strikte Kerne arbeiten mit ~1e-6; 1e-4 ist großzügig
@@ -105,6 +250,8 @@ export function checkStepStrict(text, opts = {}) {
     for (const f of e.args[1]) shellOfFace.set(f.ref, { id: sid, type: e.type });
   }
   const flag = (kind, msg, extra = {}) => violations.push({ kind, msg, ...extra });
+  // Knotenverstöße je Entität nur einmal melden (eine Fläche wird je Rand eingelesen)
+  const knotSeen = new Set();
 
   const P = (r) => { const a = E(r).args; return a[1]; };                    // CARTESIAN_POINT('',(x,y,z))
   const D = (r) => norm(E(r).args[1]);                                       // DIRECTION('',(…))
@@ -141,6 +288,13 @@ export function checkStepStrict(text, opts = {}) {
     } else if (e.type === 'B_SPLINE_CURVE_WITH_KNOTS') {
       const deg = e.args[1]; const cps = e.args[2].map((q) => P(q));
       const mults = e.args[6], kv = e.args[7];
+      // Knotenvektor prüfen (ISO 10303-42): streng steigend, Vielfachkeiten in der Grenze
+      if (!knotSeen.has(`c${e.id}`)) {
+        knotSeen.add(`c${e.id}`);
+        for (const msg of knotProblems(kv, mults, deg, cps.length, 'Kurve')) {
+          flag('bspline-knots', `#${e.id}: B_SPLINE_CURVE_WITH_KNOTS: ${msg}`);
+        }
+      }
       const U = []; mults.forEach((m, i) => { for (let k = 0; k < m; k++) U.push(kv[i]); });
       const at = (t) => {
         // de Boor
@@ -181,6 +335,503 @@ export function checkStepStrict(text, opts = {}) {
     return [ps, pe];
   };
 
+  // ---- B-Spline-Fläche (Tensorprodukt, Polynom, beidseitig geklemmt) ----
+  // ctrl[i][j]: i = u-Index, j = v-Index (ISO 10303-42 control_points_list).
+  // Liefert at(u,v), su(u,v), sv(u,v) (exakte Ableitungen) sowie den nächstgelegenen
+  // Flächenpunkt (Gitter + projiziertes Gauss-Newton) → dist(p), normal(p), uv(p).
+  //
+  // TEMPO (Etappe 2): das Startgitter wird EINMAL je Fläche gebaut (vorher je Abfrage neu
+  // gerechnet — der Hauptkostenblock) und über eine Raumplatzsuche (Hash-Zellen) gefunden;
+  // die Auswertung läuft ohne Zwischenallokation (flache Float64-Puffer, de Boor in einem
+  // Durchgang für S, Su und Sv); aufeinanderfolgende Abfragepunkte (Rand eines Face) starten
+  // mit dem letzten (u,v) der gleichen Fläche ("warm start"); die Newton-Schritte sind
+  // begrenzt und enden, sobald der Schritt vernachlässigbar ist.
+  const bsplineSurfaceOf = (e) => {
+    const du = e.args[1], dv = e.args[2], rows = e.args[3];
+    if (!Array.isArray(rows) || !rows.length || !Array.isArray(rows[0])) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    const nu = rows.length, nv = rows[0].length;
+    const expand = (kn, mm) => { const out = []; mm.forEach((m, i) => { for (let k = 0; k < m; k++) out.push(kn[i]); }); return out; };
+    const ku = e.args[10] || [], kv = e.args[11] || [], mu = e.args[8] || [], mv = e.args[9] || [];
+    // Knotenvektor prüfen (ISO 10303-42) — beide Richtungen
+    if (!knotSeen.has(`s${e.id}`)) {
+      knotSeen.add(`s${e.id}`);
+      for (const [lbl, vals, mults, deg, n] of [['u', ku, mu, du, nu], ['v', kv, mv, dv, nv]]) {
+        for (const msg of knotProblems(vals, mults, deg, n, `Richtung ${lbl}`)) {
+          flag('bspline-knots', `#${e.id}: B_SPLINE_SURFACE_WITH_KNOTS: ${msg}`);
+        }
+      }
+    }
+    if (ku.length !== mu.length || kv.length !== mv.length) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    const U = expand(ku, mu), V = expand(kv, mv);
+    // Gültige B-Spline-Konfiguration: Grad ≥ 1, mind. 2 Stützpunkte je Richtung,
+    // Knotenvektorlänge = Kontrollpunkte + Grad + 1
+    if (!(du >= 1) || !(dv >= 1) || nu < 2 || nv < 2 || U.length !== nu + du + 1 || V.length !== nv + dv + 1) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    const u0 = U[du], u1 = U[U.length - du - 1], v0 = V[dv], v1 = V[V.length - dv - 1];
+    if (!(u1 > u0) || !(v1 > v0)) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
+    // inneren Knoten (für Gitter + Integralsplitting)
+    const inner = (K, a, b) => { const s = []; for (const t of K) if (t > a + 1e-12 && t < b - 1e-12 && (!s.length || s[s.length - 1] < t)) s.push(t); return s; };
+    const iu = inner(U, u0, u1), iv = inner(V, v0, v1);
+    const proj = (x, a, b) => (x < a ? a : (x > b ? b : x));
+
+    // ---- Stützpunkte flach + Ableitungsnetze (einmal je Fläche, nicht je Abfrage) ----
+    const CP = new Float64Array(3 * nu * nv);            // Kontrollpunkte [i*nv + j]
+    for (let i = 0; i < nu; i++) {
+      const row = rows[i];
+      for (let j = 0; j < nv; j++) {
+        const q = P(row[j]), o = 3 * (i * nv + j);
+        CP[o] = q[0]; CP[o + 1] = q[1]; CP[o + 2] = q[2];
+      }
+    }
+    // v-Ableitung: D[i][j] = dv·(P[i][j+1] − P[i][j])/(V[j+dv+1] − V[j+1]), j = 0…nv−2
+    const DV = new Float64Array(3 * nu * (nv - 1));
+    for (let i = 0; i < nu; i++) {
+      for (let j = 0; j + 1 < nv; j++) {
+        const den = V[j + dv + 1] - V[j + 1];
+        const w = den === 0 ? 0 : dv / den;
+        const a = 3 * (i * nv + j), b = 3 * (i * nv + j + 1), o = 3 * (i * (nv - 1) + j);
+        DV[o] = (CP[b] - CP[a]) * w; DV[o + 1] = (CP[b + 1] - CP[a + 1]) * w; DV[o + 2] = (CP[b + 2] - CP[a + 2]) * w;
+      }
+    }
+    // u-Ableitung: Q_i(v) = c_i·(R_{i+1}(v) − R_i(v)), c_i = du/(U[i+du+1] − U[i+1])
+    const CU = new Float64Array(nu - 1);
+    for (let i = 0; i + 1 < nu; i++) {
+      const den = U[i + du + 1] - U[i + 1];
+      CU[i] = den === 0 ? 0 : du / den;
+    }
+    const Ud = U.slice(1, -1), Vd = V.slice(1, -1);
+
+    // Knotenspan suchen: größtes j mit K[j] ≤ t, begrenzt auf [p, len−p−2] (binär: O(log n))
+    const spanOf = (K, p, t) => {
+      const hi = K.length - p - 2;
+      if (hi < p) return p;
+      let a = 0, b = K.length - 1, r = -1;
+      while (a <= b) { const m = (a + b) >> 1; if (K[m] <= t) { r = m; a = m + 1; } else b = m - 1; }
+      if (r < p) return p;
+      return r > hi ? hi : r;
+    };
+
+    // ---- Scratch-Puffer (keine Allokation im heißen Pfad) ----
+    const LV = nu * (dv + 1), LVd = nu * dv;
+    const scrV = new Float64Array(3 * LV * (dv + 1));   // de Boor in v, Ebene r
+    const scrD = new Float64Array(3 * LVd * dv);         // de Boor in v der Ableitungszeilen
+    const scrR = new Float64Array(3 * nu);               // R_i(v)  (Zeilen bei v)
+    const scrRp = new Float64Array(3 * nu);              // R'_i(v) (Ableitungszeilen bei v)
+    const scrQ = new Float64Array(3 * (nu - 1));         // Q_i(v)  (u-Ableitung der Zeilen)
+    const oS = new Float64Array(3), oU = new Float64Array(3), oV = new Float64Array(3);
+    const buf = new Float64Array(3 * (du + 1));   // de-Boor-Arbeitspuffer in u
+    const tmp = new Float64Array(3);
+    // Zähler (Profil) — ohne Einfluss auf das Ergebnis
+    const prof = { grid: 0, at: 0, all: 0, solve: 0, refine: 0, warm: 0, dist: 0, normal: 0, uv: 0, it: 0, full: 0, half: 0, grad: 0 };
+
+    // de Boor in v über alle nu Zeilen → scrR (Ebene dv ist das Ergebnis)
+    // (der letzte v-Wert bleibt stehen — die Newton-Schritte nutzen denselben Wert oft)
+    let lastV = NaN, lastVD = NaN;
+    const evalRows = (v) => {
+      if (v === lastV) return;
+      lastV = v;
+      const k = spanOf(V, dv, v), base = k - dv;
+      for (let i = 0; i < nu; i++) {
+        const ro = 3 * i * (dv + 1), co = 3 * (i * nv + base);
+        for (let j = 0; j <= dv; j++) {
+          scrV[ro + 3 * j] = CP[co + 3 * j];
+          scrV[ro + 3 * j + 1] = CP[co + 3 * j + 1];
+          scrV[ro + 3 * j + 2] = CP[co + 3 * j + 2];
+        }
+      }
+      for (let r = 1; r <= dv; r++) {
+        const pb = 3 * (r - 1) * LV, cb = 3 * r * LV;
+        for (let i = 0; i < nu; i++) {
+          const po = pb + 3 * i * (dv + 1), co = cb + 3 * i * (dv + 1);
+          for (let j = dv; j >= r; j--) {
+            const idx = j + base;
+            const den = V[idx + dv - r + 1] - V[idx];
+            const al = den === 0 ? 0 : (v - V[idx]) / den, be = 1 - al;
+            const p1 = po + 3 * (j - 1), p2 = po + 3 * j, c = co + 3 * j;
+            scrV[c] = scrV[p1] * be + scrV[p2] * al;
+            scrV[c + 1] = scrV[p1 + 1] * be + scrV[p2 + 1] * al;
+            scrV[c + 2] = scrV[p1 + 2] * be + scrV[p2 + 2] * al;
+          }
+        }
+      }
+      const off = 3 * dv * LV;
+      for (let i = 0; i < nu; i++) {
+        const s = off + 3 * i * (dv + 1) + 3 * dv;
+        scrR[3 * i] = scrV[s]; scrR[3 * i + 1] = scrV[s + 1]; scrR[3 * i + 2] = scrV[s + 2];
+      }
+    };
+    // de Boor in v über die Ableitungszeilen (Knoten Vd, Grad dv−1) → scrRp
+    const evalRowsD = (v) => {
+      if (v === lastVD) return;
+      lastVD = v;
+      const p = dv - 1, k = spanOf(Vd, p, v), base = k - p;
+      for (let i = 0; i < nu; i++) {
+        const ro = 3 * i * dv, co = 3 * (i * (nv - 1) + base);
+        for (let j = 0; j <= p; j++) {
+          scrD[ro + 3 * j] = DV[co + 3 * j];
+          scrD[ro + 3 * j + 1] = DV[co + 3 * j + 1];
+          scrD[ro + 3 * j + 2] = DV[co + 3 * j + 2];
+        }
+      }
+      for (let r = 1; r <= p; r++) {
+        const pb = 3 * (r - 1) * LVd, cb = 3 * r * LVd;
+        for (let i = 0; i < nu; i++) {
+          const po = pb + 3 * i * dv, co = cb + 3 * i * dv;
+          for (let j = p; j >= r; j--) {
+            const idx = j + base;
+            const den = Vd[idx + p - r + 1] - Vd[idx];
+            const al = den === 0 ? 0 : (v - Vd[idx]) / den, be = 1 - al;
+            const p1 = po + 3 * (j - 1), p2 = po + 3 * j, c = co + 3 * j;
+            scrD[c] = scrD[p1] * be + scrD[p2] * al;
+            scrD[c + 1] = scrD[p1 + 1] * be + scrD[p2 + 1] * al;
+            scrD[c + 2] = scrD[p1 + 2] * be + scrD[p2 + 2] * al;
+          }
+        }
+      }
+      const off = 3 * p * LVd;
+      for (let i = 0; i < nu; i++) {
+        const s = off + 3 * i * dv + 3 * p;
+        scrRp[3 * i] = scrD[s]; scrRp[3 * i + 1] = scrD[s + 1]; scrRp[3 * i + 2] = scrD[s + 2];
+      }
+    };
+    // de Boor in u über eine Kontrollpunkt-Reihe src[3i] → buf (Ergebnis buf[3*deg])
+    const deBoorU = (src, deg, K, k, t) => {
+      for (let j = 0; j <= deg; j++) {
+        const s = 3 * (k - deg + j);
+        buf[3 * j] = src[s]; buf[3 * j + 1] = src[s + 1]; buf[3 * j + 2] = src[s + 2];
+      }
+      for (let r = 1; r <= deg; r++) {
+        for (let j = deg; j >= r; j--) {
+          const idx = j + k - deg;
+          const den = K[idx + deg - r + 1] - K[idx];
+          const al = den === 0 ? 0 : (t - K[idx]) / den, be = 1 - al;
+          buf[3 * j] = buf[3 * (j - 1)] * be + buf[3 * j] * al;
+          buf[3 * j + 1] = buf[3 * (j - 1) + 1] * be + buf[3 * j + 1] * al;
+          buf[3 * j + 2] = buf[3 * (j - 1) + 2] * be + buf[3 * j + 2] * al;
+        }
+      }
+    };
+    // S(u,v) — nur der Punkt (Gitter + Zeilensuche)
+    const evalPoint = (u, v, out) => {
+      prof.at++;
+      evalRows(v);
+      deBoorU(scrR, du, U, spanOf(U, du, u), u);
+      out[0] = buf[3 * du]; out[1] = buf[3 * du + 1]; out[2] = buf[3 * du + 2];
+    };
+    // S, Su, Sv — exakt (Su aus Q = c·(R_{i+1}−R_i), Sv aus den Ableitungszeilen)
+    const evalAll = (u, v) => {
+      prof.all++;
+      evalRows(v);
+      evalRowsD(v);
+      for (let i = 0; i + 1 < nu; i++) {
+        const a = 3 * i, b = 3 * (i + 1), c = CU[i];
+        scrQ[a] = (scrR[b] - scrR[a]) * c;
+        scrQ[a + 1] = (scrR[b + 1] - scrR[a + 1]) * c;
+        scrQ[a + 2] = (scrR[b + 2] - scrR[a + 2]) * c;
+      }
+      const k = spanOf(U, du, u);
+      deBoorU(scrR, du, U, k, u);
+      oS[0] = buf[3 * du]; oS[1] = buf[3 * du + 1]; oS[2] = buf[3 * du + 2];
+      deBoorU(scrQ, du - 1, Ud, spanOf(Ud, du - 1, u), u);
+      const oi = 3 * (du - 1);
+      oU[0] = buf[oi]; oU[1] = buf[oi + 1]; oU[2] = buf[oi + 2];
+      deBoorU(scrRp, du, U, k, u);
+      oV[0] = buf[3 * du]; oV[1] = buf[3 * du + 1]; oV[2] = buf[3 * du + 2];
+    };
+    const at = (u, v) => { evalPoint(u, v, tmp); return [tmp[0], tmp[1], tmp[2]]; };
+    const su = (u, v) => { evalAll(u, v); return [oU[0], oU[1], oU[2]]; };
+    const sv = (u, v) => { evalAll(u, v); return [oV[0], oV[1], oV[2]]; };
+
+    // ---- Startgitter: EINMAL je Fläche, danach Raumplatzsuche (Hash-Zellen) ----
+    // Die Stützstellen liegen je KNOTENSPAN, nicht gleichmäßig über die Domäne:
+    // die Parametrisierung ist stark ungleichförmig — ein Randstück kann < 1 %
+    // des u-Bereichs belegen und würde vom gleichmäßigen Raster verfehlt.
+    const spU = knotSpans(U, du, nu);
+    const spV = knotSpans(V, dv, nv);
+    // geometrisches Gewicht je Span: die Kontrollpolygon-Länge im Span
+    // (Anhaltsmaß für die Bogenlänge — proportional dazu verteilt sich die
+    // Stützstellenzahl, damit der Abstand benachbarter Gitterpunkte (und damit
+    // die Zellgröße der Raumplatzsuche) überall ähnlich bleibt)
+    const wu = spU.map(({ k }) => {
+      let s = 0;
+      for (let i = k - du + 1; i <= k; i++) {
+        let m = 0;
+        for (let j = 0; j < nv; j++) {
+          const a = 3 * (i * nv + j), b = 3 * ((i - 1) * nv + j);
+          m += Math.hypot(CP[a] - CP[b], CP[a + 1] - CP[b + 1], CP[a + 2] - CP[b + 2]);
+        }
+        s += m / nv;
+      }
+      return s;
+    });
+    const wv = spV.map(({ k }) => {
+      let s = 0;
+      for (let j = k - dv + 1; j <= k; j++) {
+        let m = 0;
+        for (let i = 0; i < nu; i++) {
+          const a = 3 * (i * nv + j), b = 3 * (i * nv + j - 1);
+          m += Math.hypot(CP[a] - CP[b], CP[a + 1] - CP[b + 1], CP[a + 2] - CP[b + 2]);
+        }
+        s += m / nu;
+      }
+      return s;
+    });
+    const us = spanValues(spU, allocSpan(wu, Math.min(72, Math.max(8 * spU.length, 4))));
+    const vs = spanValues(spV, allocSpan(wv, Math.min(72, Math.max(8 * spV.length, 4))));
+    const NCU = us.length, NCV = vs.length;
+    let grid = null;
+    const buildGrid = () => {
+      prof.grid++;
+      const M = NCU * NCV;
+      const pts = new Float64Array(3 * M), gu = new Float64Array(M), gv = new Float64Array(M);
+      let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+      let n = 0;
+      // je v-Wert die Zeilen einmal auswerten, dann alle u-Werte (spart die v-Arbeit)
+      for (let j = 0; j < NCV; j++) {
+        const v = vs[j];
+        evalRows(v);
+        for (let i = 0; i < NCU; i++) {
+          const u = us[i];
+          deBoorU(scrR, du, U, spanOf(U, du, u), u);
+          const o = 3 * n;
+          pts[o] = buf[3 * du]; pts[o + 1] = buf[3 * du + 1]; pts[o + 2] = buf[3 * du + 2];
+          gu[n] = u; gv[n] = v; n++;
+          if (pts[o] < mnx) mnx = pts[o]; if (pts[o] > mxx) mxx = pts[o];
+          if (pts[o + 1] < mny) mny = pts[o + 1]; if (pts[o + 1] > mxy) mxy = pts[o + 1];
+          if (pts[o + 2] < mnz) mnz = pts[o + 2]; if (pts[o + 2] > mxz) mxz = pts[o + 2];
+        }
+      }
+      // Zellgröße = größter Abstand benachbarter Gitterpunkte; die Ring-Erweiterung der
+      // Suche bleibt unabhängig davon exakt.
+      let cell = 0;
+      for (let j = 0; j < NCV; j++) for (let i = 0; i < NCU; i++) {
+        const a = 3 * (j * NCU + i);
+        if (i + 1 < NCU) { const b = 3 * (j * NCU + i + 1); const d = Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]); if (d > cell) cell = d; }
+        if (j + 1 < NCV) { const b = 3 * ((j + 1) * NCU + i); const d = Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]); if (d > cell) cell = d; }
+      }
+      if (!(cell > 0)) cell = 1;
+      const NX = Math.max(1, Math.floor((mxx - mnx) / cell) + 1);
+      const NY = Math.max(1, Math.floor((mxy - mny) / cell) + 1);
+      const NZ = Math.max(1, Math.floor((mxz - mnz) / cell) + 1);
+      const map = new Map();
+      for (let s = 0; s < M; s++) {
+        const ix = Math.min(NX - 1, Math.max(0, Math.floor((pts[3 * s] - mnx) / cell)));
+        const iy = Math.min(NY - 1, Math.max(0, Math.floor((pts[3 * s + 1] - mny) / cell)));
+        const iz = Math.min(NZ - 1, Math.max(0, Math.floor((pts[3 * s + 2] - mnz) / cell)));
+        const key = ix + iy * NX + iz * NX * NY;
+        const b = map.get(key);
+        if (b) b.push(s); else map.set(key, [s]);
+      }
+      grid = { pts, gu, gv, M, map, NX, NY, NZ, mnx, mny, mnz, cell };
+      return grid;
+    };
+    // die K nächsten Gitterpunkte zu p (Ring-Erweiterung: sobald der beste Abstand kleiner
+    // als der Ringradius ist, kann kein ungesuchter Punkt näher liegen)
+    const gridNear = (p, K) => {
+      const g = grid;
+      const ix = Math.min(g.NX - 1, Math.max(0, Math.floor((p[0] - g.mnx) / g.cell)));
+      const iy = Math.min(g.NY - 1, Math.max(0, Math.floor((p[1] - g.mny) / g.cell)));
+      const iz = Math.min(g.NZ - 1, Math.max(0, Math.floor((p[2] - g.mnz) / g.cell)));
+      const cands = [];
+      let bd = Infinity;
+      for (let r = 0; r <= 4; r++) {
+        for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
+          const ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, az = dz < 0 ? -dz : dz;
+          if (Math.max(ax, ay, az) !== r) continue;
+          const cx = ix + dx, cy = iy + dy, cz = iz + dz;
+          if (cx < 0 || cy < 0 || cz < 0 || cx >= g.NX || cy >= g.NY || cz >= g.NZ) continue;
+          const bucket = g.map.get(cx + cy * g.NX + cz * g.NX * g.NY);
+          if (!bucket) continue;
+          for (const s of bucket) {
+            const ex = g.pts[3 * s] - p[0], ey = g.pts[3 * s + 1] - p[1], ez = g.pts[3 * s + 2] - p[2];
+            const d2 = ex * ex + ey * ey + ez * ez;
+            if (d2 < bd) bd = d2;
+            cands.push({ d2, s });
+          }
+        }
+        if (cands.length && bd <= r * g.cell) break;
+      }
+      if (!cands.length) {                       // Notfall: alle Gitterpunkte prüfen
+        for (let s = 0; s < g.M; s++) {
+          const ex = g.pts[3 * s] - p[0], ey = g.pts[3 * s + 1] - p[1], ez = g.pts[3 * s + 2] - p[2];
+          cands.push({ d2: ex * ex + ey * ey + ez * ez, s });
+        }
+      }
+      cands.sort((a, b) => a.d2 - b.d2);
+      return cands.slice(0, K);
+    };
+
+    // nächstgelegener Flächenpunkt: Startwert + projiziertes Gauss-Newton
+    // (Rückfall: projizierter Gradientenschritt an den Rändern)
+    const refine = (p, u, v) => {
+      prof.refine++;
+      for (let it = 0; it < 40; it++) {
+        prof.it++;
+        evalAll(u, v);
+        const rx = oS[0] - p[0], ry = oS[1] - p[1], rz = oS[2] - p[2];
+        const g2 = rx * rx + ry * ry + rz * rz;
+        if (g2 < 1e-28) break;
+        const ux = oU[0], uy = oU[1], uz = oU[2], vx = oV[0], vy = oV[1], vz = oV[2];
+        const gu = ux * rx + uy * ry + uz * rz, gv = vx * rx + vy * ry + vz * rz;
+        const a = ux * ux + uy * uy + uz * uz, b = ux * vx + uy * vy + uz * vz, c = vx * vx + vy * vy + vz * vz;
+        const det = a * c - b * b;
+        let moved = false, dU = 0, dV = 0, dn = g2;
+        if (det > 1e-22 * (a * c + 1)) {
+          const eu = -(c * gu - b * gv) / det, ev = -(a * gv - b * gu) / det;
+          for (let k = 0, s = 1; k < 26; k++, s *= 0.5) {
+            const un = proj(u + s * eu, u0, u1), vn = proj(v + s * ev, v0, v1);
+            evalPoint(un, vn, tmp);
+            const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+            const d2n = ex * ex + ey * ey + ez * ez;
+            if (d2n < g2) { u = un; v = vn; moved = true; dU = s * eu; dV = s * ev; dn = d2n; if (k) prof.half++; else prof.full++; break; }
+          }
+        }
+        if (!moved) {
+          // projizierter Gradientenschritt (an den Rändern nur die zulässige Richtung)
+          let pu = gu, pv = gv;
+          if (u <= u0 + 1e-14 && gu < 0) pu = 0;
+          if (u >= u1 - 1e-14 && gu > 0) pu = 0;
+          if (v <= v0 + 1e-14 && gv < 0) pv = 0;
+          if (v >= v1 - 1e-14 && gv > 0) pv = 0;
+          const gn = Math.hypot(pu, pv);
+          if (gn < 1e-20) break;
+          const h = Math.max(u1 - u0, v1 - v0) * 0.05;
+          for (let k = 0, s = h; k < 30; k++, s *= 0.5) {
+            const un = proj(u - s * pu / gn, u0, u1), vn = proj(v - s * pv / gn, v0, v1);
+            evalPoint(un, vn, tmp);
+            const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+            const d2n = ex * ex + ey * ey + ez * ez;
+            if (d2n < g2) { u = un; v = vn; moved = true; dU = -s * pu / gn; dV = -s * pv / gn; dn = d2n; prof.grad++; break; }
+          }
+        }
+        if (!moved) break;
+        // konvergiert: der Abstand ändert sich nicht mehr (Gewinn in mm)
+        const gain = (g2 - dn) / (Math.sqrt(g2) + Math.sqrt(dn));
+        if (gain <= 1e-12) break;
+        if (Math.abs(dU) < 1e-14 && Math.abs(dV) < 1e-14 && gain <= 1e-6) break;
+      }
+      evalPoint(u, v, tmp);
+      const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+      return { d2: ex * ex + ey * ey + ez * ez, u, v };
+    };
+
+    let lastUV = null;      // letztes (u,v) dieser Fläche → Startwert für den nächsten Punkt
+    // Startpunkte auf den vier Rand-Isokurven (u=u0, u=u1, v=v0, v=v1): ein Randpunkt
+    // liegt EXAKT auf der Randkurve — der 2-D-Newton verfeinert von dort auf Abstand
+    // null. Im Inneren führt der Gradient nicht zum Rand, der Newton blieb dort in
+    // einem Nebenminimum hängen (Randpunkte wurden 2e-3 … 1e-2 mm daneben gemeldet).
+    const boundaryCandidates = (p) => {
+      const d = (q) => { const ex = q[0] - p[0], ey = q[1] - p[1], ez = q[2] - p[2]; return Math.sqrt(ex * ex + ey * ey + ez * ez); };
+      const m0 = scanMin1D((t) => d(at(t, v0)), u0, u1);
+      const m1 = scanMin1D((t) => d(at(t, v1)), u0, u1);
+      const m2 = scanMin1D((t) => d(at(u0, t)), v0, v1);
+      const m3 = scanMin1D((t) => d(at(u1, t)), v0, v1);
+      return [
+        { u: m0.t, v: v0 }, { u: m1.t, v: v1 },
+        { u: u0, v: m2.t }, { u: u1, v: m3.t },
+      ];
+    };
+    const solve = (p) => {
+      prof.solve++;
+      if (!grid) buildGrid();
+      let best = { d2: Infinity, u: u0, v: v0 };
+      // 1) warm start: der letzte (u,v) derselben Fläche — Randpunkte liegen dicht
+      //    beieinander, der Newton ist dann nach ein paar Schritten fertig.
+      if (lastUV) {
+        evalPoint(lastUV[0], lastUV[1], tmp);
+        const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+        const d2 = ex * ex + ey * ey + ez * ez;
+        if (d2 < 16 * grid.cell * grid.cell) {      // nur wenn der Punkt wirklich nahe liegt
+          prof.warm++;
+          const r = refine(p, lastUV[0], lastUV[1]);
+          if (r.d2 < best.d2) best = r;
+          if (r.d2 < 1e-28) { lastUV = [r.u, r.v]; return best; }   // liegt auf der Fläche
+        }
+      }
+      // 2) Gitterkandidaten (dieselbe Auswahl wie vorher: die 3 nächsten Gitterpunkte)
+      for (const c of gridNear(p, 3)) {
+        const r = refine(p, grid.gu[c.s], grid.gv[c.s]);
+        if (r.d2 < best.d2) best = r;
+        if (r.d2 < 1e-28) break;      // Punkt liegt auf der Fläche — genauer geht es nicht
+      }
+      // 3) Rückfall (selten): Punkt nicht auf der Fläche gefunden. Der Gauss-Newton
+      //    blieb an entarteten Stellen (Polseite dreiseitiger Patches, sehr ungleich
+      //    lange Seiten) hängen und meldete Randpunkte bis 0,09 mm neben der Fläche,
+      //    die exakt auf ihr liegen. Startwerte: weitere Gitterpunkte (verschiedene
+      //    Punkte — an einer Polseite fallen alle Punkte einer Zeile auf denselben)
+      //    und die vier Rand-Isokurven (1-D auf der Kurve, dann 2-D verfeinern).
+      if (best.d2 > 1e-16) {
+        const picked = [];
+        for (const c of gridNear(p, 32)) {
+          const o = 3 * c.s;
+          if (picked.some((q) => Math.abs(grid.pts[3 * q] - grid.pts[o])
+            + Math.abs(grid.pts[3 * q + 1] - grid.pts[o + 1])
+            + Math.abs(grid.pts[3 * q + 2] - grid.pts[o + 2]) < 1e-9)) continue;
+          picked.push(c.s);
+          if (picked.length >= 6) break;
+        }
+        for (const s of picked) {
+          const r = refine(p, grid.gu[s], grid.gv[s]);
+          if (r.d2 < best.d2) best = r;
+          if (r.d2 < 1e-28) break;
+        }
+        // 3b) Rand-Isokurven: dort liegt der Randpunkt exakt
+        if (best.d2 > 1e-16) {
+          for (const m of boundaryCandidates(p)) {
+            const r = refine(p, m.u, m.v);
+            if (r.d2 < best.d2) best = r;
+            if (r.d2 < 1e-28) break;
+          }
+        }
+        // 3c) letzter Rückfall: feines Raster (40×40) über die ganze Domäne
+        if (best.d2 > 1e-16) {
+          const M = 40, cand = [];
+          for (let i = 0; i <= M; i++) {
+            for (let j = 0; j <= M; j++) {
+              const u = u0 + ((u1 - u0) * i) / M, v = v0 + ((v1 - v0) * j) / M;
+              evalPoint(u, v, tmp);
+              const ex = tmp[0] - p[0], ey = tmp[1] - p[1], ez = tmp[2] - p[2];
+              cand.push([ex * ex + ey * ey + ez * ez, u, v, tmp[0], tmp[1], tmp[2]]);
+            }
+          }
+          cand.sort((a, b) => a[0] - b[0]);
+          // verschiedene Startpunkte: an einer Polseite (dreiseitiges Patch) fallen alle
+          // Rasterpunkte einer Zeile auf denselben Punkt — die zählen nur einmal
+          const picked2 = [];
+          for (const c of cand) {
+            if (picked2.some((q) => Math.abs(q[3] - c[3]) + Math.abs(q[4] - c[4]) + Math.abs(q[5] - c[5]) < 1e-9)) continue;
+            picked2.push(c);
+            if (picked2.length >= 6) break;
+          }
+          for (const [, u, v] of picked2) {
+            const r = refine(p, u, v);
+            if (r.d2 < best.d2) best = r;
+            if (r.d2 < 1e-28) break;
+          }
+        }
+      }
+      lastUV = [best.u, best.v];
+      return best;
+    };
+    const cache = new Map();
+    const closest = (p) => {
+      const k = `${p[0]},${p[1]},${p[2]}`;
+      if (cache.has(k)) return cache.get(k);
+      const res = solve(p);
+      cache.set(k, res);
+      return res;
+    };
+    return {
+      kind: 'bspline_surface', du, dv, at, su, sv, u0, u1, v0, v1, iu, iv, prof,
+      // S, Su, Sv in einem Durchgang (Volumenintegral) — die Puffer gelten bis zum
+      // nächsten Aufruf von eval3.
+      eval3: (u, v) => { evalAll(u, v); },
+      S: oS, SU: oU, SV: oV,
+      normal: (p) => { prof.normal++; const c = closest(p); evalAll(c.u, c.v); return norm(cross(oU, oV)); },
+      dist: (p) => { prof.dist++; return Math.sqrt(closest(p).d2); },
+      uv: (p) => { prof.uv++; const c = closest(p); return [c.u, c.v]; },
+    };
+  };
+
   // ---- Flächen: natürliche Normale (STEP-Konvention) und Abstand
   const surfOf = (r) => {
     const e = E(r);
@@ -214,6 +865,9 @@ export function checkStepStrict(text, opts = {}) {
         normal: (p) => norm(sub(p, c)),
         dist: (p) => Math.abs(len(sub(p, c)) - R),
         rev: { O: c, a: ax.z, u: (p) => { const w = sub(p, c); return Math.atan2(dot(w, ax.y), dot(w, ax.x)); } } };
+    }
+    if (e.type === 'B_SPLINE_SURFACE_WITH_KNOTS') {
+      return bsplineSurfaceOf(e);
     }
     if (e.type === 'SURFACE_OF_REVOLUTION') {
       const pc = curveOf(e.args[1]);
@@ -318,6 +972,7 @@ export function checkStepStrict(text, opts = {}) {
     const [, bounds, sref, ssame] = fe.args;
     const sense = ssame?.en === 'F' ? -1 : 1;
     const surf = surfOf(sref);
+    if (opts.onSurface) opts.onSurface(surf, fid);   // Testhaken (bsplineDistForTest)
     if (!surf.normal) { flag('unsupported', `#${fid}: Flächentyp ${surf.kind} nicht prüfbar`, { face: fid }); continue; }
     const loops = [];
     const info = { surf, sense, loops, verts: new Set(), edges: new Set(), ok: true };
@@ -400,6 +1055,19 @@ export function checkStepStrict(text, opts = {}) {
         if (Math.sign(areas[i]) !== want) flag('orient-plane', `#${fid}: ${i === big ? 'Außenrand' : 'Loch'}-Rand #${L.bref} läuft ${areas[i] > 0 ? 'gegen' : 'im'} Uhrzeigersinn um die Normale (Fläche ${Math.abs(areas[i]).toFixed(2)} mm²)`, { face: fid });
         if (L.outer !== (i === big)) flag('outer-bound', `#${fid}: FACE_OUTER_BOUND ${L.outer ? 'auf einem Loch' : 'fehlt am Außenrand'} (#${L.bref})`, { face: fid });
       });
+    } else if (surf.kind === 'bspline_surface' && surf.uv && loops.length === 1) {
+      // B-Spline-Fläche mit EINEM Rand: im Parameterraum (u,v) läuft der Rand gegen den
+      // Uhrzeigersinn, wenn die Fläche links liegt (natürliche Normale Su×Sv) — × same_sense.
+      // Der Parameterbereich ist CCW, wenn der Rand CCW um Su×Sv läuft; mit same_sense .F.
+      // muss er CW sein. Ein umgedrehtes same_sense (der Rand selbst bleibt unverändert)
+      // fällt hier ebenso auf wie ein verdrehter Rand.
+      const UV = loops[0].pts.map((p) => surf.uv(p));
+      if (UV.some((x) => !x)) stats.skippedOrient++;
+      else {
+        let A2 = 0;
+        for (let i = 0; i < UV.length; i++) { const a = UV[i], b = UV[(i + 1) % UV.length]; A2 += a[0] * b[1] - b[0] * a[1]; }
+        if (Math.sign(A2) * sense <= 0) flag('orient-curved', `#${fid} (${surf.kind}): Rand #${loops[0].bref} läuft verkehrt herum — die Fläche läge rechts vom Rand (Parameterfläche ${(A2 / 2).toExponential(2)}, same_sense ${sense > 0 ? 'T' : 'F'})`, { face: fid });
+      }
     } else if (loops.length >= 2) {
       // Drehfläche (Torus, SURFACE_OF_REVOLUTION) mit zwei Rändern konstanten Drehwinkels u (Band
       // um die Achse, z.B. Kanal-Bogen): von jedem Rand aus muss die Fläche in u-Richtung zum
@@ -475,6 +1143,8 @@ export function checkStepStrict(text, opts = {}) {
       for (const e of es) { const o = eOwner.get(e); if (o === undefined) eOwner.set(e, sid); else if (o !== sid) flag('shared-topology', `EDGE_CURVE #${e} in den Schalen #${o} und #${sid}`); }
     }
   }
+  // Volumen je Schale (für Tests einsehbar): { shell, V, thick }
+  const volumes = [];
   // shell-volume: orientiertes Volumen je Schale (Divergenzsatz, V = ⅓ Σ_F ∫ (x−o)·n_eff dA). Mit a
   // beliebig: ∫(x−o)·n dA = (a−o)·∫n dA + ∫(x−a)·n dA; ∫ n_eff dA = ½ ∮ x × dx über die Ränder wie
   // orientiert (Fläche links). (x−a)·n: Ebene/Kegel mit a = Ebenenpunkt/Spitze → 0; Zylinder (a auf der
@@ -506,6 +1176,44 @@ export function checkStepStrict(text, opts = {}) {
       for (const L of loops) { const P = L.vpts; for (let i = 0; i < P.length; i++) va = add(va, cross(sub(P[i], o), sub(P[(i + 1) % P.length], o))); }
       va = mul(va, 0.5);
       if (surf.kind === 'plane') return dot(sub(surf.ax.o, o), va);
+      if (surf.kind === 'bspline_surface' && surf.uv) {
+        // Fluss ∫(x−o)·n dA durch eine B-Spline-Fläche: der Rand der Fläche liegt im
+        // Parameterraum (u,v) als Polygon vor (Randkurve → (u,v)-Parameter je Punkt).
+        // Green im Parameterraum: ∫∫_D F du dv = ∮_∂D B dv mit F = (S−o)·(Su×Sv) und
+        // B(u,v) = ∫_{u0}^{u} F(u',v) du'.  Die Fläche des Parameterpolygons (CCW > 0)
+        // gibt die Orientierung von D; × same_sense für die effektive Normale.
+        const poly = [];
+        for (const L of loops) {
+          const P = (L.pts && L.pts.length >= 3) ? L.pts : (L.vpts || []);
+          for (const q of P) { const t = surf.uv(q); if (!t) return NaN; poly.push(t); }
+        }
+        if (poly.length < 3) return NaN;
+        while (poly.length > 3 && Math.abs(poly[0][0] - poly[poly.length - 1][0]) < 1e-12 && Math.abs(poly[0][1] - poly[poly.length - 1][1]) < 1e-12) poly.pop();
+        const F = (u, v) => {
+          surf.eval3(u, v);
+          const s = surf.S, a = surf.SU, b = surf.SV;
+          const nx = a[1] * b[2] - a[2] * b[1], ny = a[2] * b[0] - a[0] * b[2], nz = a[0] * b[1] - a[1] * b[0];
+          return (s[0] - o[0]) * nx + (s[1] - o[1]) * ny + (s[2] - o[2]) * nz;
+        };
+        const B = (u, v) => {
+          const hi = Math.min(Math.max(u, surf.u0), surf.u1);
+          const brk = [surf.u0, ...surf.iu.filter((k) => k > surf.u0 + 1e-12 && k < hi - 1e-12), hi];
+          let s = 0;
+          for (let i = 0; i + 1 < brk.length; i++) {
+            const a = brk[i], b = brk[i + 1], m = 0.5 * (a + b), h = 0.5 * (b - a);
+            for (const [x, w] of GAUSS8) s += w * h * F(m + h * x, v);
+          }
+          return s;
+        };
+        let L = 0, A2 = 0;
+        for (let i = 0; i < poly.length; i++) {
+          const a = poly[i], b = poly[(i + 1) % poly.length];
+          L += 0.5 * (B(a[0], a[1]) + B(b[0], b[1])) * (b[1] - a[1]);
+          A2 += a[0] * b[1] - b[0] * a[1];
+        }
+        const sgn = A2 >= 0 ? 1 : -1;              // Parameterpolygon CCW → D positiv orientiert
+        return (fi.sense ?? 1) * sgn * L;
+      }
       if (surf.kind === 'cone') {
         const ta = Math.tan(surf.al);
         if (!(Math.abs(ta) > 1e-12)) return NaN;
@@ -593,6 +1301,7 @@ export function checkStepStrict(text, opts = {}) {
       if (!wantPositive) { flag('shell-volume', `#${bid}: ${what} #${sid} nicht als ORIENTED_CLOSED_SHELL(.F.) referenziert`); return; }
       const r = shellVolume(sid);
       if (!r) { stats.volumeSkipped++; return; }
+      volumes.push({ shell: sid, V: r.V, thick: r.thick });
       if (r.thick < DEGEN) flag('shell-volume', `#${bid}: ${what} #${sid} ohne Volumen (V = ${r.V.toExponential(3)} mm³, Blech/Finne)`);
       else if (!(r.V > 0)) flag('shell-volume', `#${bid}: ${what} #${sid} umschließt V = ${r.V.toExponential(3)} mm³ (innen-außen vertauscht)`);
     };
@@ -689,7 +1398,91 @@ export function checkStepStrict(text, opts = {}) {
       if (roots.size > 1) flag('shell-connected', `#${sid} (${se.type}): Schale zerfällt in ${roots.size} unverbundene Teile`);
     }
   }
-  return { violations, stats };
+  // Profil der B-Spline-Flächen (reine Zähler, ohne Einfluss auf das Ergebnis)
+  {
+    const bp = { faces: 0, grid: 0, at: 0, all: 0, solve: 0, refine: 0, warm: 0, dist: 0, normal: 0, uv: 0, it: 0, full: 0, half: 0, grad: 0 };
+    for (const fi of faceInfo.values()) {
+      const pr = fi.surf.prof; if (!pr) continue;
+      bp.faces++;
+      for (const k of Object.keys(bp)) if (k !== 'faces') bp[k] += pr[k] || 0;
+    }
+    stats.bspline = bp;
+  }
+  return { violations, stats, volumes };
+}
+
+// ---- Testhilfe: Abstand eines Punktes zu einer B-Spline-Fläche --------------
+//
+// bsplineDistForTest(surfObj, p) rechnet den Abstand mit DEMSELBEN Auswerter,
+// den der Prüfer benutzt (Startgitter je Knotenspan + projiziertes Gauss-Newton +
+// Rand-Isokurven). Dazu wird aus den Flächendaten {du,dv,ctrl,knots,mults} eine
+// Surrogate-STEP-Datei gebaut und der Prüfer darauf losgelassen — so misst der
+// Test genau die Strecke, die beim Rand-Punkt-Test des Prüfers geht.
+//
+// surfObj: Fläche aus coonsPatch (knotsU/multsU/knotsV/multsV) oder
+//          {du,dv,ctrl,knots:{U,V},mults:{U,V}} bzw. {du,dv,ctrl,knots:[U,V],mults:[mu,mv]}
+const surfTestCache = new WeakMap();
+
+function surfKnotData(s) {
+  let ku, mu, kv, mv;
+  if (s.knotsU && s.multsU && s.knotsV && s.multsV) {
+    ku = s.knotsU; mu = s.multsU; kv = s.knotsV; mv = s.multsV;
+  } else if (s.knots && s.mults) {
+    if (Array.isArray(s.knots)) { ku = s.knots[0]; kv = s.knots[1]; mu = s.mults[0]; mv = s.mults[1]; }
+    else { ku = s.knots.U; kv = s.knots.V; mu = s.mults.U; mv = s.mults.V; }
+  } else return null;
+  if (!ku || !mu || !kv || !mv) return null;
+  return { ku, mu, kv, mv };
+}
+
+// Surrogate-STEP: genau eine B-Spline-Fläche als Fläche eines Gesichts
+function surrogateStep(du, dv, ctrl, ku, mu, kv, mv) {
+  const L = [];
+  let id = 1;
+  const rows = [];
+  for (const row of ctrl) {
+    const r = [];
+    for (const q of row) {
+      L.push(`#${id}=CARTESIAN_POINT('',(${q[0]},${q[1]},${q[2]}));`);
+      r.push(`#${id}`);
+      id++;
+    }
+    rows.push(`(${r.join(',')})`);
+  }
+  const sId = id++;
+  L.push(`#${sId}=B_SPLINE_SURFACE_WITH_KNOTS('',${du},${dv},(${rows.join(',')}),.UNSPECIFIED.,.F.,.F.,.F.,(${mu.join(',')}),(${mv.join(',')}),(${ku.join(',')}),(${kv.join(',')}),.UNSPECIFIED.);`);
+  const vId = id++;
+  L.push(`#${vId}=VERTEX_POINT('',#1);`);
+  const vlId = id++;
+  L.push(`#${vlId}=VERTEX_LOOP('',#${vId});`);
+  const fbId = id++;
+  L.push(`#${fbId}=FACE_OUTER_BOUND('',#${vlId},.T.);`);
+  const afId = id++;
+  L.push(`#${afId}=ADVANCED_FACE('',(#${fbId}),#${sId},.T.);`);
+  return L.join('\n');
+}
+
+function captureBsplineSurface(surfObj) {
+  const k = surfKnotData(surfObj);
+  if (!k || !surfObj.ctrl || !surfObj.ctrl.length) return null;
+  let got = null;
+  try {
+    checkStepStrict(surrogateStep(surfObj.du, surfObj.dv, surfObj.ctrl, k.ku, k.mu, k.kv, k.mv), {
+      tol: 1e9,
+      onSurface: (s) => { if (!got && s.kind === 'bspline_surface') got = s; },
+    });
+  } catch (e) { return null; }
+  return got;
+}
+
+// Abstand des Punktes p zur Fläche surfObj (mm) — mit dem Auswerter des Prüfers
+export function bsplineDistForTest(surfObj, p) {
+  let s = surfTestCache.get(surfObj);
+  if (s === undefined) {
+    s = captureBsplineSurface(surfObj);
+    surfTestCache.set(surfObj, s);
+  }
+  return s ? s.dist(p) : Infinity;
 }
 
 // ---- CLI

@@ -211,8 +211,19 @@ Kreis-Kanten teilen.
   Prüfung: lagenabhängig — z5 verschoben/gedreht kippt AN auf ~255 Flächen, Kabelhalter schräg AN 752 → 1642. Kein Rückfall auf
   Einzel-Kollaps, Mikro-Kanten bleiben. Erst lagenstabil machen, Härtetest in mehreren Lagen. Unit-Tests insertRulings/guardCorner
   aus dem Branch sind brauchbar und können separat übernommen werden.
-- [ ] **Freiform Etappe 2 (`wt/freiform2`, NICHT gemergt):** Lead-Agent brach mit Netzwerkfehler ab; 8 Commits (B-Spline-Flächen,
-  Blend-Patches, strenge Prüfung). Noch ungeprüft — Bericht und adversariale Prüfung nachholen.
+- [x] **Freiform Etappe 2 (2026-10-31, `wt/freiform2`)** — Verrundungen/kleine Regionen, deren Fit-Fläche die Nachbarn nicht
+  exakt trifft, werden zu EINER B-Spline-Fläche (Coons-Patch über den Randkurven) statt zu Facetten; B_SPLINE_SURFACE_WITH_KNOTS
+  im Schreiber und in step-strict (orient-bspline, neu bspline-knots: Knoten streng steigend, Vielfachheiten); robuste Projektion
+  auf ungleich parametrisierte Patches (Startwerte je Knotenspanne, Rand-Isokurven); Faltungsprüfung (blendFoldCheck).
+  Weiter nur hinter „Freiform-Erkennung“ (Standard aus); Standardpfad byte-gleich an 46 Dateien, npm test 14/14, Golden unverändert.
+  **Skoda: noch kein Gewinn** — mit Freiform an fällt er auf den alten Weg zurück (51 % Facetten > 25 % → „Hoffnungslos“, 296 von
+  558 Patches scheitern, meist Faltung), Ergebnis = AUS (18369/18370 Flächen, strict 0, OCP gültig), kostet aber ~30 s statt ~2 s.
+  Ohne Facetten-Schwelle: 17720 Flächen (335 B-Spline), strict 0, OCP gültig, aber OCP-sa 17 gaps3d / 5 Selbstschnitte → nicht CST-sicher.
+  Testkörper (Rundquader, Torus-Platte, Halbkugel, je 6 Lagen): Flächen lagenstabil, strict 0, OCP gleich wie main.
+  Offen: Faltung der Patches am Skoda (Hauptgrund des Scheiterns); Kontrollnetze bis 10 000 Punkte (Datei 2,7–4,5 MB beim
+  Rauschkörper, BLEND_MAX_NET 40000 zu großzügig); Zeitbudget wird überzogen (Skoda 33 s bei 30 s); gescheiterte Patches →
+  Facetten mit BOP-Selbstschnitten (nur per Testschalter erreicht); verrauschter Rundquader lagenabhängig (Rückfall in 2 von 6 Lagen);
+  'true' nimmt Freiform auch bei mehr Flächen als der alte Weg; Altlast: OCP-sa gaps3d an gedrehten Freiform-Körpern auch auf main.
 - [ ] **UI Rest:** Mit „Verrundungen entfernen“ AUS zählt die Kachel echte Fasen (arcCones) als „bleiben rund“; Karte „überwiegend
   facettiert“ nicht grün einfärben (body[data-quality=faceted]); echter Esc-Test im nativen Firefox-Vollbild; veraltete E2E-Tests (tests/e2e).
 - [x] **Kleinteile NozzleBox (2026-10-29, `wt/kleinteile`)** — (1) Ösen: Lochringe im STL gegeneinander verdreht

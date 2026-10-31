@@ -43,13 +43,16 @@ import { buildFreeformBrep } from '../../freeform-brep.js';
 import { checkStepStrict } from '../step-strict.mjs';
 
 let failed = 0;
+const failLog = [];
 function test(name, fn) {
   try {
     fn();
     console.log('ok ' + name);
   } catch (e) {
     failed++;
-    console.log('FAIL ' + name + ': ' + (e && e.message ? e.message : String(e)));
+    const msg = 'FAIL ' + name + ': ' + (e && e.message ? e.message : String(e));
+    failLog.push(msg);
+    console.log(msg);
   }
 }
 
@@ -166,7 +169,8 @@ test('ecken-fehler', () => {
     && Math.abs(p[2]) < 1e-6;
   let getroffen = 0;
   const res = buildFreeformBrep(groups, {
-    testForceVertexFail: (p) => {
+    blendPatches: false,             // alter Streifen-Weg (die Blend-Variante
+    testForceVertexFail: (p) => {    // steht in blend.test.mjs)
       if (passt(p)) { getroffen++; return true; }
       return false;
     },
@@ -197,7 +201,7 @@ test('streifen-demotion', () => {
   const file = 'ff_halbkugel_zylinder.stl';
   const buf = readFileSync(join('tests/freeform/stl', file));
   const groups = pipeline(buf);
-  const res = buildFreeformBrep(groups, { testForceChainFail: true });
+  const res = buildFreeformBrep(groups, { blendPatches: false, testForceChainFail: true });
   assert.ok(res, 'Freiform-Bau lieferte null');
   const ff = res.report && res.report.freeform;
   assert.ok(ff && ff.used, 'Freiform-Pfad nicht benutzt');
@@ -359,9 +363,13 @@ test('zeitbudget-hoffnungslos', () => {
     `kein Protokolleintrag zum Zeitbudget: ${dbg1.log.slice(-3).join(' | ')}`);
 
   // 2) Hoffnungslosigkeit: die erzwungene Ketten-Fehlstelle demotiert Dreiecke
-  //    zu Facetten — bei maxFacetShare 0 kann das Ergebnis nichts mehr schlagen
+  //    zu Facetten — bei maxFacetShare 0 kann das Ergebnis nichts mehr schlagen.
+  //    (blendPatches:false — der alte Streifen-Weg; mit Blends entstehen
+  //    stattdessen B-Spline-Flächen, siehe blend.test.mjs)
   const dbg2 = { log: [] };
-  const r2 = buildFreeformBrep(groups, { maxFacetShare: 0, testForceChainFail: true, debug: dbg2 });
+  const r2 = buildFreeformBrep(groups, {
+    maxFacetShare: 0, blendPatches: false, testForceChainFail: true, debug: dbg2,
+  });
   assert.equal(r2, null, 'maxFacetShare 0 lieferte trotzdem ein Ergebnis');
   assert.ok(dbg2.log.some((s) => s.includes('Hoffnungslos')),
     `kein Protokolleintrag zur Hoffnungslosigkeit: ${dbg2.log.slice(-3).join(' | ')}`);
@@ -388,4 +396,5 @@ test('zeitbudget-hoffnungslos', () => {
 console.log(failed ? `FAIL ${failed} Fall(e)`
   : `ok alle ${describeBodies().length} Körper + Streifen-Demotion + Ecken-Fehler`
     + ' + Schliff + Schliff-Fächer + Zeitbudget/Hoffnungslosigkeit');
+writeFileSync(join('tests/freeform/out', '_fail.log'), failLog.join('\n---\n'));
 process.exit(failed ? 1 : 0);

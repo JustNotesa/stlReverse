@@ -20,7 +20,7 @@ import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=2';
 // Gravur (extrusion-plans.js): Pläne der Extrusionsbänder (SURFACE_OF_LINEAR_EXTRUSION) + Rand-Aufweitung
 import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=2';
 // [freiform1] Einhängepunkt: Freiform-Pfad (fit-basierte Segmentierung → eigenes B-Rep → STEP)
-import { chooseFreeform } from './freeform-brep.js?v=1';
+import { chooseFreeform } from './freeform-brep.js?v=2';
 
 // Globale Unsicherheit im STEP-Kopf (UNCERTAINTY_MEASURE_WITH_UNIT, mm). Strikte Kerne (ACIS/CST)
 // nehmen sie wörtlich: Punkte näher als dieser Wert gelten als derselbe Punkt, Kanten darunter als
