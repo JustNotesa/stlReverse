@@ -29,16 +29,20 @@
  *   - keine Durchdringung: die neuen Dreiecke um b schneiden kein Dreieck der Umgebung (Raster)
  *   - Spalten-Kollaps: Ring-Kanten einer Wand (Extrusion: Unterring + Oberring) werden nicht
  *     einzeln, sondern als SPALTE kollabiert — alle parallelen Kanten einer Viereck-Kette
- *     (coplanares Viereck ⇒ Kante gegenüber) wandern gemeinsam. Sonst dezimieren Ober- und
- *     Unterring unabhängig: die Punkte stehen nicht mehr übereinander, die Wand zerfällt in
- *     Fächer-Dreiecke und die Erkennung (Zylinder/Ebene) scheitert. Abschaltbar: opts.columns
- *     = false (altes Halbkanten-Verhalten). Zähler: report.columnCollapses / columnBroken
- *     Nur Spalten aus SCHARFEN Kanten (Ringe an Deck-/Fasenkanten; glatte Freiform bleibt beim
- *     Einzel-Kollaps). Vorprüfung aller Züge streng; scheitert ein späterer Zug nach dem Anwenden,
- *     bleibt die Spalte halb (columnBroken — dasselbe Ergebnis wie vor dem Spalten-Kollaps).
- *     Gemessen 2026-10-30: Kabelhalter 218/233 → 142/151 Flächen (AN/AUS), NozzleBox und
- *     Skoda-Haken unverändert. Gelockerte Nachprüfung (Ebenen-Treue verzerrter Dreiecke) wurde
- *     verworfen: Kabelhalter 128/141, aber Härtetest z5 27 → 190 Flächen.
+ *     (coplanares Viereck ⇒ Kante gegenüber) wandern gemeinsam, in BEIDE Richtungen von der
+ *     Startkante aus. Sonst dezimieren Ober- und Unterring unabhängig: die Punkte stehen nicht mehr
+ *     übereinander, die Wand zerfällt in Fächer-Dreiecke und die Erkennung (Zylinder/Ebene)
+ *     scheitert. Nur Spalten aus SCHARFEN Kanten (glatte Freiform bleibt beim Einzel-Kollaps).
+ *     Transaktional: geprüft wird der Endzustand der ganzen Spalte; scheitert sie, wird sie
+ *     zurückgenommen (report.columnBroken) und nur eine Splitter-Startkante (< τ/2) einzeln
+ *     kollabiert (report.columnFallback); Kanten ab τ/2 bleiben dann, ebenso Kanten, deren
+ *     Mantellinie an einen schon gröberen Ring stößt (Fasen-Deckring) — Mantellinien gehen vor.
+ *     Lagenfest: Kandidaten nach gerundeter Länge + Punkt-Nummer sortiert, Ebenen-Toleranz ab
+ *     128 mm vom Ursprung = float32-ULP (≤ 3e-5). Abschaltbar: opts.columns = false (exakt das alte
+ *     Halbkanten-Verhalten). Prüfung: tests/lagen-regression.mjs (3 Körper × 12 Lagen).
+ *     Gemessen 2026-10-31: Kabelhalter 218/233 → 118/131 Flächen (AN/AUS), in 5 Lagen nie
+ *     schlechter als vorher; NozzleBox gleich, Skoda-Haken −1. Die erste, nicht transaktionale
+ *     Fassung kippte z5 bei reiner Verschiebung von 14 auf ~260 Flächen (halbe Spalten).
  *
  * Standard τ = 0,02 mm (gemessen 2026-10-27): der Härtetest (61 Körper) bleibt exakt wie ohne
  * Bereinigung; bei 0,05 mm verlieren die fein tessellierten Rundungen m64 (Kanten 0,037 mm) und
@@ -61,6 +65,8 @@ const FLAT_DEG = 0.5;
 const FLAT_DEV_MM = 1e-5;
 // Ebenen-Treue: b darf höchstens so weit neben der Ebene jedes Dreiecks um a liegen (Anteil von τ)
 const PLANE_DEV_FRAC = 0.02;
+// Reihenfolge der Kandidaten: Länge auf dieses Raster gerundet, dann Punkt-Nummern (lagenunabhängig)
+const SORT_QUANTUM_MM = 1e-4;
 
 // −0/+0 vereinheitlichen; gleicher Schlüssel wie region-growing.js (1e-4 mm), damit die
 // Topologie hier und im Region-Growing dieselbe ist.
@@ -77,7 +83,7 @@ export function cleanMesh(mesh, opts = {}) {
   const faces = mesh?.faces || [];
   const T = faces.length;
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-  const report = { minDetailMm: tau, inputTris: T, removedTris: 0, collapses: 0, shortBefore: 0, shortAfter: 0, minEdgeAfter: null, columnCollapses: 0, columnBroken: 0, ms: 0 };
+  const report = { minDetailMm: tau, inputTris: T, removedTris: 0, collapses: 0, shortBefore: 0, shortAfter: 0, minEdgeAfter: null, columnCollapses: 0, columnBroken: 0, columnFallback: 0, ms: 0 };
   if (!(tau > 0) || !T) return { mesh, report };
 
   // ---- Indiziertes Netz
@@ -169,6 +175,10 @@ export function cleanMesh(mesh, opts = {}) {
     const bx = P[s[1] * 3] - P[v * 3], by = P[s[1] * 3 + 1] - P[v * 3 + 1], bz = P[s[1] * 3 + 2] - P[v * 3 + 2];
     const la = Math.hypot(ax, ay, az), lb = Math.hypot(bx, by, bz);
     if (la < 1e-12 || lb < 1e-12) return 2;
+    // Tangentenpunkt (mit Spalten-Kollaps): lange Kante (Gerade, ≥ 10·τ) trifft auf eine Mikro-Kante
+    // (Bogen) — wandert er, kippt die ebene Fläche an der Geraden um den Sehnen-Stich (Prisma:
+    // Volumen −0,03 mm³; isFlat sieht ein einzelnes langes Viereck nicht als Ebene) → Ecke
+    if (opts.columns !== false && Math.max(la, lb) >= 10 * tau && Math.min(la, lb) < tau) return 2;
     return (ax * bx + ay * by + az * bz) / (la * lb) < COS_TURN ? 2 : 1;
   };
   function neighbors(v) {
@@ -180,6 +190,7 @@ export function cleanMesh(mesh, opts = {}) {
   const COS_NTURN = Math.cos(MAX_NORMAL_TURN_DEG * Math.PI / 180);
   const planeDev = (opts.planeDevFrac ?? PLANE_DEV_FRAC) * tau;
   const COS_FLAT = Math.cos(FLAT_DEG * Math.PI / 180);
+  let flatTol = FLAT_DEV_MM;          // s. unten (Raster): lagenfest mit Spalten-Kollaps
   const isFlat = (f) => {
     const n = triNormal(f);
     if (n[3] < 1e-14) return false;
@@ -199,6 +210,14 @@ export function cleanMesh(mesh, opts = {}) {
   let bbMin = [Infinity, Infinity, Infinity], bbMax = [-Infinity, -Infinity, -Infinity];
   for (let v = 0; v < V; v++) for (let k = 0; k < 3; k++) { const x = P[v * 3 + k]; if (x < bbMin[k]) bbMin[k] = x; if (x > bbMax[k]) bbMax[k] = x; }
   const diag = Math.hypot(bbMax[0] - bbMin[0], bbMax[1] - bbMin[1], bbMax[2] - bbMin[2]) || 1;
+  // Ebenen-Toleranz mit Spalten-Kollaps lagenfester: 1 float32-ULP der größten Koordinate, mindestens
+  // FLAT_DEV_MM (bis 128 mm vom Ursprung unverändert), höchstens 3e-5 mm (bis 512 mm). Ab 128 mm ist
+  // FLAT_DEV_MM kleiner als die Rundung der STL-Punkte: ebene Kollapse scheiterten dort zufällig
+  // (r15fase 250 mm verschoben + gedreht: AN 14 → 21). Weiter draußen (1000 mm, ULP 6e-5) ließ die
+  // größere Toleranz so viele Kollapse zu, dass die Ebenen kippten (rrect AN 14 → 404) → Deckel.
+  // Ohne Spalten-Kollaps exakt das alte Verhalten.
+  const maxAbs = Math.max(...bbMin.map(Math.abs), ...bbMax.map(Math.abs));
+  flatTol = opts.columns !== false && maxAbs > 0 ? Math.min(3e-5, Math.max(FLAT_DEV_MM, 2 ** (Math.floor(Math.log2(maxAbs)) - 23))) : FLAT_DEV_MM;
   const H = Math.max(5 * tau, diag / 150);
   const grid = new Map();
   const oversize = [];               // Dreiecke über sehr viele Zellen: immer mitprüfen
@@ -255,8 +274,8 @@ export function cleanMesh(mesh, opts = {}) {
   };
   // Durchdringt eines der Dreiecke um a nach dem Umzug a → b ein Dreieck der Umgebung?
   let stamp = new Int32Array(T), stampGen = 0;
-  const penetrates = (a, b, removed) => {
-    const star = vTris[a];
+  // star: zu prüfende Dreiecke (a → b umgezogen gedacht; a = −1: so, wie sie sind)
+  const penetrates = (a, b, removed, star = vTris[a]) => {
     const news = [];
     for (const f of star) {
       if (removed.includes(f)) continue;
@@ -302,17 +321,21 @@ export function cleanMesh(mesh, opts = {}) {
   };
 
   // Kollaps a → b prüfen; liefert true, wenn zulässig
-  const canCollapse = (a, b) => {
+  // Link-Bedingung (rein topologisch): gemeinsame Nachbarn von a und b = genau die 2 Gegenpunkte
+  const linkOk = (a, b) => {
     const ts = edgeTris.get(ek(a, b));
     if (!ts || ts.length !== 2) return false;
-    // Link-Bedingung
     const opp = new Set();
     for (const f of ts) for (let k = 0; k < 3; k++) { const o = tri[f * 3 + k]; if (o !== a && o !== b) opp.add(o); }
     if (opp.size !== 2) return false;
     const nb = neighbors(b);
     let common = 0;
     for (const n of neighbors(a)) if (nb.has(n)) { if (!opp.has(n)) return false; common++; }
-    if (common !== 2) return false;
+    return common === 2;
+  };
+  const canCollapse = (a, b) => {
+    if (!linkOk(a, b)) return false;
+    const ts = edgeTris.get(ek(a, b));
     // Normalen, Entartung, Volumen
     let dV = 0, area = 0;
     const bx = P[b * 3], by = P[b * 3 + 1], bz = P[b * 3 + 2];
@@ -331,13 +354,13 @@ export function cleanMesh(mesh, opts = {}) {
       // In ebenen Stücken streng (float32-Genauigkeit): sonst kippt die Ebene um µm, das Region-
       // Growing passt eine schiefe Ebene ein, und die Nachbarkante sticht hindurch (Kabelhalter,
       // OCP BOPAlgo_SelfIntersect bei 1e-3 mm Spielraum).
+      if (n[3] < 1e-12) return false;
       if (o[3] > 1e-14) {
         const dx = bx - P[a * 3], dy = by - P[a * 3 + 1], dz = bz - P[a * 3 + 2];
         const dev = Math.abs(dx * o[0] + dy * o[1] + dz * o[2]) / o[3];
-        if (dev > (flat[si] ? FLAT_DEV_MM : planeDev)) return false;
-        if (dev > FLAT_DEV_MM) inPlane = false;
+        if (dev > (flat[si] ? flatTol : planeDev)) return false;
+        if (dev > flatTol) inPlane = false;
       }
-      if (n[3] < 1e-12) return false;
       if (o[3] > 1e-14 && (o[0] * n[0] + o[1] * n[1] + o[2] * n[2]) / (o[3] * n[3]) < COS_NTURN) return false;
       // Volumen-Änderung: Tetraeder (alte Fläche, b) — a wandert nach b
       const i0 = tri[f * 3], i1 = tri[f * 3 + 1], i2 = tri[f * 3 + 2];
@@ -354,6 +377,39 @@ export function cleanMesh(mesh, opts = {}) {
     // Neues durchdringen; nur sonst die (teure) Raster-Prüfung
     if (!inPlane && penetrates(a, b, ts)) return false;
     return true;
+  };
+
+  // Zustand sichern, den doCollapse(a, b) ändert → restore() stellt ihn exakt wieder her
+  // (Spalten-Kollaps transaktional: scheitert ein späterer Zug, wird die ganze Spalte
+  // zurückgenommen). Das Raster bleibt (Obermenge, stört nicht).
+  const snapshot = (a, b) => {
+    const fs = new Set(vTris[a]);
+    for (const f of edgeTris.get(ek(a, b)) || []) fs.add(f);
+    const vs = new Set([a, b]);
+    for (const f of fs) for (let k = 0; k < 3; k++) vs.add(tri[f * 3 + k]);
+    const tv = new Set(vs);
+    for (const f of vTris[b]) for (let k = 0; k < 3; k++) tv.add(tri[f * 3 + k]);
+    const keys = new Set();
+    for (const f of fs) for (let k = 0; k < 3; k++) {
+      const p = tri[f * 3 + k], q = tri[f * 3 + (k + 1) % 3];
+      keys.add(ek(p, q)); keys.add(ek(p === a ? b : p, q === a ? b : q));
+    }
+    const sk = new Set();
+    for (const n of neighbors(a)) { sk.add(ek(a, n)); if (n !== b) sk.add(ek(b, n)); }
+    const triS = [...fs].map((f) => [f, tri[f * 3], tri[f * 3 + 1], tri[f * 3 + 2], alive[f], changed[f]]);
+    const vtS = [...vs].map((v) => [v, vTris[v].slice()]);
+    const toS = [...tv].map((v) => [v, touched[v]]);
+    const edS = [...keys].map((k) => [k, edgeTris.has(k) ? edgeTris.get(k).slice() : null]);
+    const shS = [...sk].map((k) => [k, sharp.has(k)]);
+    const rem = report.removedTris, col = report.collapses;
+    return () => {
+      for (const [f, i0, i1, i2, al, chg] of triS) { tri[f * 3] = i0; tri[f * 3 + 1] = i1; tri[f * 3 + 2] = i2; alive[f] = al; changed[f] = chg; }
+      for (const [v, l] of vtS) vTris[v] = l;
+      for (const [v, t] of toS) touched[v] = t;
+      for (const [k, l] of edS) { if (l) edgeTris.set(k, l); else edgeTris.delete(k); }
+      for (const [k, s] of shS) { if (s) sharp.add(k); else sharp.delete(k); }
+      report.removedTris = rem; report.collapses = col;
+    };
   };
 
   const doCollapse = (a, b) => {
@@ -416,6 +472,7 @@ export function cleanMesh(mesh, opts = {}) {
     if (nf[3] < 1e-14) return null;
     const x = third(f, a, b);
     if (x < 0) return null;
+    let longRes = null;
     for (let e = 0; e < 2; e++) {
       // Nachbar über (a,x) bzw. (b,x)
       const u = e === 0 ? a : b, v = x;
@@ -431,47 +488,69 @@ export function cleanMesh(mesh, opts = {}) {
         // Partner: der Punkt aus {x,y}, der mit a (bzw. b) über eine Viereck-SEITE verbunden ist
         const pA = e === 0 ? y : x, pB = e === 0 ? x : y;
         if (pA === a || pA === b || pB === a || pB === b) continue;
-        if (dist(pA, pB) >= tau) continue;                       // Partner muss selbst Mikro-Kante sein
         if (!edgeTris.has(ek(pA, pB))) continue;
-        return { from: pA, to: pB };
+        if (dist(pA, pB) < tau) return { from: pA, to: pB };
+        // Partner ist KEINE Mikro-Kante: gehört nicht in die Spalte (s. column/blocked) — merken,
+        // aber weiter nach einem Mikro-Partner suchen
+        if (!longRes) longRes = { from: pA, to: pB, long: true };
       }
     }
-    return null;
+    return longRes;
   };
   // Kette der Spalte: [[a,b],[d,c],…] — jeder Zug = von → nach (von auf a-Seite)
+  // In BEIDE Richtungen: Start a-b über das eine Dreieck (z. B. Wand nach oben) und über das
+  // andere (Fase nach unten) — beginnt die Spalte an einem mittleren Ring, fehlte sonst eine Hälfte
+  // und die Ringe dünnten wieder unabhängig aus (lagenabhängig: welche Hälfte, hing an der
+  // Reihenfolge in edgeTris).
   const column = (a, b) => {
     const moves = [[a, b]];
     const seen = new Set([a, b]);
-    let from = a, to = b;
-    for (let step = 0; step < 64; step++) {
-      const ts = edgeTris.get(ek(from, to));
-      if (!ts || ts.length !== 2) break;
-      let res = null;
-      for (const f of ts) {
-        const r = quadPartner(from, to, f);
-        if (!r) continue;
-        if (r.from === from || r.from === to || r.to === from || r.to === to) continue;
-        if (seen.has(r.from) || seen.has(r.to)) continue;        // bereits gelaufen
-        res = r; break;
+    const ts0 = edgeTris.get(ek(a, b));
+    if (!ts0 || ts0.length !== 2) return moves;
+    for (const first of ts0.slice()) {
+      let from = a, to = b, only = first;
+      while (moves.length < 64) {
+        const ts = edgeTris.get(ek(from, to));
+        if (!ts || ts.length !== 2) break;
+        let res = null;
+        for (const f of (only >= 0 ? [only] : ts)) {
+          const r = quadPartner(from, to, f);
+          if (!r) continue;
+          if (r.from === from || r.from === to || r.to === from || r.to === to) continue;
+          if (seen.has(r.from) || seen.has(r.to)) continue;      // bereits gelaufen
+          res = r; break;
+        }
+        only = -1;
+        if (!res) break;
+        if (res.long) {
+          // Mantellinie zu einem Ring, der schon gröber ist (Deckring einer Fase gegen Wandring):
+          // allein kollabiert entstünde ein Fächer im Viereck-Band → blocked (s. Anwende-Schleife)
+          if (sharp.has(ek(from, to)) && sharp.has(ek(res.from, res.to))) moves.blocked = true;
+          break;
+        }
+        moves.push([res.from, res.to]);
+        seen.add(res.from); seen.add(res.to);
+        from = res.from; to = res.to;
       }
-      if (!res) break;
-      moves.push([res.from, res.to]);
-      seen.add(res.from); seen.add(res.to);
-      from = res.from; to = res.to;
     }
     return moves;
   };
 
   // ---- Iterieren: kürzeste Kanten zuerst, bis nichts mehr geht
+  // ohne Spalten-Kollaps exakt das alte Verhalten (ungerundete Länge)
+  const sortQ = opts.sortQuantumMm ?? (opts.columns !== false ? SORT_QUANTUM_MM : 0);
   const shortEdges = () => {
     const out = [];
     for (const [key, ts] of edgeTris) {
       if (!ts.length) continue;
       const a = Math.floor(key / V), b = key % V;
       const l = dist(a, b);
-      if (l < tau) out.push([l, a, b]);
+      if (l < tau) out.push([sortQ > 0 ? Math.round(l / sortQ) : l, a, b, key]);
     }
-    return out.sort((p, q) => p[0] - q[0]);
+    // Reihenfolge lagenunabhängig: Länge auf sortQ gerundet (float32-Rundung einer verschobenen/
+    // gedrehten STL ändert gleich lange Sehnen um µm), Gleichstand nach Punkt-Nummern (aus der
+    // Dreiecks-Reihenfolge, unabhängig von der Lage im Raum)
+    return out.sort((p, q) => p[0] - q[0] || p[3] - q[3]);
   };
   const touched = new Int32Array(V);            // Kollaps-Zähler der letzten Änderung am Punkt
   const failedAt = new Map();                   // Kante → Kollaps-Zähler bei der letzten Ablehnung
@@ -516,27 +595,83 @@ export function cleanMesh(mesh, opts = {}) {
         // (Skoda-Haken: sonst +3 Flächen; Golden sphere_full wich ab).
         let col = (opts.columns !== false) ? column(from, to) : null;
         if (col && col.length > 1 && !col.every(([p, q]) => sharp.has(ek(p, q)))) col = null;
+        // Spalte an einen gröberen Ring gebunden (Partner keine Mikro-Kante): Kanten ab τ/2 bleiben,
+        // damit die Viereck-Bänder (Fase/Wand) Mantellinien behalten; kürzere fallen immer
+        if (col && col.blocked && l >= tau / 2) continue;
         if (!col || col.length === 1) {
           if (opts.trace) opts.trace.push({ from: repr[from], to: repr[to], len: l, rankFrom: rank(from), rankTo: rank(to) });
           doCollapse(from, to); did++; failedAt.delete(fk); ok = true; break;
         }
-        // Jeder weitere Zug der Spalte muss jetzt erlaubt und kollabierbar sein — sonst gar nichts
+        // Die Spalte wird als GANZES geprüft: die Startkante hat canCollapse bestanden; die übrigen
+        // Züge vorab nur auf Rang/Richtung und Topologie (einzeln geprüft verkippt jeder Zug die
+        // langen Wand-Dreiecke, deren andere Ecke auf dem noch nicht versetzten Gegenring liegt →
+        // jede Wand-Spalte scheiterte an der Ebenen-Treue). Nach dem Anwenden zählt der
+        // ENDZUSTAND, gemessen an den Dreiecken um jeden versetzten Punkt p (Ziel q):
+        //   - kein Dreieck entartet oder dreht sich um mehr als MAX_NORMAL_TURN_DEG
+        //   - echte Ebenen (flat): q liegt in der Ebene des alten Dreiecks (FLAT_DEV_MM)
+        //   - gekrümmt: der entfernte Punkt p liegt höchstens planeDev neben dem neuen Dreieck
+        //     (Sehnen-Stich der gröberen Facette, z5: 1,5e-4 mm). Lockerer (0,05·τ) ließ die
+        //     Rundungen so grob werden, dass die AN-Schärfung nicht mehr griff (z5 AN 14 → 17)
+        //   - keine Durchdringung der Umgebung (wie canCollapse)
+        // Scheitert etwas, wird die ganze Spalte zurückgenommen (transaktional) und nur die
+        // Startkante einzeln kollabiert — halbe Spalten entstehen so nie, und keine Mikro-Kante
+        // bleibt stehen, weil ihre Spalte scheiterte.
         let good = true;
-        for (let i = 1; i < col.length; i++) {
+        for (let i = 1; i < col.length && good; i++) {
           const [p, q] = col[i];
-          if (!allowed(p, q, rank(p), rank(q), sharp.has(ek(p, q))) || !canCollapse(p, q)) { good = false; break; }
+          good = edgeTris.has(ek(p, q)) && dist(p, q) < tau && allowed(p, q, rank(p), rank(q), sharp.has(ek(p, q))) && linkOk(p, q);
         }
-        if (!good) continue;                              // Spalte verwerfen → andere Richtung versuchen
-        let applied = 0;
-        for (let i = 0; i < col.length; i++) {
-          const [p, q] = col[i];
-          if (i > 0 && (!edgeTris.has(ek(p, q)) || !canCollapse(p, q))) { report.columnBroken++; break; }
-          if (opts.trace) opts.trace.push({ from: repr[p], to: repr[q], len: dist(p, q), rankFrom: rank(p), rankTo: rank(q) });
-          doCollapse(p, q);
-          applied++;
+        const undo = [], tr = [];
+        if (good) {
+          const before = new Map();          // Dreieck → { o: alte Normale, flat, ps: versetzte Punkte darin }
+          for (const [p] of col) for (const f of vTris[p]) {
+            let e = before.get(f);
+            if (!e) { e = { o: triNormal(f), flat: isFlat(f), ps: [] }; before.set(f, e); }
+            e.ps.push(p);
+          }
+          const target = new Map(col.map(([p, q]) => [p, q]));
+          for (let i = 0; i < col.length && good; i++) {
+            const [p, q] = col[i];
+            if (i > 0 && !linkOk(p, q)) { good = false; break; }
+            if (opts.trace) tr.push({ from: repr[p], to: repr[q], len: dist(p, q), rankFrom: rank(p), rankTo: rank(q) });
+            undo.push(snapshot(p, q));
+            doCollapse(p, q);
+          }
+          let inPlane = true;
+          if (good) for (const [f, { o, flat: fl, ps }] of before) {
+            if (!alive[f] || o[3] < 1e-14) continue;
+            const n = triNormal(f);
+            if (n[3] < 1e-12 || (o[0] * n[0] + o[1] * n[1] + o[2] * n[2]) / (o[3] * n[3]) < COS_NTURN) { good = false; break; }
+            for (const p of ps) {
+              const q = target.get(p);
+              const dx = P[q * 3] - P[p * 3], dy = P[q * 3 + 1] - P[p * 3 + 1], dz = P[q * 3 + 2] - P[p * 3 + 2];
+              const devOld = Math.abs(dx * o[0] + dy * o[1] + dz * o[2]) / o[3];
+              const dev = fl ? devOld : Math.abs(dx * n[0] + dy * n[1] + dz * n[2]) / n[3];
+              if (dev > (fl ? flatTol : planeDev)) { good = false; break; }
+              if (devOld > flatTol) inPlane = false;
+            }
+            if (!good) break;
+          }
+          if (good && !inPlane) {
+            // nur die Dreiecke, die einen versetzten Punkt trugen (die übrigen haben sich nicht bewegt)
+            const star = [...before.keys()].filter((f) => alive[f]);
+            if (penetrates(-1, -1, [], star)) good = false;
+          }
         }
+        if (!good) {
+          for (let i = undo.length - 1; i >= 0; i--) undo[i]();
+          report.columnBroken++;
+          // Rückfall auf den Einzel-Kollaps nur für echte Splitter (< τ/2): allein kollabiert
+          // zerstört die Kante die Mantellinie ihres Bandes (Fächer statt Vierecke, die Rundung
+          // wird nicht mehr erkannt); Kanten ab τ/2 bleiben dann lieber stehen
+          if (l >= tau / 2 || !canCollapse(from, to)) continue;
+          report.columnFallback++;
+          if (opts.trace) opts.trace.push({ from: repr[from], to: repr[to], len: l, rankFrom: rank(from), rankTo: rank(to) });
+          doCollapse(from, to); did++; failedAt.delete(fk); ok = true; break;
+        }
+        if (opts.trace) opts.trace.push(...tr);
+        report.columnCollapses++;
         did++; failedAt.delete(fk); ok = true;
-        if (applied >= 2) report.columnCollapses++;
         break;
       }
       if (!ok) failedAt.set(fk, report.collapses);

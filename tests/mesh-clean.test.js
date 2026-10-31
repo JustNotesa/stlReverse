@@ -291,8 +291,9 @@ describe('cleanMesh — Spalten nur bei scharfen Ring-Kanten', () => {
     expect(r.report.columnCollapses).toBe(0);
     expect(typeof r.report.columnBroken).toBe('number');
     // Gegenprobe: ohne Spalten-Kollaps ändert sich am Ergebnis nichts — der Unterschied
-    // entsteht also ausschließlich durch das Tor, nicht durch Zufall.
-    const r2 = cleanMesh(m, { columns: false });
+    // entsteht also ausschließlich durch das Tor, nicht durch Zufall. (Mit Spalten-Kollaps wird nach
+    // gerundeter Länge sortiert — dieselbe Reihenfolge hier explizit, sonst vergliche man die Sortierung.)
+    const r2 = cleanMesh(m, { columns: false, sortQuantumMm: 1e-4 });
     expect(r2.report.columnCollapses).toBe(0);
     expect(points(r.mesh)).toEqual(points(r2.mesh));
   });

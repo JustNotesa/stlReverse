@@ -404,10 +404,10 @@ export const GLYPHS = {
   mix: { contours: [{ cmds: glyphMix(), hole: false }] },
 };
 
-// ── Feine Konturen (echte Kreisbögen, Sehnenlänge 0,005 mm) ─────────────────
+// ── Feine Konturen (echte Kreisbögen, Sehnenlänge ≤ FINE_CHORD = 0,012 mm) ──────
 // Motiv: ein echter STL-Logo-Export hat Ring-Kanten, die VIEL feiner sind als die
 // Mindest-Detailgröße von mesh-clean.js (τ = 0,02 mm). Hier wird das nachgebaut: die Konturen
-// sind aus echten Kreisbögen in Schritten von 0,005 mm Sehnenlänge abgetastet (Tausende Punkte).
+// sind aus echten Kreisbögen mit Sehnen ≤ FINE_CHORD (0,012 mm) abgetastet (Tausende Punkte).
 // Die Konturen sind deshalb direkt als Punktlisten (kein Pfad-Befehlssatz) definiert.
 export const FINE_CHORD = 0.012;
 
@@ -688,8 +688,8 @@ export const GRAVUR_BODIES = [
     //   Flächen (AN = AUS) + 2 Reserve.
     expect: { minExtFaces: 2, maxFaces: 13 },
   }),
-  // ── FEIN: Konturen aus echten Kreisbögen in 0,005-mm-Sehnen (echter STL-Logo-Export) ──
-  // Die Ring-Kanten der Konturen (0,005 mm) liegen weit UNTER der Mindest-Detailgröße von
+  // ── FEIN: Konturen aus echten Kreisbögen in ≤ 0,012-mm-Sehnen (echter STL-Logo-Export) ──
+  // Die Ring-Kanten der Konturen (≤ 0,012 mm) liegen UNTER der Mindest-Detailgröße von
   // mesh-clean.js (τ = 0,02 mm) — der härteste Fall für die Netz-Bereinigung.
   // „C“: Annulus-Sektor 300° (Außen r 1,5 / Innen r 1,0), runde Enden (Halbkreise r 0,25 um
   // den Mittelradius 1,25) → Übergänge überall tangential, KEINE scharfe Ecke.
@@ -697,7 +697,7 @@ export const GRAVUR_BODIES = [
   // Die Wände sind Viereck-Streifen (oben exakt über unten) — der Generator baut sie so.
   makeEntry({
     name: 'gravur_fein',
-    desc: 'Platte 40×20×3, erhabene Schrift 0,5 mm hoch aus FEIN abgetasteten Kreisbögen (Sehnenlänge 0,005 mm — weit unter der Mindest-Detailgröße 0,02 mm von mesh-clean.js): „C“ (Annulus-Sektor 300°, r 1,5/1,0, runde Enden) und „D“ (Stiel + Halbkreis-Schale, Zähler r 1)',
+    desc: 'Platte 40×20×3, erhabene Schrift 0,5 mm hoch aus FEIN abgetasteten Kreisbögen (Sehnenlänge ≤ 0,012 mm — unter der Mindest-Detailgröße 0,02 mm von mesh-clean.js): „C“ (Annulus-Sektor 300°, r 1,5/1,0, runde Enden) und „D“ (Stiel + Halbkreis-Schale, Zähler r 1)',
     glyphs: [{ key: 'C', dx: 8, dy: 5 }, { key: 'Dfein', dx: 15, dy: 4 }],
     w: 40, d: 20, height: 0.5,
     // Die Deckflächen werden von buildMesh ohnehin trianguliert (ein Fehler wirft dort) —
