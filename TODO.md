@@ -191,6 +191,17 @@ Kreis-Kanten teilen.
 
 ## Erledigt
 
+- [x] **Koaxiale Bohrungen / Lochreihen wurden nicht umgewandelt (2026-10-31, `wt/boxloch`, User-Teil Box_Bottom)** —
+  Ursache: `unifyCoplanarGroups` fusioniert koplanare, getrennte Facetten; zwei Bohrungen auf derselben Achse (je
+  eine in zwei Laschen) bzw. eine Lochreihe mit n ≡ 2 mod 4 Segmenten teilen sich so Wand-Gruppen. Die Erkennung fand
+  jede Bohrung, aber das Gruppen-Tag des zweiten Primitivs überschrieb das erste → Exporter sah eine „Bohrung“ mit 4
+  Rand-Ringen → alles facettiert. Fix (primitive-recognition.js, Ende von recognizePrimitives): Gruppen mit Facetten
+  MEHRERER Voll-Zylinder werden je Primitiv geteilt (nur wenn jede Zusammenhangs-Komponente einen Besitzer hat und
+  sich die Teile nicht berühren; Verrundungs-Gruppen bleiben unverändert; `stats.splitGroups`). Box_Bottom 179 → 133
+  Flächen, 2 Bohrungen als Zylinder; Fremdteile (Kabelhalter, NozzleBox, Skoda, box1, eBike) STEP-identisch.
+  Regression: `tests/bore-analytic-regression.mjs` (Gabeln z/x/y/schräg, 12/24/48 Segmente, 3 Laschen, randnah,
+  Lochreihen 2×30/3×18/4×24). Offen: Vollbohrung mit koaxialem TEIL-Zylinder- oder nicht erkanntem Partner bleibt
+  facettiert (wie bisher).
 - [x] **Box-Ecken + gefaste Eckrundungen (2026-10-31, `wt/innenrundungen`)** — „Verrundungen entfernen“ jetzt Standard AUS
   (Chip „Rundungen bleiben erhalten“, verdict.js-Default aus). Neuer Unterpunkt „Biegungen mit gleicher Wandstärke rund
   lassen“ (Standard an, ausgegraut ohne „Verrundungen entfernen“; intern `sharpenBends` invertiert). exporters.js:

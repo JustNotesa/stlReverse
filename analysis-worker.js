@@ -1,7 +1,7 @@
 import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=3';
 import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
-import { recognizePrimitives } from './primitive-recognition.js?v=15';
+import { recognizePrimitives } from './primitive-recognition.js?v=16';
 import { detectTubes } from './tube-sweep.js?v=4';
 import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=2';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
@@ -174,8 +174,9 @@ self.addEventListener('message', (event) => {
     }
 
     // Primitiv-Erkennung (Stage 1): zylindrische Flächen (Bohrungen) über Rand-Kreise.
-    // Taggt betroffene Gruppen mit `.primitive` (nur Anzeige) — Vertices/Normalen bleiben
-    // unverändert. In try/catch gekapselt: ein Erkennungs-Fehler darf die geshippte
+    // Taggt betroffene Gruppen mit `.primitive` — Vertices/Normalen bleiben unverändert. Gruppen
+    // mit Wandfacetten mehrerer Voll-Zylinder (koaxiale Bohrungen) werden dabei geteilt (die
+    // Untergruppen hängen am Ende der Liste; sie ist danach nicht mehr nach Größe sortiert). In try/catch gekapselt: ein Erkennungs-Fehler darf die geshippte
     // Pipeline und das Wasserdichtigkeits-Verdikt niemals regressieren.
     try {
       const { primitives, stats } = recognizePrimitives(analysis.normalGroups);
@@ -191,7 +192,7 @@ self.addEventListener('message', (event) => {
       });
     } catch (e) {
       analysis.primitives = [];
-      analysis.primitiveStats = { inputGroups: analysis.normalGroups?.length || 0, cylinders: 0, bores: 0, fillets: 0 };
+      analysis.primitiveStats = { inputGroups: analysis.normalGroups?.length || 0, cylinders: 0, bores: 0, fillets: 0, splitGroups: 0 };
       self.postMessage({
         id,
         progress: { step: 'worker', detail: `Primitiv-Erkennung übersprungen: ${e?.message || e}`, ratio: 0.95 }
