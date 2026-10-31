@@ -388,36 +388,45 @@ describe('verdict.js', () => {
   });
 
   // Berührflächen-Reparatur (mesh-repair.js): zwei Körper, die sich flächig berühren, tragen
-  // die Kontaktfläche doppelt. Die Reparatur verschweißt sie — das gehört ins Verdikt.
+  // die Kontaktfläche doppelt. Die Reparatur entfernt die Doppel-Dreiecke — das gehört ins
+  // Verdikt. Angezeigt werden die REPARIERTEN non-manifold-Kanten und die Zahl der
+  // entfernten Dreiecke; was bleibt, wird auch genannt.
   describe('buildVerdict – Berührflächen-Reparatur', () => {
     const dicht = { watertight: true, faceCount: 6, edgeCount: 12 };
     const mitRepair = (repair) => ({ meshClean: { removedTris: 0, minDetailMm: 0.02, repair } });
 
-    test('(a) 866 Berührkanten / 416 Kontaktflächen stehen im Rohtext und in info', () => {
-      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 866, nonManifoldEdgesAfter: 0, contactPairs: 416 }));
-      expect(v.rawDetail).toContain('866 Berührkanten verschweißt (416 doppelte Kontaktflächen zweier sich berührender Körper entfernt)');
-      expect(v.info.some((i) => i.includes('866 Berührkanten verschweißt (416 doppelte Kontaktflächen zweier sich berührender Körper entfernt)'))).toBe(true);
+    test('(a) 866 reparierte Kanten / 832 entfernte Dreiecke stehen im Rohtext und in info', () => {
+      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 866, nonManifoldEdgesAfter: 0, contactPairs: 416, removedTris: 832 }));
+      expect(v.rawDetail).toContain('866 non-manifold-Kanten an Berührflächen repariert (832 doppelte Dreiecke entfernt)');
+      expect(v.info.some((i) => i.includes('866 non-manifold-Kanten an Berührflächen repariert (832 doppelte Dreiecke entfernt)'))).toBe(true);
     });
 
-    test('(b) Singular: „1 Berührkante verschweißt (1 doppelte Kontaktfläche …)"', () => {
-      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 1, nonManifoldEdgesAfter: 0, contactPairs: 1 }));
-      expect(v.rawDetail).toContain('1 Berührkante verschweißt (1 doppelte Kontaktfläche zweier sich berührender Körper entfernt)');
-      expect(v.info.some((i) => i.includes('1 Berührkante verschweißt (1 doppelte Kontaktfläche zweier sich berührender Körper entfernt)'))).toBe(true);
+    test('(b) Singular: „1 non-manifold-Kante an Berührflächen repariert (1 doppeltes Dreieck entfernt)"', () => {
+      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 1, nonManifoldEdgesAfter: 0, contactPairs: 1, removedTris: 1 }));
+      expect(v.rawDetail).toContain('1 non-manifold-Kante an Berührflächen repariert (1 doppeltes Dreieck entfernt)');
+      expect(v.info.some((i) => i.includes('1 non-manifold-Kante an Berührflächen repariert (1 doppeltes Dreieck entfernt)'))).toBe(true);
     });
 
-    test('(c) ohne Kontaktpaare: kein „Berührkante" irgendwo', () => {
-      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 0, nonManifoldEdgesAfter: 0, contactPairs: 0 }));
-      expect(v.rawDetail).not.toContain('Berührkante');
-      expect(v.info.some((i) => i.includes('Berührkante'))).toBe(false);
-      expect(JSON.stringify(v)).not.toContain('Berührkante');
+    test('(c) ohne entfernte Dreiecke: kein Hinweis irgendwo', () => {
+      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 0, nonManifoldEdgesAfter: 0, contactPairs: 0, removedTris: 0 }));
+      expect(v.rawDetail).not.toContain('non-manifold-Kante');
+      expect(v.info.some((i) => i.includes('non-manifold-Kante'))).toBe(false);
+      expect(JSON.stringify(v)).not.toContain('non-manifold-Kante');
     });
 
-    test('(d) nicht wasserdicht: Netzbereinigung und Berührflächen mit „ · " verbunden', () => {
+    test('(d) bleibende non-manifold-Kanten werden ehrlich genannt', () => {
+      const v = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 5, nonManifoldEdgesAfter: 2, contactPairs: 1, removedTris: 4 }));
+      expect(v.rawDetail).toContain('3 non-manifold-Kanten an Berührflächen repariert (4 doppelte Dreiecke entfernt); 2 bleiben (Körper berühren sich nur an Kante/Ecke)');
+      const eins = buildVerdict(dicht, mitRepair({ nonManifoldEdges: 2, nonManifoldEdgesAfter: 1, contactPairs: 1, removedTris: 2 }));
+      expect(eins.rawDetail).toContain('; 1 bleibt (Körper berühren sich nur an Kante/Ecke)');
+    });
+
+    test('(e) nicht wasserdicht: Netzbereinigung und Berührflächen mit „ · " verbunden', () => {
       const offen = { watertight: false, faceCount: 20, edgeCount: 40, solids: 0, boundaryEdges: 4 };
       const v = buildVerdict(offen, {
-        meshClean: { removedTris: 3, minDetailMm: 0.02, repair: { nonManifoldEdges: 2, nonManifoldEdgesAfter: 0, contactPairs: 1 } }
+        meshClean: { removedTris: 3, minDetailMm: 0.02, repair: { nonManifoldEdges: 2, nonManifoldEdgesAfter: 0, contactPairs: 1, removedTris: 2 } }
       });
-      expect(v.rawDetail).toBe('3 Mikro-Dreiecke entfernt (Kanten < 0,02 mm) · 2 Berührkanten verschweißt (1 doppelte Kontaktfläche zweier sich berührender Körper entfernt)');
+      expect(v.rawDetail).toBe('3 Mikro-Dreiecke entfernt (Kanten < 0,02 mm) · 2 non-manifold-Kanten an Berührflächen repariert (2 doppelte Dreiecke entfernt)');
     });
   });
 });

@@ -63,12 +63,18 @@ function meshCleanNote(analysis) {
     + (mc.shortAfter ? `, ${mc.shortAfter} kürzere Kante${mc.shortAfter === 1 ? '' : 'n'} geschützt (Ecken, scharfe Kanten, Ebenen)` : '');
 }
 
-/** Berührflächen-Reparatur (Worker, mesh-repair.js): wie viele Kontaktkanten verschweißt wurden. */
+/** Berührflächen-Reparatur (Worker, mesh-repair.js): ehrliche Zahlen zur Kontaktflächen-Reparatur. */
 function contactNote(analysis) {
   const r = analysis?.meshClean?.repair;
-  if (!(r?.contactPairs > 0)) return null;
-  const n = (r.nonManifoldEdges || 0) - (r.nonManifoldEdgesAfter || 0);
-  return `${n} Berührkante${n === 1 ? '' : 'n'} verschweißt (${r.contactPairs} doppelte Kontaktfläche${r.contactPairs === 1 ? '' : 'n'} zweier sich berührender Körper entfernt)`;
+  if (!r) return null;
+  const k = r.removedTris || 0;                       // tatsächlich entfernte Doppel-Dreiecke
+  if (!(k > 0)) return null;                          // ohne Entfernung gibt es nichts zu melden
+  const n = (r.nonManifoldEdges || 0) - (r.nonManifoldEdgesAfter || 0);   // reparierte Kanten
+  const rest = r.nonManifoldEdgesAfter || 0;          // bleibende non-manifold Kanten
+  let txt = `${n} non-manifold-Kante${n === 1 ? '' : 'n'} an Berührflächen repariert `
+    + `(${k} doppelte${k === 1 ? 's' : ''} Dreieck${k === 1 ? '' : 'e'} entfernt)`;
+  if (rest > 0) txt += `; ${rest} bleib${rest === 1 ? 't' : 'en'} (Körper berühren sich nur an Kante/Ecke)`;
+  return txt;
 }
 
 /** Kanten-Phrasen („4 offene Kanten, 1 non-manifold-Kante“) — Wortlaut wie heute. */
