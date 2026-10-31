@@ -80,7 +80,7 @@ for (const body of BODIES) {
     if (col.off > ref.off) why.push(`AUS ${col.off} > Ref ${ref.off}`);
     if (col.strict) why.push(`strict ${col.strict}`);
     if (why.length) bad++;
-    const extra = verbose ? `  Spalten ${col.rep.columnCollapses}, Rückfall ${col.rep.columnBroken}, kurz ${col.rep.shortAfter}/${ref.rep.shortAfter}` : '';
+    const extra = verbose ? `  Spalten ${col.rep.columnCollapses}, zurück ${col.rep.columnBroken}, einzeln ${col.rep.columnFallback}, kurz ${col.rep.shortAfter}/${ref.rep.shortAfter}` : '';
     log(`${why.length ? '❌' : '✅'} ${JSON.stringify(pose).padEnd(40)} AN/AUS ${String(col.on).padStart(3)}/${String(col.off).padStart(3)}  Ref ${String(ref.on).padStart(3)}/${String(ref.off).padStart(3)}${extra}${why.length ? '  ' + why.join(', ') : ''}`);
   }
 }
