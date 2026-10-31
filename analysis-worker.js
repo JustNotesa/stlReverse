@@ -3,7 +3,7 @@ import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=16';
 import { detectTubes } from './tube-sweep.js?v=4';
-import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=2';
+import { cleanMesh, DEFAULT_MIN_DETAIL_MM } from './mesh-clean.js?v=3';
 // segmentation.js ist parkend — aktuell ungenutzt, wird erst relevant wenn
 // Face-Unification zu echter Primitiv-Erkennung (Zylinder/Kegel) ausgebaut wird.
 
@@ -69,18 +69,27 @@ self.addEventListener('message', (event) => {
       });
 
       // Netz-Bereinigung „Kleinste Detailgröße“ (mesh-clean.js): Mikro-Kanten kollabieren, bevor
-      // Region-Growing sie zu STEP-Kanten macht. 0 = aus. Gleiche Funktion wie in den Node-Tests.
+      // Region-Growing sie zu STEP-Kanten macht; zusätzlich werden Berührflächen repariert
+      // (mesh-repair.js), damit der Kollaps ein 2-mannigfaltiges Netz sieht.
       mesh = rawMesh;
       const tau = Number.isFinite(minDetailMm) ? minDetailMm : DEFAULT_MIN_DETAIL_MM;
       cachedClean = null;
-      if (tau > 0) {
-        self.postMessage({ id, progress: { step: 'worker', detail: `Mikro-Kanten < ${tau} mm werden entfernt …`, ratio: 0.39 } });
-        const { mesh: cleaned, report } = cleanMesh(rawMesh, { minDetailMm: tau });
+      {
+        const detail = tau > 0
+          ? `Mikro-Kanten < ${tau} mm werden entfernt …`
+          : 'Mikro-Kanten-Bereinigung aus, Berührkanten werden geprüft …';
+        self.postMessage({ id, progress: { step: 'worker', detail, ratio: 0.39 } });
+        const { mesh: cleaned, report } = cleanMesh(rawMesh, { minDetailMm: tau > 0 ? tau : 0 });
         mesh = cleaned;
         cachedClean = report;
+        const rep = report.repair;
+        const repariert = rep ? rep.nonManifoldEdges - rep.nonManifoldEdgesAfter : 0;
+        const beruehrt = rep && rep.removedTris > 0
+          ? `, ${repariert} non-manifold-Kante${repariert === 1 ? '' : 'n'} repariert`
+          : '';
         self.postMessage({
           id,
-          progress: { step: 'worker', detail: `Netz bereinigt: ${report.removedTris} Mikro-Dreiecke entfernt`, ratio: 0.40 }
+          progress: { step: 'worker', detail: `Netz bereinigt: ${report.removedTris} Mikro-Dreiecke entfernt${beruehrt}`, ratio: 0.40 }
         });
       }
 
