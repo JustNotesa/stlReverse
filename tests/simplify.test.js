@@ -212,14 +212,16 @@ test('open mesh: boundary edges preserved', () => {
 
 // ── 10) Performance-Rauchtest ─────────────────────────────────────────────
 const perfTest = process.env.CI ? test.skip : test;
-perfTest('performance smoke: sphere 200k → 50k in < 4 s', () => {
+// Grenze großzügig: Jest lässt die Testdateien parallel laufen (unter Last gemessen 2–5 s, allein ~1 s).
+// Fängt quadratisches Verhalten ab; echte Laufzeiten misst tests/simplify-bench.mjs.
+perfTest('performance smoke: sphere 200k → 50k in < 10 s', () => {
   const big = uvSphere(SPHERE_R, 401, 250);              // 2·250·400 = 200 000
   const t0 = Date.now();
   const res = simplifyMesh(big, 50000);
   const ms = Date.now() - t0;
   console.log('200k → 50k:', ms, 'ms, Ergebnis', res.faces.length);
   expect(res.faces.length).toBeLessThanOrEqual(50000);
-  expect(ms).toBeLessThan(4000);
+  expect(ms).toBeLessThan(10000);
 });
 
 // ════════════════════════════════════════════════════════════════════════════
