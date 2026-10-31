@@ -17,6 +17,10 @@
         {
           "version": "0.2.4",
           "update_link": "https://github.com/JustNotesa/stlReverse/releases/download/v0.2.4/stl-reverse-0.2.4.xpi"
+        },
+        {
+          "version": "0.2.5",
+          "update_link": "https://github.com/JustNotesa/stlReverse/releases/download/v0.2.5/stl-reverse-0.2.5.xpi"
         }
       ]
     }
