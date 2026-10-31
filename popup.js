@@ -108,7 +108,7 @@ let workerCacheReady = false;
 function _createAnalysisWorker() {
   const workerUrl = extensionApi?.runtime?.getURL
     ? extensionApi.runtime.getURL('analysis-worker.js')
-    : 'analysis-worker.js?v=23';
+    : 'analysis-worker.js?v=24';
   const worker = new Worker(workerUrl, { type: 'module' });
 
   worker.onmessage = (event) => {
