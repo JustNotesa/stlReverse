@@ -60,7 +60,7 @@ const prism = (profile, z0, z1) => buildMesh({
 // Dreiecke in der Ebene z
 const trisAtZ = (tris, z) => tris.filter(([a, b, c]) => a[2] === z && b[2] === z && c[2] === z).length;
 
-test('ein einzelner Würfel: nichts zu tun, dasselbe Netz-Objekt', () => {
+test('ein einzelner Würfel: nichts zu tun, dasselbe Netz-Objekt (Schnellweg)', () => {
   const m = meshOf(box([0, 0, 0], [10, 10, 10]));
   const { mesh: out, report } = repairNonManifold(m);
   expect(out).toBe(m);
@@ -68,6 +68,7 @@ test('ein einzelner Würfel: nichts zu tun, dasselbe Netz-Objekt', () => {
   expect(report.contactPairs).toBe(0);
   expect(report.removedTris).toBe(0);
   expect(report.nonManifoldEdgesAfter).toBe(0);
+  // nonManifoldVerticesAfter wird nur gezählt, wenn es überhaupt eine non-manifold KANTE gab
   expect(report.nonManifoldVerticesAfter).toBe(0);
 });
 
@@ -121,13 +122,14 @@ test('Berührung nur an einer Kante: nichts wird entfernt', () => {
   out.faces.forEach((f, i) => expect(f).toBe(m.faces[i]));
 });
 
-test('Berührung nur in einer Ecke: keine non-manifold Kante, Punkt bleibt non-manifold', () => {
+test('Berührung nur in einer Ecke: keine non-manifold Kante — Schnellweg, dasselbe Netz', () => {
   const m = meshOf([...box([0, 0, 0], [10, 10, 10]), ...box([10, 10, 10], [20, 20, 20])]);
   const { mesh: out, report } = repairNonManifold(m);
   expect(report.nonManifoldEdges).toBe(0);
   expect(out).toBe(m);
   expect(report.removedTris).toBe(0);
-  expect(report.nonManifoldVerticesAfter).toBe(1);
+  // nonManifoldVerticesAfter wird nur gezählt, wenn es überhaupt eine non-manifold KANTE gab
+  expect(report.nonManifoldVerticesAfter).toBe(0);
 });
 
 test('derselbe Würfel doppelt (gleiche Orientierung): kein Zwilling', () => {
@@ -188,6 +190,84 @@ test('Lage-unabhängigkeit auch beim Prisma', () => {
     expect(report.nonManifoldEdgesAfter).toBe(0);
     expect(closedManifold(out.faces)).toBe(true);
   }
+});
+
+// Geschlossener Würfel + eine zusätzliche, umgekehrt gewickelte Kopie seiner Deckfläche.
+// Die Kopie ist der Zwilling der echten Fläche — ohne die Ungerad-Paritätsprüfung (kein
+// Loch darf entstehen) würde die echte Deckfläche mitverschwinden und der Würfel wäre offen.
+test('streifende Fläche: der intakte Körper bleibt geschlossen', () => {
+  const c = box([0, 0, 0], [10, 10, 10]);
+  const deck = [c[2], c[3]];                                   // Deckfläche (z = 10)
+  const stray = deck.map(([a, b, cc]) => [cc, b, a]);           // gleiche Punkte, umgekehrte Wicklung
+  const m = meshOf([...c, ...stray]);
+  const { mesh: out, report } = repairNonManifold(m);
+  // Ein Paar wurde gefunden, aber verworfen: es hätte ein Loch in den Würfel gerissen
+  expect(report.rejectedPairs).toBeGreaterThanOrEqual(1);
+  expect(report.removedTris).toBe(0);
+  expect(report.contactPairs).toBe(0);
+  // Der Würfel selbst ist unversehrt: jede seiner (ungerichteten) Kanten trägt genau
+  // 2 Würfel-Dreiecke
+  const kanten = new Map();
+  const pk = (p) => p.map((x) => x.toFixed(4)).join(',');
+  for (const f of c) {
+    for (let k = 0; k < 3; k++) {
+      const u = pk(f[k]), w = pk(f[(k + 1) % 3]);
+      const key = u < w ? `${u}|${w}` : `${w}|${u}`;
+      kanten.set(key, (kanten.get(key) || 0) + 1);
+    }
+  }
+  for (const n of kanten.values()) expect(n).toBe(2);
+  expect(out.faces.length).toBe(m.faces.length);
+});
+
+// Feiner Ringstapel: zwei Rohre (R 50 / Loch R 40) mit 720 Segmenten, übereinander.
+// Die Deckfläche des unteren und die Bodenfläche des oberen berühren sich flächig — ihre
+// Dreiecke sind sehr dünn; nach der float32-Rundung der STL liegt der Normalenfehler über
+// 1°, wodurch die Fläche in Einzeldreiecke zerfiel und die Zwillinge nicht gefunden wurden.
+// Erwartung: in JEDER Lage dasselbe Ergebnis (alle Kontaktdreiecke weg, Netz geschlossen).
+test('feiner Ringstapel (720 Segmente): lageunabhängig vollständig repariert', () => {
+  const outer = circleProfile(0, 0, 50, 720);
+  const hole = circleProfile(0, 0, 40, 720, true);
+  const rohr = (z0, z1) => buildMesh({
+    columns: [
+      { profile: outer, z0, z1, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } },
+      { profile: hole, z0, z1, bottom: { kind: 'sharp' }, top: { kind: 'sharp' } }
+    ]
+  });
+  const tris = [...rohr(0, 10), ...rohr(10, 25)];
+  const poses = [
+    {}, { t: [137.3, -88.1, 42.7] }, { rot: [23, 37, 11] }, { rot: [-31, 12, 78], t: [60, 3, -40] },
+    { rot: [23, 37, 11], t: [300, 200, 100] }, { rot: [-31, 12, 78], t: [1000, 500, 0] }
+  ];
+  let want = null;
+  for (const pose of poses) {
+    const T = makeTransform(pose);
+    const moved = tris.map((t) => t.map((p) => T.apply(p)));
+    const buf = toBinaryStl(moved);
+    const parsed = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
+    const { mesh: out, report } = repairNonManifold(parsed);
+    expect(report.nonManifoldEdgesAfter).toBe(0);
+    expect(report.removedTris).toBeGreaterThan(0);
+    expect(closedManifold(out.faces)).toBe(true);
+    expect(out.vertices.length).toBe(out.faces.length * 9);
+    if (want === null) want = report.removedTris;
+    else expect(report.removedTris).toBe(want);
+  }
+}, 600000);
+
+// Weit weg vom Ursprung: bei 12 000 mm Versatz ist die float32-Rundung (~1e-3 mm) größer als
+// die alte feste Ebenen-Toleranz von 1e-3 mm — die Flächen wurden dort nicht mehr als eben
+// erkannt und die Reparatur blieb aus.
+test('weit weg vom Ursprung (12 000 mm): die Reparatur greift trotzdem', () => {
+  const t = [12000, -8000, 5000];
+  const moved = [...box([0, 0, 0], [10, 10, 10]), ...boxOtherBottom([0, 0, 10], [10, 10, 20])]
+    .map((tri) => tri.map((p) => [p[0] + t[0], p[1] + t[1], p[2] + t[2]]));
+  const buf = toBinaryStl(moved);
+  const parsed = parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {});
+  const { mesh: out, report } = repairNonManifold(parsed);
+  expect(report.removedTris).toBe(4);
+  expect(report.nonManifoldEdgesAfter).toBe(0);
+  expect(closedManifold(out.faces)).toBe(true);
 });
 
 test('40×40 Platte aus Einzelwürfeln: alle inneren Flächen weg', () => {

@@ -78,13 +78,15 @@ self.addEventListener('message', (event) => {
       {
         const detail = tau > 0
           ? `Mikro-Kanten < ${tau} mm werden entfernt …`
-          : 'Mikro-Kanten-Bereinigung aus, Berührflächen werden geprüft …';
+          : 'Mikro-Kanten-Bereinigung aus, Berührkanten werden geprüft …';
         self.postMessage({ id, progress: { step: 'worker', detail, ratio: 0.39 } });
         const { mesh: cleaned, report } = cleanMesh(rawMesh, { minDetailMm: tau > 0 ? tau : 0 });
         mesh = cleaned;
         cachedClean = report;
-        const beruehrt = report.repair?.contactPairs > 0
-          ? `, ${report.repair.nonManifoldEdges - report.repair.nonManifoldEdgesAfter} Berührkanten verschweißt`
+        const rep = report.repair;
+        const repariert = rep ? rep.nonManifoldEdges - rep.nonManifoldEdgesAfter : 0;
+        const beruehrt = rep && rep.removedTris > 0
+          ? `, ${repariert} non-manifold-Kante${repariert === 1 ? '' : 'n'} repariert`
           : '';
         self.postMessage({
           id,
