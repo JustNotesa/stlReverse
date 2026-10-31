@@ -27,13 +27,20 @@ export const SIMPLIFY_DEFAULTS = {
   placement: 'endpoint', // F6: 'endpoint' (nur Endpunkte) | 'optimal'
   qTol: 0.999,           // F1: multiplikative Toleranz der Qualitätsschranke
   wallGuard: true,       // H2: Dünnwand-Wächter (Kreuzung der gegenüberliegenden Wand)
-  maxErrorMm: 0.02       // Fehlerschranke in Eingabe-Einheiten (mm): RMS-Abstand √(err/Gewicht) des Zielpunkts
+  maxErrorMm: 0.02,      // Fehlerschranke in Eingabe-Einheiten (mm): RMS-Abstand √(err/Gewicht) des Zielpunkts
                          // zu den Ebenen der zusammengefassten Ursprungsflächen. Teurere Kollapse entfallen —
                          // lieber das Ziel verfehlen als verzerren (harte Regeln wie Gradgrenze und Merkmals-
                          // linien zwingen sonst den Rest des Netzes zu langen Sehnen; dünnes Rohr 240k → 50k:
                          // Hausdorff 0,64 mm bei 0,4 mm Wand). Gleiche Größe wie mesh-clean.js
                          // DEFAULT_MIN_DETAIL_MM: die Vereinfachung verfälscht nicht mehr als die kleinste
-                         // Detailgröße. 0 = aus.
+                         // Detailgröße.
+  maxErrorRel: 1e-4,     // N4: relative Fehlerschranke (Anteil der BBox-Diagonalen). Effektive Schranke =
+                         // min(max(maxErrorMm, maxErrorRel · D), maxErrorRelMax · D) — eine rein absolute Schranke macht das
+                         // Ergebnis größenabhängig (Kugel R=200 bleibt bei 62k statt 50k Faces, R=1000 bei
+                         // 153k). Die relative Schranke gibt großen Teilen dasselbe relative Detailniveau.
+                         // 0 = aus (beide Schranken 0 ⇒ keine Fehlerbegrenzung).
+  maxErrorRelMax: 1e-3   // Obergrenze relativ zur Diagonalen: winzige Teile oder STL in Metern/Zoll dürfen nicht
+                         // um „0,02 Einheiten“ verfälscht werden (Rohr ×0,01: Volumen +68 % ohne diese Grenze).
 };
 
 /** Scratch-Ergebnis der Kostenberechnung (keine Allokation im heißen Loop). */
@@ -747,6 +754,11 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
     rejected: { link: 0, flip: 0, quality: 0, locked: 0, degree: 0, feature: 0, intersect: 0, wall: 0, error: 0 },
     passes: 0, ms: 0
   };
+  const rej = report.rejected;
+  /** N4: eine beim Einwerfen verworfene Kante zählen (Fehlerschranke überschritten). */
+  function countPushSkip() {
+    if (_c.reason === 3) rej.error++;
+  }
   if (Fc === 0 || V === 0) {
     report.ms = Date.now() - t0;
     return { faces: [], vertices: new Float32Array(0), simplifyReport: report };
@@ -779,7 +791,15 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
   const checkIntersect = O.intersectionCheck !== false;
 
   // ---------- Schritt 4: Zielpunkt und Kosten einer Kante (a,b) ----------
-  const maxErrN = O.maxErrorMm > 0 ? O.maxErrorMm / scale : 0;   // normalisiert (Diagonale = 1)
+  // N4: effektive Fehlerschranke = max(absolut, relativ zur BBox-Diagonale).
+  //     `scale` ist die BBox-Diagonale in Eingabe-Einheiten (mm); die
+  //     normalisierten Koordinaten haben die Diagonale 1.
+  const diagMm = scale;
+  const capAbs = O.maxErrorMm > 0 ? O.maxErrorMm : 0;
+  const capRel = O.maxErrorRel > 0 ? O.maxErrorRel * diagMm : 0;
+  const capHi = O.maxErrorRelMax > 0 ? O.maxErrorRelMax * diagMm : Infinity;
+  const capMm = Math.min(Math.max(capAbs, capRel), capHi);
+  const maxErrN = capMm > 0 ? capMm / diagMm : 0;   // normalisiert (Diagonale = 1)
   const maxErr2 = maxErrN * maxErrN;
   function edgeCost(a, b) {
     _c.reason = 0;
@@ -879,7 +899,7 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
     const lo = Math.floor(key / V), hi = key - lo * V;
     if (locked[lo] || locked[hi]) continue;
     edgeCost(lo, hi);
-    if (_c.skip) continue;
+    if (_c.skip) { countPushSkip(); continue; }
     heap.push(_c.key, lo, hi, ver[lo], ver[hi]);
   }
 
@@ -953,7 +973,7 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
         if (seen.has(key)) continue;
         seen.add(key);
         edgeCost(lo, hi);
-        if (_c.skip) continue;
+        if (_c.skip) { countPushSkip(); continue; }
         heap.push(_c.key, lo, hi, ver[lo], ver[hi]);
       }
     }
@@ -1056,6 +1076,7 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
       const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (!(nl > 0)) continue;                     // entartetes Dreieck
       nx /= nl; ny /= nl; nz /= nl;
+      const dp = -(nx * ax + ny * ay + nz * az);  // Ebene von T' (N3)
       // BBox von T' (expandiert)
       let x0 = ax, x1 = ax, y0 = ay, y1 = ay, z0 = az, z1 = az;
       if (bx < x0) x0 = bx; if (cx < x0) x0 = cx;
@@ -1079,9 +1100,33 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
         if (oa === i0 || oa === i1 || oa === i2) continue;
         if (ob === i0 || ob === i1 || ob === i2) continue;
         if (oc === i0 || oc === i1 || oc === i2) continue;
-        _wo[0] = P0[3 * oa]; _wo[1] = P0[3 * oa + 1]; _wo[2] = P0[3 * oa + 2];
-        _wo[3] = P0[3 * ob]; _wo[4] = P0[3 * ob + 1]; _wo[5] = P0[3 * ob + 2];
-        _wo[6] = P0[3 * oc]; _wo[7] = P0[3 * oc + 1]; _wo[8] = P0[3 * oc + 2];
+        const oax = P0[3 * oa], oay = P0[3 * oa + 1], oaz = P0[3 * oa + 2];
+        const obx = P0[3 * ob], oby = P0[3 * ob + 1], obz = P0[3 * ob + 2];
+        const ocx = P0[3 * oc], ocy = P0[3 * oc + 1], ocz = P0[3 * oc + 2];
+        // N3: Ebenengleiche Gegenflächen sind KEINE Kreuzung. Zwei Körper, die
+        //     sich flächig berühren (verschiedene Dreiecksgitter!), erzeugen
+        //     ebengleiche, entgegengesetzt orientierte Flächen — der Wächter
+        //     zählte sie bisher als Durchdringung (coplanarOverlap2D) und
+        //     blockierte damit jeden Kollaps in der Nähe der Berührungsfläche.
+        //     Zählt nur, was die Ebenen wirklich kreuzt.
+        const od = -(onx * oax + ony * oay + onz * oaz);
+        const d0 = nx * oax + ny * oay + nz * oaz + dp;   // Abstand der Original-Ecken zu Ebene(T')
+        const d1 = nx * obx + ny * oby + nz * obz + dp;
+        const d2 = nx * ocx + ny * ocy + nz * ocz + dp;
+        const e0 = onx * ax + ony * ay + onz * az + od;   // Abstand der T'-Ecken zu Ebene(Original)
+        const e1 = onx * bx + ony * by + onz * bz + od;
+        const e2 = onx * cx + ony * cy + onz * cz + od;
+        const sc = Math.max(
+          Math.abs(bx - ax), Math.abs(by - ay), Math.abs(bz - az),
+          Math.abs(cx - ax), Math.abs(cy - ay), Math.abs(cz - az),
+          Math.abs(obx - oax), Math.abs(oby - oay), Math.abs(obz - oaz),
+          Math.abs(ocx - oax), Math.abs(ocy - oay), Math.abs(ocz - oaz));
+        const eps = sc * 1e-8 + 1e-12;                   // "dieselbe Ebene" (normiert: Diagonale = 1)
+        if (Math.abs(d0) <= eps && Math.abs(d1) <= eps && Math.abs(d2) <= eps &&
+            Math.abs(e0) <= eps && Math.abs(e1) <= eps && Math.abs(e2) <= eps) continue;
+        _wo[0] = oax; _wo[1] = oay; _wo[2] = oaz;
+        _wo[3] = obx; _wo[4] = oby; _wo[5] = obz;
+        _wo[6] = ocx; _wo[7] = ocy; _wo[8] = ocz;
         if (triTriOverlap(_wt, _wo, null)) return true;
       }
     }
@@ -1196,7 +1241,6 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
   let collapses = 0;
   let removed = 0;
   let passCollapses = 0;
-  const rej = report.rejected;
   const progStep = Math.max(1, Math.floor(total * 0.02));
   let nextProg = progStep;
 
@@ -1379,7 +1423,7 @@ export function simplifyMesh(mesh, maxFaces = 50000, progressCb = null, opts = {
       if (deg[s] + deg[u] - 4 > degLimit) continue;
       const lo = s < u ? s : u, hi = s < u ? u : s;
       edgeCost(lo, hi);
-      if (_c.skip) continue;
+      if (_c.skip) { countPushSkip(); continue; }
       heap.push(_c.key, lo, hi, ver[lo], ver[hi]);
     }
     aliveFaces -= 2;
