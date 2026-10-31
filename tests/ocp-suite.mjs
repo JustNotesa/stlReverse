@@ -1,8 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Unabhängiger CAD-Kern als zweiter Prüfer: volles OpenCascade (OCP-Python-Bindings, tests/occt-check.py)
 // liest die exportierten STEP-Dateien OHNE die ShapeFix-Reparatur-Sequenz und prüft sie. Exportiert
-// werden alle Samples (Toggle AN und AUS) und die Schalen-/Freigang-Testkörper aus
-// tests/shell-regression.mjs (CASES), dazu beliebige weitere STL-Dateien von der Kommandozeile.
+// werden alle Samples (Toggle AN und AUS), die Schalen-/Freigang-Testkörper aus
+// tests/shell-regression.mjs (CASES) und die berührenden Körper aus tests/contact-regression.mjs
+// (CONTACT_CASES, Pose 0), dazu beliebige weitere STL-Dateien von der Kommandozeile.
 //
 // Je Datei (hart, rot bei Abweichung):
 //   - lesbar, BRepCheck_Analyzer gültig
@@ -39,6 +40,7 @@ import { detectTubes } from '../tube-sweep.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 import * as G from './fixtures-v2/gen.mjs';
 import { CASES, groupsOfTris, exportCase, wantVolume } from './shell-regression.mjs';
+import { CONTACT_CASES, contactGroups, contactExport, contactWantVolume } from './contact-regression.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -74,6 +76,7 @@ const EXPECT = {
   'dino_clip_v3_04-strong-closing.stl [AUS]': { bop: { BOPAlgo_SelfIntersect: 52 } },
 };
 for (const cs of CASES) if (cs.ocpBop) for (const t of ['AN', 'AUS']) EXPECT[`${cs.name} [${t}]`] = { bop: cs.ocpBop };
+for (const cs of CONTACT_CASES) if (cs.ocpBop) for (const t of ['AN', 'AUS']) EXPECT[`${cs.name} [${t}]`] = { bop: cs.ocpBop };
 
 // ---- Exportieren
 const require = createRequire(import.meta.url);
@@ -117,6 +120,11 @@ for (const f of readdirSync(join(ROOT, 'samples')).filter((x) => x.toLowerCase()
 for (const cs of CASES) {
   const tris = cs.tris(), groups = groupsOfTris(tris, cs), vSoll = wantVolume(cs, tris);
   for (const def of [true, false]) add(`${cs.name} [${def ? 'AN' : 'AUS'}]`, exportCase(groups, def), vSoll);
+}
+// berührende Körper (Pose 0 — der Export ist starr, die Pose ändert das Volumen nicht)
+for (const cs of CONTACT_CASES) {
+  const tris = cs.tris(), groups = contactGroups(tris), vSoll = contactWantVolume(cs, tris);
+  for (const def of [true, false]) add(`${cs.name} [${def ? 'AN' : 'AUS'}]`, contactExport(groups, def), vSoll);
 }
 for (const p of process.argv.slice(2)) {
   if (!existsSync(p)) { origLog(`⚠  ${p} nicht gefunden — übersprungen`); continue; }
