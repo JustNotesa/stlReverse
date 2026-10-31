@@ -17,6 +17,11 @@ let syncUiWired = false;        // Kopplungs-UI (Checkbox + Ansichts-Radios) nur
 
 let occtWorker = null;
 let occtWorkerTimer = null;
+let loadingTicker = null;
+
+function clearLoadingTicker() {
+  if (loadingTicker) { clearInterval(loadingTicker); loadingTicker = null; }
+}
 const OCCT_TIMEOUT_MS = 120000;
 
 const stepHiddenInput = document.createElement('input');
@@ -110,6 +115,20 @@ export function loadStepIntoViewer(stepArrayBuffer) {
   if (occtWorkerTimer) { clearTimeout(occtWorkerTimer); occtWorkerTimer = null; }
   if (occtWorker) { occtWorker.terminate(); occtWorker = null; }
 
+  // Große STEP-Dateien brauchen im Browser lange (Bremsgriff 35 MB: Firefox ~50 s) – mitlaufende
+  // Sekunden zeigen, dass noch gearbeitet wird; Zeitgrenze wächst mit der Größe (≥ 2 min, ~6 s je MB).
+  const mb = stepArrayBuffer.byteLength / 1e6;
+  const timeoutMs = Math.min(600000, Math.max(OCCT_TIMEOUT_MS, mb * 6000));
+  const sizeHint = mb >= 5 ? `\n${mb.toFixed(0)} MB – große Dateien brauchen etwa 1–2 Minuten.` : '';
+  const t0 = Date.now();
+  const tick = () => {
+    if (stepOcctContainer?.dataset.state !== 'loading') return clearLoadingTicker();
+    stepOcctContainer.dataset.msg = `STEP wird geladen … ${Math.round((Date.now() - t0) / 1000)} s${sizeHint}`;
+  };
+  clearLoadingTicker();
+  tick();
+  loadingTicker = setInterval(tick, 1000);
+
   const workerUrl = extensionApi?.runtime?.getURL
     ? extensionApi.runtime.getURL('libs/occt/occt-import-js-worker.js')
     : 'libs/occt/occt-import-js-worker.js';
@@ -119,20 +138,29 @@ export function loadStepIntoViewer(stepArrayBuffer) {
   occtWorkerTimer = setTimeout(() => {
     if (occtWorker) { occtWorker.terminate(); occtWorker = null; }
     occtWorkerTimer = null;
-    if (stepOcctContainer) stepOcctContainer.dataset.state = 'error';
-    console.error('occt-import-js: Timeout nach', OCCT_TIMEOUT_MS / 1000, 's');
-  }, OCCT_TIMEOUT_MS);
+    clearLoadingTicker();
+    if (stepOcctContainer) {
+      stepOcctContainer.dataset.msg = `Vorschau nach ${Math.round(timeoutMs / 1000)} s abgebrochen – das Modell ist zu groß für die Browser-Ansicht.\nDie STEP-Datei selbst ist fertig und lässt sich herunterladen.`;
+      stepOcctContainer.dataset.state = 'error';
+    }
+    console.error('occt-import-js: Timeout nach', timeoutMs / 1000, 's');
+  }, timeoutMs);
 
   occtWorker.onmessage = (ev) => {
     clearTimeout(occtWorkerTimer); occtWorkerTimer = null;
+    clearLoadingTicker();
     occtWorker.terminate(); occtWorker = null;
     _renderOcctResult(ev.data);
   };
 
   occtWorker.onerror = (ev) => {
     clearTimeout(occtWorkerTimer); occtWorkerTimer = null;
+    clearLoadingTicker();
     occtWorker = null;
-    if (stepOcctContainer) stepOcctContainer.dataset.state = 'error';
+    if (stepOcctContainer) {
+      stepOcctContainer.dataset.msg = 'Fehler beim Laden der STEP-Datei (evtl. zu wenig Speicher im Browser).';
+      stepOcctContainer.dataset.state = 'error';
+    }
     console.error('occt-import-js Worker Fehler:', ev.message);
   };
 
