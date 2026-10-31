@@ -969,7 +969,9 @@ function buildInner(normalGroups, opts, log) {
         rounds: round + 1,
         demoted: countDemoted(seg, state),
         stripTris: state.stripTris.size,
-        blends: state.blendRegions.size,
+        // nur Regionen, die wirklich als Blend-Patch gelten — zur Fassade demotierte
+        // Regionen zählen nicht (state.blendRegions selbst bleibt unverändert)
+        blends: [...state.blendRegions].filter((id) => !state.demotedRegions.has(id)).length,
         faces: res.facesByType,
         edges: res.edgesByType,
         ms,
@@ -2119,10 +2121,13 @@ function placementHint(wr, surf, mesh) {
         const c = mesh.N[3 * t] * m[0] + mesh.N[3 * t + 1] * m[1] + mesh.N[3 * t + 2] * m[2];
         if (c < minCos) minCos = c;
       }
-      if (minCos > Math.cos(70 * Math.PI / 180)) {
-        // flache Kalotte (Skoda: Kugeln R ≈ 300 mm): Fläche auf den ÄQUATOR legen,
+      if (minCos > Math.cos(30 * Math.PI / 180)) {
+        // Wirklich flache Kalotte (Skoda: Kugeln R ≈ 300 mm): Fläche auf den ÄQUATOR legen,
         // Naht (x) gegenüber. Mit dem Pol IN der Fläche nahm OCC die Gegenseite
         // (Fläche = ganze Kugel minus Kalotte, BRepCheck_UnorientableShape).
+        // Die Schwelle ist bewusst eng (30°): mit 70° traf die Regel auch jede
+        // 1/8-Kugel-Ecke einer Verrundung (54.7°) — dort meldete OCP
+        // ShapeAnalysis Selbstschnitte der Kanten.
         surf.axis = perp;
         surf.x = mul(m, -1);
       } else {

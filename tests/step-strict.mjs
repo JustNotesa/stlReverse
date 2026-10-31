@@ -44,6 +44,10 @@
 //                    Schale übersprungen)
 //   shared-topology  kein VERTEX_POINT und keine EDGE_CURVE in zwei Schalen (getrennte Körper, Hohlraum
 //                    und Außenschale teilen nichts)
+//   bspline-knots    B-Spline-Knotenvektor (B_SPLINE_SURFACE_WITH_KNOTS in beiden Richtungen,
+//                    B_SPLINE_CURVE_WITH_KNOTS): Knotenwerte streng steigend (keine Doppelknoten),
+//                    Vielfachheit ≥ 1, innere Vielfachheit ≤ Grad, Randvielfachkeit ≤ Grad+1,
+//                    Summe der Vielfachkeiten = Stützpunkte + Grad + 1 (ISO 10303-42)
 //
 // Unterstützte Flächenarten: PLANE, CYLINDRICAL_/CONICAL_/SPHERICAL_/TOROIDAL_SURFACE,
 // SURFACE_OF_LINEAR_EXTRUSION, SURFACE_OF_REVOLUTION, B_SPLINE_SURFACE_WITH_KNOTS.
@@ -83,8 +87,55 @@ export function parseStep(text) {
   const body = text.replace(/\r/g, '');
   const re = /#(\d+)\s*=\s*([A-Z_0-9]+)\s*(\((?:[^;']|'(?:[^']|'')*')*\))\s*;/g;
   let m;
-  while ((m = re.exec(body))) ents.set(+m[1], { type: m[2], args: parseArgs(m[3]) });
+  while ((m = re.exec(body))) ents.set(+m[1], { id: +m[1], type: m[2], args: parseArgs(m[3]) });
   return ents;
+}
+
+// ---- B-Spline-Knotenvektor (ISO 10303-42) ----------------------------------
+// Ein Knotenvektor ist gültig, wenn
+//   * die Knotenwerte streng steigend sind (verschiedene Werte, keine Doppelknoten)
+//   * jede Vielfachheit ≥ 1 ist
+//   * eine innere Vielfachheit ≤ Grad und eine Randvielfachkeit ≤ Grad+1 ist
+//   * die Summe der Vielfachkeiten = Stützpunkte + Grad + 1 ist
+// Liefert die Liste der Meldungen (leer = gültig).
+function knotProblems(vals, mults, degree, nCtrl, label) {
+  const out = [];
+  if (!Array.isArray(vals) || !Array.isArray(mults)) {
+    out.push(`${label}: Knoten- oder Vielfachheitsliste fehlt`);
+    return out;
+  }
+  if (vals.length !== mults.length) {
+    out.push(`${label}: ${vals.length} Knotenwerte, aber ${mults.length} Vielfachheiten`);
+    return out;
+  }
+  if (!(degree >= 1)) { out.push(`${label}: Grad ${degree} ist kleiner als 1`); return out; }
+  // Knotenwerte streng steigend
+  for (let i = 1; i < vals.length; i++) {
+    if (!(vals[i] > vals[i - 1])) {
+      out.push(`${label}: Knotenwert ${vals[i]} (Index ${i}) ist nicht größer als ${vals[i - 1]} (Index ${i - 1})`);
+    }
+  }
+  // Vielfachheiten je Knotenwert (gleiche Werte werden zusammengefasst)
+  const groups = [];
+  for (let i = 0; i < vals.length; i++) {
+    const last = groups.length ? groups[groups.length - 1] : null;
+    if (last && last.v === vals[i]) last.m += mults[i];
+    else groups.push({ v: vals[i], m: mults[i] });
+  }
+  for (let i = 0; i < groups.length; i++) {
+    const isEnd = (i === 0) || (i === groups.length - 1);
+    const maxM = isEnd ? degree + 1 : degree;
+    if (!(groups[i].m >= 1)) out.push(`${label}: Vielfachheit ${groups[i].m} am Knoten ${groups[i].v} ist kleiner als 1`);
+    else if (groups[i].m > maxM) {
+      out.push(`${label}: Vielfachheit ${groups[i].m} am ${isEnd ? 'Randknoten' : 'inneren Knoten'} ${groups[i].v} ist größer als ${maxM}`);
+    }
+  }
+  let sum = 0;
+  for (const m of mults) sum += m;
+  if (sum !== nCtrl + degree + 1) {
+    out.push(`${label}: Summe der Vielfachheiten ${sum} ist nicht Stützpunkte + Grad + 1 (${nCtrl + degree + 1})`);
+  }
+  return out;
 }
 
 // ---- Vektoren
@@ -199,6 +250,8 @@ export function checkStepStrict(text, opts = {}) {
     for (const f of e.args[1]) shellOfFace.set(f.ref, { id: sid, type: e.type });
   }
   const flag = (kind, msg, extra = {}) => violations.push({ kind, msg, ...extra });
+  // Knotenverstöße je Entität nur einmal melden (eine Fläche wird je Rand eingelesen)
+  const knotSeen = new Set();
 
   const P = (r) => { const a = E(r).args; return a[1]; };                    // CARTESIAN_POINT('',(x,y,z))
   const D = (r) => norm(E(r).args[1]);                                       // DIRECTION('',(…))
@@ -235,6 +288,13 @@ export function checkStepStrict(text, opts = {}) {
     } else if (e.type === 'B_SPLINE_CURVE_WITH_KNOTS') {
       const deg = e.args[1]; const cps = e.args[2].map((q) => P(q));
       const mults = e.args[6], kv = e.args[7];
+      // Knotenvektor prüfen (ISO 10303-42): streng steigend, Vielfachkeiten in der Grenze
+      if (!knotSeen.has(`c${e.id}`)) {
+        knotSeen.add(`c${e.id}`);
+        for (const msg of knotProblems(kv, mults, deg, cps.length, 'Kurve')) {
+          flag('bspline-knots', `#${e.id}: B_SPLINE_CURVE_WITH_KNOTS: ${msg}`);
+        }
+      }
       const U = []; mults.forEach((m, i) => { for (let k = 0; k < m; k++) U.push(kv[i]); });
       const at = (t) => {
         // de Boor
@@ -292,6 +352,15 @@ export function checkStepStrict(text, opts = {}) {
     const nu = rows.length, nv = rows[0].length;
     const expand = (kn, mm) => { const out = []; mm.forEach((m, i) => { for (let k = 0; k < m; k++) out.push(kn[i]); }); return out; };
     const ku = e.args[10] || [], kv = e.args[11] || [], mu = e.args[8] || [], mv = e.args[9] || [];
+    // Knotenvektor prüfen (ISO 10303-42) — beide Richtungen
+    if (!knotSeen.has(`s${e.id}`)) {
+      knotSeen.add(`s${e.id}`);
+      for (const [lbl, vals, mults, deg, n] of [['u', ku, mu, du, nu], ['v', kv, mv, dv, nv]]) {
+        for (const msg of knotProblems(vals, mults, deg, n, `Richtung ${lbl}`)) {
+          flag('bspline-knots', `#${e.id}: B_SPLINE_SURFACE_WITH_KNOTS: ${msg}`);
+        }
+      }
+    }
     if (ku.length !== mu.length || kv.length !== mv.length) return { kind: 'unknown:B_SPLINE_SURFACE_WITH_KNOTS' };
     const U = expand(ku, mu), V = expand(kv, mv);
     // Gültige B-Spline-Konfiguration: Grad ≥ 1, mind. 2 Stützpunkte je Richtung,
