@@ -362,6 +362,9 @@ export function recognizePrimitives(normalGroups, opts = {}) {
 
   // 1) Dreiecke flachklopfen (mit Gruppen-Index + frischer Normale)
   const tris = [];
+  // Gruppen, in denen ein entartetes Dreieck (triNormal null) übersprungen wurde — solche
+  // Gruppen werden vom Split (unten) nicht angefasst (Vertices-Kanten wären nicht rekonstruierbar).
+  const groupHasDegenerate = new Uint8Array(normalGroups.length);
   let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
   normalGroups.forEach((grp, gi) => {
     const vs = grp.vertices;
@@ -370,12 +373,14 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     for (let t = 0; t < tc; t++) {
       const v0 = vs[t*3], v1 = vs[t*3+1], v2 = vs[t*3+2];
       const n = triNormal(v0, v1, v2);
-      if (!n) continue;
-      tris.push({ n, v: [v0, v1, v2], g: gi }); // (Schwerpunkt wurde nie gelesen — entfällt)
+      if (!n) { groupHasDegenerate[gi] = 1; continue; }
+      tris.push({ n, v: [v0, v1, v2], g: gi, t }); // (Schwerpunkt wurde nie gelesen — entfällt)
       for (const vv of [v0, v1, v2]) for (let k = 0; k < 3; k++) { if (vv[k] < mn[k]) mn[k] = vv[k]; if (vv[k] > mx[k]) mx[k] = vv[k]; }
     }
   });
   const T = tris.length;
+  // Besitzer je Facette (Primitiv-ID, −1 = nicht getaggt) — Grundlage des Gruppen-Splits unten.
+  const triOwner = new Int32Array(T).fill(-1);
   if (!T) return empty;
   const diag = len(sub(mx, mn)) || 1;
   const MAX_RADIUS = opts.maxRadius ?? diag; // Zylinder größer als das Bauteil ist unplausibel
@@ -697,7 +702,7 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     };
     primitives.push(prim);
     if (v.full) bores++; else fillets++;
-    for (const ti of tagged) { claimed[ti] = 1; normalGroups[tris[ti].g].primitive = prim; }
+    for (const ti of tagged) { claimed[ti] = 1; triOwner[ti] = prim.id; normalGroups[tris[ti].g].primitive = prim; }
     for (const ti of consumeArr) visited[ti] = 1;
   };
 
@@ -1022,11 +1027,114 @@ export function recognizePrimitives(normalGroups, opts = {}) {
     acceptPrim(v, tagged, region);
   }
 
+  // ── Gruppen-Split: eine Gruppe, Facetten MEHRERER Primitiven ──────────────
+  // unifyCoplanarGroups fusioniert koplanare, aber NICHT topologisch verbundene Patches zu
+  // EINER Gruppe. Zwei koaxiale Bohrungen mit gleichem Radius und gleicher Segmentphase
+  // (z. B. je ein Loch in zwei Ohren eines Gleitstücks, auf derselben Achse) haben paarweise
+  // koplanare Wandfacetten → EINE Gruppe enthält die Wandfacetten BEIDER Bohrungen. Die
+  // Erkennung findet beide Bohrungen (je ein eigenes Primitiv), aber getaggt wird gruppenweise
+  // (`normalGroups[g].primitive = prim`) → das zweite Primitiv überschreibt das Tag der ersten
+  // Bohrung → der Exporter sieht EINE „Bohrung" mit vier Rand-Ringen und lässt beide Löcher
+  // facettiert.
+  // Split (konservativ, deterministisch): angefasst werden nur Gruppen, die (a) kein
+  // übersprungenes entartetes Dreieck enthalten und (b) Facetten von mindestens ZWEI
+  // Primitiven halten. Innerhalb einer solchen Gruppe werden die Facetten über die
+  // Manifold-Adjazenz zu Komponenten gruppiert; hat eine Komponente gemischte Besitzer
+  // (inkl. „nicht getaggt" = −1), bleibt die Gruppe UNVERÄNDERT. Sonst entsteht je Besitzer
+  // eine Untergruppe (flache Kopie der Originalgruppe mit den Facetten-Vertices dieses
+  // Besitzers) → jede Bohrung behält ihr eigenes Tag. Alle anderen Gruppen bleiben unangetastet.
+  const inputGroups = normalGroups.length;
+  const groupFacets = new Array(inputGroups);
+  for (let i = 0; i < T; i++) {
+    const gi = tris[i].g;
+    if (!groupFacets[gi]) groupFacets[gi] = [];
+    groupFacets[gi].push(i);
+  }
+  const compStamp = new Int32Array(T);   // Komponenten-Markierung je Facette (Generationsstempel)
+  let compGen = 0;
+  const appendedGroups = [];
+  let splitGroups = 0;
+  for (let gi = 0; gi < inputGroups; gi++) {
+    const facets = groupFacets[gi];
+    if (!facets || facets.length < 2) continue;
+    if (groupHasDegenerate[gi]) continue;                 // (a) entartetes Dreieck → nicht anfassen
+    const owners = new Set();
+    for (let k = 0; k < facets.length; k++) {
+      const own = triOwner[facets[k]];
+      if (own >= 0) owners.add(own);
+    }
+    if (owners.size < 2) continue;                        // (b) nur EIN Besitzer → unverändert
+    // Komponenten der Gruppe (Zusammenhang über die Manifold-Adjazenz, beschränkt auf die Gruppe)
+    const cg = ++compGen;
+    const comps = [];
+    const stack = [];
+    for (let k = 0; k < facets.length; k++) {
+      const seed = facets[k];
+      if (compStamp[seed] === cg) continue;
+      const comp = [];
+      comps.push(comp);
+      stack.length = 0;
+      stack.push(seed);
+      compStamp[seed] = cg;
+      while (stack.length) {
+        const cur = stack.pop();
+        comp.push(cur);
+        for (const nb of adj[cur]) {
+          if (tris[nb].g !== gi) continue;                // nur Facetten DIESER Gruppe
+          if (compStamp[nb] === cg) continue;
+          compStamp[nb] = cg;
+          stack.push(nb);
+        }
+      }
+    }
+    // Jede Komponente muss genau EINEN Besitzer haben (−1 = nicht getaggt = eigener Besitzer)
+    let mixed = false;
+    for (const comp of comps) {
+      const own = triOwner[comp[0]];
+      for (let k = 1; k < comp.length; k++) {
+        if (triOwner[comp[k]] !== own) { mixed = true; break; }
+      }
+      if (mixed) break;
+    }
+    if (mixed) continue;                                 // nicht eindeutig zuordenbar → unverändert
+    // Facetten je Besitzer (in der Originalreihenfolge der Gruppe)
+    const byOwner = new Map();
+    for (let k = 0; k < facets.length; k++) {
+      const ti = facets[k];
+      const own = triOwner[ti];
+      let arr = byOwner.get(own);
+      if (!arr) { arr = []; byOwner.set(own, arr); }
+      arr.push(ti);
+    }
+    // Besitzer aufsteigend, „nicht getaggt" (−1) zuletzt
+    const ownerIds = [...byOwner.keys()].sort((a, b) => (a < 0 ? 1 : (b < 0 ? -1 : a - b)));
+    const grp = normalGroups[gi];
+    const subs = [];
+    for (const own of ownerIds) {
+      const arr = byOwner.get(own);
+      const verts = [];
+      for (let k = 0; k < arr.length; k++) {
+        const v = tris[arr[k]].v;
+        verts.push(v[0], v[1], v[2]);
+      }
+      const part = { ...grp, vertices: verts };
+      if (own >= 0) part.primitive = primitives[own];
+      else delete part.primitive;
+      subs.push(part);
+    }
+    normalGroups[gi] = subs[0];                         // erste Untergruppe ersetzt die Originalgruppe
+    for (let k = 1; k < subs.length; k++) appendedGroups.push(subs[k]);
+    splitGroups++;
+  }
+  for (const g of appendedGroups) normalGroups.push(g);  // weitere Untergruppen erst danach anhängen
+
   return {
     groups: normalGroups,
     primitives,
     stats: {
-      inputGroups: normalGroups.length, cylinders: primitives.length, bores, fillets,
+      inputGroups, cylinders: primitives.length, bores, fillets,
+      // Anzahl der Gruppen, die wegen mehrerer Primitiv-Besitzer aufgeteilt wurden (0 = keine)
+      splitGroups,
       // Diagnose: true = Sicherheitsnetz hat gegriffen (Zusatzpfad gekappt, Phase 2 lief voll)
       phase1Truncated, rescueTruncated
     }
