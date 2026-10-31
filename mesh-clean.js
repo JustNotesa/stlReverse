@@ -220,7 +220,7 @@ export function cleanMesh(mesh, opts = {}) {
   flatTol = opts.columns !== false && maxAbs > 0 ? Math.min(3e-5, Math.max(FLAT_DEV_MM, 2 ** (Math.floor(Math.log2(maxAbs)) - 23))) : FLAT_DEV_MM;
   const H = Math.max(5 * tau, diag / 150);
   const grid = new Map();
-  const oversize = [];               // Dreiecke über sehr viele Zellen: immer mitprüfen
+  const oversize = new Set();        // Dreiecke über sehr viele Zellen: immer mitprüfen
   const cellRange = (f) => {
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     for (let k = 0; k < 3; k++) { const v = tri[f * 3 + k]; for (let c = 0; c < 3; c++) { const x = P[v * 3 + c]; if (x < lo[c]) lo[c] = x; if (x > hi[c]) hi[c] = x; } }
@@ -229,7 +229,7 @@ export function cleanMesh(mesh, opts = {}) {
   const ckey = (i, j, k) => (i * 4096 + j) * 4096 + k;
   const gridInsert = (f) => {
     const r = cellRange(f);
-    if ((r[0][1] - r[0][0] + 1) * (r[1][1] - r[1][0] + 1) * (r[2][1] - r[2][0] + 1) > 512) { oversize.push(f); return; }
+    if ((r[0][1] - r[0][0] + 1) * (r[1][1] - r[1][0] + 1) * (r[2][1] - r[2][0] + 1) > 512) { oversize.add(f); return; }
     for (let i = r[0][0]; i <= r[0][1]; i++) for (let j = r[1][0]; j <= r[1][1]; j++) for (let k = r[2][0]; k <= r[2][1]; k++) {
       const key = ckey(i, j, k); const l = grid.get(key); if (l) l.push(f); else grid.set(key, [f]);
     }
@@ -287,36 +287,33 @@ export function cleanMesh(mesh, opts = {}) {
     }
     stampGen++;
     for (const f of star) stamp[f] = stampGen;          // eigener Fächer: nicht prüfen
+    const visit = (g) => {
+      if (!alive[g] || stamp[g] === stampGen) return false;
+      stamp[g] = stampGen;
+      const g0 = tri[g * 3], g1 = tri[g * 3 + 1], g2 = tri[g * 3 + 2];
+      // Achsen-Box-Vortest gegen ALLE neuen Dreiecke, dann exakter Test
+      let gl0 = Infinity, gl1 = Infinity, gl2 = Infinity, gh0 = -Infinity, gh1 = -Infinity, gh2 = -Infinity;
+      for (const v of [g0, g1, g2]) {
+        const x = P[v * 3], y = P[v * 3 + 1], z = P[v * 3 + 2];
+        if (x < gl0) gl0 = x; if (x > gh0) gh0 = x; if (y < gl1) gl1 = y; if (y > gh1) gh1 = y; if (z < gl2) gl2 = z; if (z > gh2) gh2 = z;
+      }
+      for (const o of news) {
+        if (gh0 < o.lo[0] || gl0 > o.hi[0] || gh1 < o.lo[1] || gl1 > o.hi[1] || gh2 < o.lo[2] || gl2 > o.hi[2]) continue;
+        if (o.ids.includes(g0) || o.ids.includes(g1) || o.ids.includes(g2)) continue;   // Fächer-Nachbar
+        if (trisIntersect(o.Tp, [pt(g0), pt(g1), pt(g2)])) return true;
+      }
+      return false;
+    };
     for (const nt of news) {
       const c0 = [0, 1, 2].map((c) => Math.floor((nt.lo[c] - bbMin[c]) / H));
       const c1 = [0, 1, 2].map((c) => Math.floor((nt.hi[c] - bbMin[c]) / H));
-      const visit = (g) => {
-        if (!alive[g] || stamp[g] === stampGen) return false;
-        stamp[g] = stampGen;
-        const g0 = tri[g * 3], g1 = tri[g * 3 + 1], g2 = tri[g * 3 + 2];
-        // Achsen-Box-Vortest gegen ALLE neuen Dreiecke, dann exakter Test
-        let gl0 = Infinity, gl1 = Infinity, gl2 = Infinity, gh0 = -Infinity, gh1 = -Infinity, gh2 = -Infinity;
-        for (const v of [g0, g1, g2]) {
-          const x = P[v * 3], y = P[v * 3 + 1], z = P[v * 3 + 2];
-          if (x < gl0) gl0 = x; if (x > gh0) gh0 = x; if (y < gl1) gl1 = y; if (y > gh1) gh1 = y; if (z < gl2) gl2 = z; if (z > gh2) gh2 = z;
-        }
-        for (const o of news) {
-          if (gh0 < o.lo[0] || gl0 > o.hi[0] || gh1 < o.lo[1] || gl1 > o.hi[1] || gh2 < o.lo[2] || gl2 > o.hi[2]) continue;
-          if (o.ids.includes(g0) || o.ids.includes(g1) || o.ids.includes(g2)) continue;   // Fächer-Nachbar
-          if (trisIntersect(o.Tp, [pt(g0), pt(g1), pt(g2)])) return true;
-        }
-        return false;
-      };
       for (let i = c0[0]; i <= c1[0]; i++) for (let j = c0[1]; j <= c1[1]; j++) for (let k = c0[2]; k <= c1[2]; k++) {
         const l = grid.get(ckey(i, j, k));
         if (l) for (const g of l) if (visit(g)) return true;
       }
     }
-    for (const g of oversize) {
-      if (!alive[g] || stamp[g] === stampGen) continue;
-      const gi = [tri[g * 3], tri[g * 3 + 1], tri[g * 3 + 2]];
-      for (const o of news) if (!gi.some((x) => o.ids.includes(x)) && trisIntersect(o.Tp, gi.map(pt))) return true;
-    }
+    // große Dreiecke: gleicher Box-Vortest wie im Raster (visit), jedes nur einmal
+    for (const g of oversize) if (visit(g)) return true;
     return false;
   };
 
@@ -509,7 +506,7 @@ export function cleanMesh(mesh, opts = {}) {
     if (!ts0 || ts0.length !== 2) return moves;
     for (const first of ts0.slice()) {
       let from = a, to = b, only = first;
-      while (moves.length < 64) {
+      for (;;) {
         const ts = edgeTris.get(ek(from, to));
         if (!ts || ts.length !== 2) break;
         let res = null;
@@ -528,6 +525,7 @@ export function cleanMesh(mesh, opts = {}) {
           if (sharp.has(ek(from, to)) && sharp.has(ek(res.from, res.to))) moves.blocked = true;
           break;
         }
+        if (moves.length >= 64) { moves.capped = true; break; }   // zu lang: lieber keine (halbe) Spalte
         moves.push([res.from, res.to]);
         seen.add(res.from); seen.add(res.to);
         from = res.from; to = res.to;
@@ -594,7 +592,7 @@ export function cleanMesh(mesh, opts = {}) {
         // koplanare Vierecke kein Zeichen einer Mantellinie — dort bleibt es beim Einzel-Kollaps
         // (Skoda-Haken: sonst +3 Flächen; Golden sphere_full wich ab).
         let col = (opts.columns !== false) ? column(from, to) : null;
-        if (col && col.length > 1 && !col.every(([p, q]) => sharp.has(ek(p, q)))) col = null;
+        if (col && (col.capped || (col.length > 1 && !col.every(([p, q]) => sharp.has(ek(p, q)))))) col = null;
         // Spalte an einen gröberen Ring gebunden (Partner keine Mikro-Kante): Kanten ab τ/2 bleiben,
         // damit die Viereck-Bänder (Fase/Wand) Mantellinien behalten; kürzere fallen immer
         if (col && col.blocked && l >= tau / 2) continue;
