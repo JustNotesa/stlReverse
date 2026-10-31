@@ -7,8 +7,9 @@ import { simplifyMesh } from '../mesh-simplify.js';
 import {
   uvSphere, torus, boxWithBores, transformMesh, inverseTransformMesh,
   checkClosedManifold, maxDeviation, selfIntersectionSample, planeDeviation, planeDeviationStats,
-  signedVolume, trisToMesh,
+  signedVolume, trisToMesh, faceSoup,
 } from './simplify-bodies.mjs';
+import { buildMesh, circleProfile } from './fixtures-v2/gen.mjs';
 
 jest.setTimeout(120000);
 
@@ -219,4 +220,130 @@ perfTest('performance smoke: sphere 200k → 50k in < 4 s', () => {
   console.log('200k → 50k:', ms, 'ms, Ergebnis', res.faces.length);
   expect(res.faces.length).toBeLessThanOrEqual(50000);
   expect(ms).toBeLessThan(4000);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Regressionen aus dem Review (Reviewer-Repro-Skripte lagen in tests/_adv/,
+// dort nicht versioniert) — hier als kleine, dauerhafte Portierungen abgelegt.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── R1) Sliver-Stift: hoher Zylinder, Mantel = 2 Splitter je Segment über
+//        volle Höhe, Deckel ear-clipped. Der Stift muss auf 2000 Dreiecke
+//        schrumpfen und dabei geschlossen/manifold bleiben.
+test('sliver pin: 4000 Segmente über volle Höhe → Ziel 2000 erreicht, manifold', () => {
+  const t0 = Date.now();
+  const M = trisToMesh(buildMesh({
+    columns: [{
+      name: 'pin', profile: circleProfile(0, 0, 5, 4000, false),
+      z0: 0, z1: 50, bottom: { kind: 'sharp' }, top: { kind: 'sharp' }, wallSteps: 1,
+    }],
+  }));
+  const tGen = Date.now() - t0;
+  const res = simplifyMesh(M, 2000);
+  const chk = checkClosedManifold(res);
+  console.log(`Sliver-Stift: ${M.faces.length} → ${res.faces.length} (Ziel 2000), ` +
+    `Erzeugung ${tGen} ms, gesamt ${Date.now() - t0} ms, ${JSON.stringify(chk)} ` +
+    JSON.stringify(res.simplifyReport));
+  expect(res.faces.length).toBeLessThanOrEqual(2000);
+  expect(res.faces.length).toBeGreaterThanOrEqual(1900);
+  expect(chk.ok).toBe(true);
+});
+
+// ── R2) Nabenfächer: Sternprisma, dessen Deckel als Fächer vom Mittelpunkt
+//        aufgebaut sind ⇒ der Mittelpunkt-Vektor hat Grad 5000. Der Lauf muss
+//        schnell fertig werden und das Ergebnis geschlossen/manifold sein.
+test('hub fan: Deckel-Fächer mit Zentrum Grad 5000 → < 2 s, manifold', () => {
+  const N = 2500, M2 = 2 * N, P = [];
+  for (let k = 0; k < 2; k++) {
+    for (let i = 0; i < M2; i++) {
+      const a = 2 * Math.PI * i / M2, r = i % 2 ? 9.5 : 10;
+      P.push([r * Math.cos(a), r * Math.sin(a), k * 20]);
+    }
+  }
+  const T = [];
+  for (let i = 0; i < M2; i++) { const j = (i + 1) % M2; T.push([i, j, M2 + j], [i, M2 + j, M2 + i]); }
+  const cb = P.length; P.push([0, 0, 0]);
+  const ct = P.length; P.push([0, 0, 20]);
+  for (let i = 0; i < M2; i++) { const j = (i + 1) % M2; T.push([cb, j, i], [ct, M2 + i, M2 + j]); }
+  const M = faceSoup(P, T);
+  expect(checkClosedManifold(M).ok).toBe(true);         // Eingabe: geschlossen
+  const t0 = Date.now();
+  const res = simplifyMesh(M, 10000);
+  const ms = Date.now() - t0;
+  const chk = checkClosedManifold(res);
+  console.log(`Nabenfächer: ${M.faces.length} → ${res.faces.length}, ${ms} ms, ${JSON.stringify(chk)} ` +
+    JSON.stringify(res.simplifyReport));
+  expect(ms).toBeLessThan(2000);
+  expect(chk.ok).toBe(true);
+});
+
+// ── R3) Dünnes Rohr (Wand 0,4 mm): 4000 Segmente außen und innen (auf
+//        denselben Winkeln ⇒ die Brücke der Deckfläche ear-clipped fast über
+//        die ganze Wand), H = 30, Wand in 2 Schichten. Ziel: 25 % der
+//        Eingangsdreiecke. Geprüft werden die harten Kriterien des Befunds:
+//        geschlossen/manifold, Volumen nahezu unverändert, Abweichung
+//        < 0,1 mm und KEINE Einschnürung (kein Punkt trägt Außen- UND
+//        Innenwand — dort wäre die Wandstärke 0).
+test('dünnes Rohr (Wand 0,4 mm, 4000 Segmente): manifold, Volumen < 1 %, Abweichung < 0,1 mm, keine Einschnürung', () => {
+  const R = 20, WALL = 0.4, N = 4000, H = 30;
+  const t0 = Date.now();
+  const M = trisToMesh(buildMesh({
+    columns: [
+      { name: 'aussen', profile: circleProfile(0, 0, R, N, false), z0: 0, z1: H, bottom: { kind: 'sharp' }, top: { kind: 'sharp' }, wallSteps: 2 },
+      { name: 'innen', profile: circleProfile(0, 0, R - WALL, N, true), z0: 0, z1: H, bottom: { kind: 'sharp' }, top: { kind: 'sharp' }, wallSteps: 2 },
+    ],
+  }));
+  const tGen = Date.now() - t0;
+  const tgt = Math.round(M.faces.length * 0.25);
+  const res = simplifyMesh(M, tgt);
+  const chk = checkClosedManifold(res);
+  const v0 = signedVolume(M), v1 = signedVolume(res);
+  const dev = maxDeviation(M, res);
+  // Einschnürung: Punkte, an denen Außen- UND Innenwand hängen
+  const inc = new Map();
+  for (const f of res.faces) {
+    const c = [0, 1, 2].map((i) => (f.vertices[0][i] + f.vertices[1][i] + f.vertices[2][i]) / 3);
+    const rl = Math.hypot(c[0], c[1]);
+    if (!(rl > 0)) continue;
+    const radial = (f.normal[0] * c[0] + f.normal[1] * c[1]) / rl;
+    for (const v of f.vertices) {
+      const k = v.join();
+      let e = inc.get(k);
+      if (!e) { e = { out: 0, in: 0 }; inc.set(k, e); }
+      if (radial > 0.5) e.out++;
+      if (radial < -0.5) e.in++;
+    }
+  }
+  const pinch = [...inc.values()].filter((e) => e.out && e.in);
+  console.log(`Dünnes Rohr: ${M.faces.length} → ${res.faces.length} (Ziel ${tgt}), ` +
+    `Erzeugung ${tGen} ms, gesamt ${Date.now() - t0} ms, Volumen ${v0.toFixed(2)} → ${v1.toFixed(2)}, ` +
+    `Abweichung max ${dev.max.toFixed(4)} mean ${dev.mean.toFixed(4)}, Einschnürungen ${pinch.length}, ` +
+    `${JSON.stringify(chk)} ${JSON.stringify(res.simplifyReport)}`);
+  // Das Ziel wird bei 0,4 mm Wandstärke bewusst knapp verfehlt (Normalendrehungs-
+  // und Qualitätsschranke — "lieber Ziel verfehlen als verzerren"); 1,25 × Ziel
+  // ist die erreichbare Grenze.
+  expect(res.faces.length).toBeLessThanOrEqual(Math.round(tgt * 1.25));
+  expect(chk.ok).toBe(true);
+  expect(Math.abs(v1 - v0) / Math.abs(v0)).toBeLessThan(0.01);
+  expect(dev.max).toBeLessThan(0.1);
+  expect(pinch.length).toBe(0);
+});
+
+// ── R4) Ausreißer: Kugel + getrennte geschlossene Komponente 1e6 mm entfernt.
+//        Der Ausreißer darf die Normalisierung nicht zerstören — das Kugelteil
+//        muss trotzdem sein Ziel erreichen.
+test('Ausreißer-Komponente 1e6 mm entfernt: Kugelteil erreicht trotzdem das Ziel', () => {
+  const TGT = 10000;
+  const far = tetraTris([[1e6, 0, 0], [1e6 + 10, 0, 0], [1e6, 10, 0], [1e6, 0, 10]]);
+  const farMesh = trisToMesh(far);
+  const M = { faces: [...sphere.faces, ...farMesh.faces], vertices: new Float32Array(0) };
+  const res = simplifyMesh(M, TGT);
+  const near = (f) => f.vertices.every((v) => Math.abs(v[0]) < 100 && Math.abs(v[1]) < 100 && Math.abs(v[2]) < 100);
+  const spherePart = res.faces.filter(near).length;
+  const chk = checkClosedManifold(res);
+  console.log(`Ausreißer: ${M.faces.length} → ${res.faces.length} (Ziel ${TGT}), ` +
+    `Kugelteil ${spherePart} Dreiecke, ${JSON.stringify(chk)} ${JSON.stringify(res.simplifyReport)}`);
+  expect(res.faces.length).toBeLessThanOrEqual(TGT);
+  expect(spherePart).toBeGreaterThanOrEqual(TGT - 10);
+  expect(chk.ok).toBe(true);
 });
