@@ -1,17 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="a1t">
-  <title id="a1t">Logo – halb facettierter, halb glatter Würfel</title>
-  <rect width="128" height="128" rx="26" fill="#14213D"/>
-  <polygon points="64,19 103,41 64,63" fill="#FFFFFF"/>
-  <polygon points="64,63 103,41 103,87 64,109" fill="#23B5D3"/>
-  <polygon points="69,71 97,54 97,64 69,81" fill="#FFFFFF"/>
-  <g fill="#F5A524" stroke="#14213D" stroke-width="4" stroke-linejoin="round">
-    <polygon points="64,19 44.5,30 64,41"/>
-    <polygon points="44.5,30 44.5,52 64,41"/>
-    <polygon points="25,41 44.5,52 44.5,30"/>
-    <polygon points="64,41 44.5,52 64,63"/>
-    <polygon points="25,41 64,63 44.5,75"/>
-    <polygon points="64,63 64,109 44.5,75"/>
-    <polygon points="64,109 25,87 44.5,75"/>
-    <polygon points="25,87 25,41 44.5,75"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#2c64d8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.6 3.5 7.2v9.6L12 21.4l8.5-4.6V7.2z"/>
+  <path d="M3.5 7.2 12 11.8l8.5-4.6"/>
+  <path d="M12 11.8v9.6"/>
 </svg>
