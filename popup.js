@@ -3,7 +3,7 @@ import { buildOutlinesDxf, buildOutlinesStep, buildVolumeStepBrepV2, buildVolume
 
 import { initPipelineViewers, updateStlViewer, updateFeaturesViewer, updateBrepViewer } from './viewers.js?v=33';
 import { initStepOcctViewer, loadStepIntoViewer } from './step-viewer.js?v=23';
-import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=7';
+import { buildVerdict, renderVerdict, clearVerdict, renderVerdictPending, renderVerdictError } from './verdict.js?v=8';
 import { initTabs, initViewToggle, initFullscreen, setCompareView, initDocumentDrop, nextPaint } from './layout.js?v=5';
 import { applyFeatureColorVars, buildFeatureLegend } from './feature-colors.js?v=1';
 import {
@@ -100,7 +100,7 @@ const analysisWorker = _createAnalysisWorker();
 function _createAnalysisWorker() {
   const workerUrl = extensionApi?.runtime?.getURL
     ? extensionApi.runtime.getURL('analysis-worker.js')
-    : 'analysis-worker.js?v=24';
+    : 'analysis-worker.js?v=25';
   const worker = new Worker(workerUrl, { type: 'module' });
 
   worker.onmessage = (event) => {
