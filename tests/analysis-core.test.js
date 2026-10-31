@@ -45,7 +45,6 @@ const __dirname = dirname(__filename);
 // Großzügig: die Maschine ist oft stark ausgelastet (parallele Agents).
 jest.setTimeout(120000);
 
-const MAX_FACES = 50000; // wie analysis-worker.js
 
 // Hilfsfunktion: STL-Datei laden und als ArrayBuffer zurückgeben
 const loadStl = (name) => {
@@ -58,7 +57,8 @@ const recognitionCache = new Map();
 function runRecognition(file) {
   if (recognitionCache.has(file)) return recognitionCache.get(file);
   let mesh = cleanMesh(parseStl(loadStl(file), () => {})).mesh;   // Netz-Bereinigung wie im Worker
-  if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   let groups = buildNormalGroups(mesh);
   groups = unifyCoplanarGroups(groups).unified
     .sort((a, b) => b.vertices.length - a.vertices.length);

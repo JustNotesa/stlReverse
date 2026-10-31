@@ -1,4 +1,4 @@
-import { parseStl, analyseMesh, simplifyMesh } from './analysis-core.js?v=4';
+import { parseStl, analyseMesh, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from './analysis-core.js?v=4';
 import { unifyCoplanarGroups } from './face-unification.js?v=2';
 import { buildNormalGroups } from './region-growing.js?v=1';
 import { recognizePrimitives } from './primitive-recognition.js?v=16';
@@ -18,10 +18,6 @@ const sanitizeRatio = (value) => {
   return Math.max(0, Math.min(0.98, value));
 };
 
-// Netz-Vereinfachung (mesh-simplify.js): erst AB dieser Dreieckszahl, dann auf das Ziel. Begründung und
-// Messwerte (Bremsgriff, synthetische 200k/500k-Körper) in TODO.md, Eintrag „Saubere Netz-Vereinfachung“.
-const SIMPLIFY_ABOVE = 100000;
-const SIMPLIFY_TARGET = 100000;
 let cachedMesh = null;
 let cachedFileName = null;
 let cachedClean = null;   // Bericht der Netz-Bereinigung zum gecachten Netz

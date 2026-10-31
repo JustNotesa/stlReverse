@@ -9,7 +9,7 @@
 // (Bug-Historie: sphere_full lief 101 s statt 62 ms, der Worker bricht nach 60 s ab).
 //
 // Läuft die ECHTE Worker-Pipeline (gleiche Module, gleiche Reihenfolge wie analysis-worker.js):
-//   parseStl → cleanMesh → simplifyMesh (>50k) → buildNormalGroups → unifyCoplanarGroups →
+//   parseStl → cleanMesh → simplifyMesh (> SIMPLIFY_ABOVE) → buildNormalGroups → unifyCoplanarGroups →
 //   recognizePrimitives → detectTubes → buildVolumeStepBrepV2 (Defeaturing-Toggle AN und AUS)
 //
 // Ausführen:   npm run test:golden            (Exit 0 = alles wie erwartet, 1 = Abweichung)
@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { createRequire } from 'module';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
@@ -32,7 +32,6 @@ const { parseStep } = require('./occt-check.cjs');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLES = join(__dirname, '..', 'samples');
 const GOLDEN = join(__dirname, 'golden.json');
-const MAX_FACES = 50000;            // wie analysis-worker.js
 const RECOG_LIMIT_MS = 10000;       // pro Sample — der Worker bricht nach 60 s ab (Browser ~2× langsamer)
 const STRESS_LIMIT_MS = 20000;      // 50k-Stressnetze
 const UPDATE = process.argv.includes('--update');
@@ -43,7 +42,8 @@ const quiet = async (fn) => { console.log = () => {}; try { return await fn(); }
 
 function pipeline(mesh) {
   mesh = cleanMesh(mesh).mesh;   // Netz-Bereinigung wie im Worker
-  if (mesh.faces.length > MAX_FACES) mesh = simplifyMesh(mesh, MAX_FACES, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified
     .sort((a, b) => b.vertices.length - a.vertices.length);
   const t0 = performance.now();

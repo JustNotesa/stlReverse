@@ -30,7 +30,7 @@ import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join, basename } from 'path';
 import { createRequire } from 'module';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { buildNormalGroups } from '../region-growing.js';
 import { cleanMesh } from '../mesh-clean.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
@@ -96,7 +96,8 @@ const occtVolume = (step) => {
 };
 const groupsOfStl = (buf) => {
   let mesh = cleanMesh(parseStl(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), () => {})).mesh;
-  if (mesh.faces.length > 50000) mesh = simplifyMesh(mesh, 50000, () => {});
+  if (mesh.faces.length > SIMPLIFY_ABOVE) mesh = simplifyMesh(mesh, SIMPLIFY_TARGET,  // wie analysis-worker.js
+    () => {});
   const groups = unifyCoplanarGroups(buildNormalGroups(mesh)).unified.sort((a, b) => b.vertices.length - a.vertices.length);
   quiet(() => recognizePrimitives(groups));
   quiet(() => detectTubes(groups));

@@ -1,10 +1,9 @@
 import { readFileSync } from 'fs';
-import { parseStl, simplifyMesh } from '../analysis-core.js';
+import { parseStl, simplifyMesh, SIMPLIFY_ABOVE, SIMPLIFY_TARGET } from '../analysis-core.js';
 import { unifyCoplanarGroups } from '../face-unification.js';
 import { recognizePrimitives } from '../primitive-recognition.js';
 import { buildVolumeStepBrepV2 } from '../exporters.js';
 
-const MAX_FACES = 50000;
 function buildNormalGroups(mesh) {
   const faces = mesh.faces; const n = faces.length; if (!n) return [];
   const PLANAR_COS = Math.cos(2*Math.PI/180); const PLANAR_OFFSET_MM = 0.05;
@@ -22,7 +21,7 @@ function buildNormalGroups(mesh) {
 }
 function run(path){
   const buf=readFileSync(path); const ab=buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength);
-  let mesh=parseStl(ab,()=>{}); if(mesh.faces.length>MAX_FACES)mesh=simplifyMesh(mesh,MAX_FACES,()=>{});
+  let mesh=parseStl(ab,()=>{}); if(mesh.faces.length>SIMPLIFY_ABOVE)mesh=simplifyMesh(mesh,SIMPLIFY_TARGET,()=>{});
   let groups=buildNormalGroups(mesh);
   const {unified}=unifyCoplanarGroups(groups); groups=unified.sort((a,b)=>b.vertices.length-a.vertices.length);
   const analysis={normalGroups:groups};
