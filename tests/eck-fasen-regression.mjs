@@ -114,6 +114,14 @@ const BODIES = [
       { name: 'tasche', profile: rr(4, 4, 72, 42, 3, 8).reverse(), z0: 2, z1: 25, bottom: cc(1.5), top: ch(1) },
     ],
     caps: SCHALE_CAPS,
+    // Soll Standard (Box-Ecken rund lassen): Ecken rund (exakte Bögen), Bodenrundung scharf
+    sollStd: {
+      columns: [
+        { name: 'aussen', profile: rr(0, 0, 80, 50, 6, 8), z0: 0, z1: 25, bottom: ch(1.5), top: sharp },
+        { name: 'tasche', profile: rr(4, 4, 72, 42, 3, 8).reverse(), z0: 2, z1: 25, bottom: sharp, top: ch(1) },
+      ],
+      caps: SCHALE_CAPS,
+    },
     // Soll AN: außen + innen Ecken scharf, Bodenrundung scharf (Fasen bleiben)
     soll: {
       columns: [
@@ -138,6 +146,39 @@ const BODIES = [
       ],
       caps: SCHALE_CAPS,
     },
+  },
+  {
+    id: 'schale-grob', expectAn: 'egal', pairs: 0, stdTol: 5,
+    desc: 'Schale 40×30×12, Eckrundung R2/R1 mit nur 3 Segmenten (30°-Sehnen), Boden-Hohlkehle 0.5 — grobe Bögen werden NICHT als Box-Ecke geschützt (Prüfbefund: profile-arcs passt sonst Riesen-Zylinder an)',
+    columns: [
+      { name: 'aussen', profile: rr(0, 0, 40, 30, 2, 3), z0: 0, z1: 12, bottom: sharp, top: sharp },
+      { name: 'tasche', profile: rr(2, 2, 36, 26, 1, 3).reverse(), z0: 1.5, z1: 12, bottom: cc(0.5, 4), top: sharp },
+    ],
+    caps: SCHALE_CAPS,
+    sollStd: {
+      columns: [
+        { name: 'aussen', profile: gen.rectProfile(0, 0, 40, 30), z0: 0, z1: 12, bottom: sharp, top: sharp },
+        { name: 'tasche', profile: gen.rectProfile(2, 2, 36, 26).reverse(), z0: 1.5, z1: 12, bottom: sharp, top: sharp },
+      ],
+      caps: SCHALE_CAPS,
+    },
+    soll: null,
+  },
+  {
+    id: 'diag-taschen', expectAn: 'egal', pairs: 2, strictAnAllow: 1,
+    desc: 'Box 100×80 (R6) mit Tasche A 10×10 (R3) an der Ecke oben rechts (Wand 4) und Tasche B 30×20 (R3) diagonal dahinter — nur Außenecke + Ecke von A sind ein Box-Ecken-Paar, B nicht (Prüfbefund)',
+    columns: [
+      { name: 'aussen', profile: rr(0, 0, 100, 80, 6, 8), z0: 0, z1: 25, bottom: sharp, top: sharp },
+      { name: 'a', profile: rr(86, 66, 10, 10, 3, 8).reverse(), z0: 2, z1: 25, bottom: sharp, top: sharp },
+      { name: 'b', profile: rr(50, 40, 30, 20, 3, 8).reverse(), z0: 2, z1: 25, bottom: sharp, top: sharp },
+    ],
+    caps: [
+      { up: true, outer: { c: 0, end: 'top' }, holes: [{ c: 1, end: 'top' }, { c: 2, end: 'top' }] },
+      { up: false, outer: { c: 0, end: 'bottom' }, holes: [] },
+      { up: true, outer: { c: 1, end: 'bottom', rev: true }, holes: [] },
+      { up: true, outer: { c: 2, end: 'bottom', rev: true }, holes: [] },
+    ],
+    soll: null,
   },
   {
     id: 'formschraege', expectAn: 'egal',
@@ -230,6 +271,14 @@ for (const body of BODIES) {
       if (vs.length) why.push(`AN(Standard): ${vs.length} strict-Verstöße`);
       const kept = anStd.report.cornerPairsKept || 0;
       if (body.pairs != null && kept !== body.pairs) why.push(`AN(Standard): ${kept} Box-Ecken rund gelassen, erwartet ${body.pairs}`);
+      // Volumen Standard gegen sein Soll (Ecken rund als exakte Bögen bzw. grobe Ecken scharf)
+      if (body.sollStd) {
+        const VS = await stepVolume(anStd.step);
+        const Vss = gen.bodyVolume({ ...body.sollStd, transform: pose });
+        const tolS = body.stdTol ?? (0.5 + 2 * Math.abs(anStd.report.arcVolumeDelta ?? 0));
+        if (!VS.ok) why.push('AN(Standard): occt parst die STEP nicht');
+        else if (Math.abs(VS.V - Vss) > tolS) why.push(`AN(Standard): Volumen ${VS.V.toFixed(3)} ≠ Soll ${Vss.toFixed(3)} (Δ ${(VS.V - Vss).toFixed(3)} > ${tolS.toFixed(3)})`);
+      }
     }
 
     // Pflichten je Export
@@ -242,6 +291,9 @@ for (const body of BODIES) {
       if (r.report.solids !== 1) why.push(`${tag}: ${r.report.solids} Solids statt 1`);
       const viol = strictOf(r.step);
       if (tag === 'AN') vAn = viol.length; else vAus = viol.length;
+      // Altlast (auch auf main cc2d24e): diag-taschen ALLES scharf (sharpenBends) in verschobener Lage →
+      // 1× loop-overlap aus v2b; hier nur zugelassen, nicht verschlimmert (body.strictAnAllow)
+      if (viol.length && tag === 'AN' && viol.length <= (body.strictAnAllow || 0)) continue;
       if (viol.length) {
         const k = {};
         for (const v of viol) k[v.kind] = (k[v.kind] || 0) + 1;

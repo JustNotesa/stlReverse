@@ -225,7 +225,7 @@ describe('verdict.js', () => {
 
     test('Defeaturing-Schalter wird durchgereicht', () => {
       expect(buildVerdict(reportA, null, { defeature: false }).defeature).toBe(false);
-      expect(buildVerdict(reportA, null).defeature).toBe(true);
+      expect(buildVerdict(reportA, null).defeature).toBe(false);   // Standard AUS (wie die UI)
     });
   });
 

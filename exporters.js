@@ -2267,7 +2267,7 @@ export function buildVolumeStepBrepV2(analysis) {
         return true;
       };
       // Box-Ecken gleicher Wandstärke (s. findCornerPairAxes) bleiben wie Biegungen rund
-      const pairAxesV1 = SHARPEN_BENDS ? null : findCornerPairAxes();
+      const pairAxesV1 = pairAxesRun;
       for (const entry of filletById.values()) {
         // Biegung eines Blechprofils (Innen-/Außenbogen koaxial): bleibt per Default rund
         // (Schalter „Biegungen mit gleicher Wandstärke rund lassen“); nur mit SHARPEN_BENDS wird sie geschärft.
@@ -2421,7 +2421,7 @@ export function buildVolumeStepBrepV2(analysis) {
     // gesperrte Rundungen (Rückfall je Merkmal) und Biegungen von Blechprofilen bleiben stehen
     // Box-Ecken gleicher Wandstärke (s. findCornerPairAxes): ein Band, das NUR aus Facetten eines solchen
     // Eck-Bogens besteht (senkrechte Eckrundung als offenes Band einer Wand), bleibt rund
-    const pairAxesV2 = SHARPEN_BENDS ? null : findCornerPairAxes();
+    const pairAxesV2 = pairAxesRun;
     const onPairAxis = (fd) => {
       const n = _norm3(fd.normal), c = fd.centroid;
       if (!c) return false;
@@ -2430,7 +2430,7 @@ export function buildVolumeStepBrepV2(analysis) {
         // Facette eines Drehkörpers um die Achse: die Normale durch den Schwerpunkt trifft die Achse
         const w = _sub3(c, a.c), cr = _cross3(a.d, n), l = Math.hypot(cr[0], cr[1], cr[2]);
         if (!(l > 1e-9)) continue;
-        if (Math.abs(_dot3(w, cr)) / l <= Math.max(0.05, 0.03 * a.r)) return true;
+        if (Math.abs(_dot3(w, cr)) / l <= (a.tol || Math.max(0.05, 0.03 * a.r))) return true;
       }
       return false;
     };
@@ -3336,6 +3336,9 @@ export function buildVolumeStepBrepV2(analysis) {
   // jeden Bogenlauf, dessen Kreismitte auf so einer Achse liegt, unverändert (die Bogen-Pfade machen daraus
   // echte Zylinder-/Kegelstücke). Koaxiale Paare (Blech) erfüllen die Regel genauso (t = r_außen − r_innen).
   let cornerPairsKept = 0;
+  // Achsen der Box-Ecken-Paare EINMAL je Lauf (vor v1) bestimmt und für v1/v2/v2b/v2d festgehalten — neu
+  // gerechnet auf schon veränderten Flächen verschwände ein Paar, sobald eine Ecke geschärft ist (Kettenreaktion)
+  let pairAxesRun = null;
   const cornerPairKeys = new Set();
   // Kåsa-Kreis-Fit in 2D → { c: [x, y], r, dev } | null
   const fitCircle2 = (pts) => {
@@ -3386,6 +3389,17 @@ export function buildVolumeStepBrepV2(analysis) {
     }
     return out;
   };
+  // Strecke a–b (2D) schneidet eine Kante der Konturen echt (Endpunkte selbst liegen auf Konturen und zählen nicht)?
+  const crossesLoops = (a, b, loops) => {
+    const ori = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    const L2 = Math.hypot(b[0] - a[0], b[1] - a[1]), eps = 1e-9 * Math.max(1, L2 * L2);
+    for (const q of loops) for (let i = 0; i < q.length; i++) {
+      const p1 = q[i], p2 = q[(i + 1) % q.length];
+      const d1 = ori(p1, p2, a), d2 = ori(p1, p2, b), d3 = ori(a, b, p1), d4 = ori(a, b, p2);
+      if (((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps)) && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))) return true;
+    }
+    return false;
+  };
   const runPts = (q, j, m) => { const pts = []; for (let i = j; ; i = (i + 1) % q.length) { pts.push(q[i]); if (i === m) break; } return pts; };
   const findCornerPairAxes = () => {
     const axes = [];
@@ -3393,18 +3407,27 @@ export function buildVolumeStepBrepV2(analysis) {
       const d = _norm3(fd.normal);
       if (!(Math.hypot(d[0], d[1], d[2]) > 0.5)) continue;
       const u = computeRefDir(d), v = _norm3(_cross3(d, u));
-      const arcs = [];
+      const arcs = [], loops2 = [];
       for (const L of [fd.outer, ...fd.inner]) {
         if (L.circleRim || L.length < 6) continue;
         const q = L.map((p) => [_dot3(p, u), _dot3(p, v)]);
+        loops2.push(q);
         let h = 0; for (const p of L) h += _dot3(d, p); h /= L.length;
         for (const { j, m, sg } of arcRunsOf(q)) {
           const pts = runPts(q, j, m);
-          if (pts.length < 3) continue;
+          // grob facettierte Bögen (< 4 Sehnen oder Sehnenwinkel > 22°) NICHT schützen: die Bogen-Pfade
+          // (profile-arcs.js) passen daran keinen sauberen Kreis an (Prüfbefund: Riesen-Zylinder, +10 % Volumen)
+          if (pts.length < 5) continue;
+          let maxTurn = 0;
+          for (let i = 1; i + 1 < pts.length; i++) {
+            const a0 = [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]], b0 = [pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]];
+            maxTurn = Math.max(maxTurn, Math.abs(Math.atan2(a0[0] * b0[1] - a0[1] * b0[0], a0[0] * b0[0] + a0[1] * b0[1])) * 180 / Math.PI);
+          }
+          if (maxTurn > 22) continue;
           const f = fitCircle2(pts);
           if (!f || !(f.r > 0) || f.dev > Math.max(0.01, 0.02 * f.r)) continue;
           const nrm2 = (p) => { const x = p[0] - f.c[0], y = p[1] - f.c[1], l = Math.hypot(x, y); return [x / l, y / l]; };
-          arcs.push({ c: f.c, r: f.r, sg, s: nrm2(q[j]), e: nrm2(q[m]), h });
+          arcs.push({ c: f.c, r: f.r, dev: f.dev, sg, s: nrm2(q[j]), e: nrm2(q[m]), h, mid: pts[pts.length >> 1] });
         }
       }
       const ang = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1]))) * 180 / Math.PI;
@@ -3417,7 +3440,12 @@ export function buildVolumeStepBrepV2(analysis) {
         const tA = leg(A.s), tB = leg(A.e);
         if (tA < 0.1 || tB < 0.1 || Math.abs(tA - tB) > Math.max(0.02, 0.02 * Math.max(tA, tB))) continue;
         if (Math.max(tA, tB) > 3 * Math.max(A.r, B.r) + 10) continue;
-        for (const X of [A, B]) axes.push({ d, c: [u[0] * X.c[0] + v[0] * X.c[1] + d[0] * X.h, u[1] * X.c[0] + v[1] * X.c[1] + d[1] * X.h, u[2] * X.c[0] + v[2] * X.c[1] + d[2] * X.h], r: X.r });
+        // Die beiden Bögen müssen sich DIREKT gegenüberliegen: die Strecke zwischen ihren Mitten schneidet
+        // keine Kante der Fläche (sonst liegt z. B. eine andere Tasche dazwischen — Prüfbefund „diag-taschen“)
+        if (crossesLoops(A.mid, B.mid, loops2)) continue;
+        // Mitten-Toleranz: an die Fit-Abweichung gekoppelt (gefaste Ränder sind Gehrungs-Polygone, kein exakter Kreis)
+        const tol = Math.max(0.05, 0.03 * Math.max(A.r, B.r), 3 * Math.max(A.dev, B.dev), 0.05 * Math.max(tA, tB));
+        for (const X of [A, B]) axes.push({ d, c: [u[0] * X.c[0] + v[0] * X.c[1] + d[0] * X.h, u[1] * X.c[0] + v[1] * X.c[1] + d[1] * X.h, u[2] * X.c[0] + v[2] * X.c[1] + d[2] * X.h], r: X.r, tol });
       }
     }
     return axes;
@@ -3427,7 +3455,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const a of axes) {
       if (Math.abs(_dot3(a.d, ax)) < 0.9999) continue;
       const w = _sub3(a.c, ap), al = _dot3(w, ax);
-      if (Math.hypot(w[0] - ax[0] * al, w[1] - ax[1] * al, w[2] - ax[2] * al) <= Math.max(0.05, 0.03 * a.r)) {
+      if (Math.hypot(w[0] - ax[0] * al, w[1] - ax[1] * al, w[2] - ax[2] * al) <= (a.tol || Math.max(0.05, 0.03 * a.r))) {
         const key = a.c.map((x) => x.toFixed(2)).join(',');
         if (!cornerPairKeys.has(key)) { cornerPairKeys.add(key); cornerPairsKept++; }
         return true;
@@ -3445,7 +3473,7 @@ export function buildVolumeStepBrepV2(analysis) {
     for (const a of axes) {
       if (Math.abs(_dot3(a.d, d)) < 0.9999) continue;
       const w = _sub3(c3, a.c), al = _dot3(w, a.d);
-      if (Math.hypot(w[0] - a.d[0] * al, w[1] - a.d[1] * al, w[2] - a.d[2] * al) <= Math.max(0.05, 0.03 * a.r)) {
+      if (Math.hypot(w[0] - a.d[0] * al, w[1] - a.d[1] * al, w[2] - a.d[2] * al) <= (a.tol || Math.max(0.05, 0.03 * a.r))) {
         const key = a.c.map((x) => x.toFixed(2)).join(',');
         if (!cornerPairKeys.has(key)) { cornerPairKeys.add(key); cornerPairsKept++; }
         return true;
@@ -3469,7 +3497,7 @@ export function buildVolumeStepBrepV2(analysis) {
     function findCorner() {
       const fds = faceDefs;
       const nrm = fds.map((fd) => _norm3(fd.normal));
-      const pairAxes = SHARPEN_BENDS ? null : findCornerPairAxes();
+      const pairAxes = pairAxesRun;
       const edgeOwners = new Map();
       fds.forEach((fd, fi) => {
         for (const L of [fd.outer, ...fd.inner]) {
@@ -3752,7 +3780,7 @@ export function buildVolumeStepBrepV2(analysis) {
     function findPlan() {
       const fds = faceDefs;
       const nrm = fds.map((fd) => _norm3(fd.normal));
-      const pairAxes = SHARPEN_BENDS ? null : findCornerPairAxes();
+      const pairAxes = pairAxesRun;
       // Kanten-Besitzer (edgeKeyFn → [fi]) wie in v2b und Punkt-Index (vtxKey → Set(fi)) über ALLE
       // Loops aller Flächen (circleRim-Loops zählen mit — ihre Kanten sind keine Kanten-Besitzer).
       const edgeOwners = new Map();
@@ -5507,6 +5535,7 @@ export function buildVolumeStepBrepV2(analysis) {
     // circleRim aus v2 herausgehalten; die vielen Kanal-Facetten müssen v1/v2/v2b nicht mehr prüfen.
     // (Kanäle mit verrundeter Mündung bleiben facettiert — matchTubeMouths findet dann keinen Rand.)
     if (withBores) planTubes();
+    pairAxesRun = SHARPEN_BENDS ? null : findCornerPairAxes();
     defeatureFillets();
     try {
       bandsDefeatured = defeatureBands();
