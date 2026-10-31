@@ -22,7 +22,7 @@ copy_app() {
 # fügt vor </body> einen kleinen Hinweis-Streifen ein (nur in der index.html der Webseite)
 add_bar() {
   local file="$1" html="$2"
-  local bar="<div style=\"position:fixed;right:12px;bottom:12px;z-index:9999;font:12px/1.4 system-ui,sans-serif;background:rgba(20,20,20,.82);color:#fff;padding:6px 10px;border-radius:6px\">$html</div>"
+  local bar="<div style=\"position:fixed;right:12px;bottom:12px;z-index:9999;font:13px/1.4 system-ui,sans-serif;background:#1f2937;color:#e5e7eb;padding:8px 12px;border-radius:999px;box-shadow:0 2px 10px rgba(0,0,0,.25)\">$html</div>"
   BAR="$bar" perl -0pi -e 's#</body>#$ENV{BAR}\n</body>#' "$file"
 }
 
@@ -34,12 +34,12 @@ trap 'rm -rf "$TMP"' EXIT
 git archive "$TAG" | tar -x -C "$TMP"
 copy_app "$TMP" "$OUT"
 cp "$OUT/popup.html" "$OUT/index.html"
-add_bar "$OUT/index.html" "Version ${TAG#v} · <a href=\"live/\" style=\"color:#9cf\">Live-Version (neuester Stand, ungetestet)</a>"
+add_bar "$OUT/index.html" "Version ${TAG#v} · <a href=\"live/\" style=\"color:#7dd3fc;font-weight:600\">👀 Neugierig? Hier geht's zur Vorschau →</a>"
 
 # Live (main = aktueller Checkout)
 copy_app . "$OUT/live"
 cp "$OUT/live/popup.html" "$OUT/live/index.html"
-add_bar "$OUT/live/index.html" "Live-Version $(git rev-parse --short HEAD) · kann Fehler enthalten · <a href=\"../\" style=\"color:#9cf\">zur Release-Version ${TAG#v}</a>"
+add_bar "$OUT/live/index.html" "🧪 Vorschau (Stand $(git rev-parse --short HEAD)) · frisch aus dem Labor, kann noch blubbern · <a href=\"../\" style=\"color:#7dd3fc;font-weight:600\">← zur stabilen Version ${TAG#v}</a>"
 
 touch "$OUT/.nojekyll"
 echo "Release $TAG → $OUT/, main $(git rev-parse --short HEAD) → $OUT/live/"
