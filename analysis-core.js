@@ -4,8 +4,8 @@ import { simplifyMesh } from './mesh-simplify.js?v=1';
 
 // Ab welcher Dreieckszahl der Worker vereinfacht und auf welches Ziel — eine Quelle für Worker und Tests.
 // Messwerte und Begründung: TODO.md, Eintrag „Saubere Netz-Vereinfachung“.
-const SIMPLIFY_ABOVE = 100000;
-const SIMPLIFY_TARGET = 100000;
+const SIMPLIFY_ABOVE = 50000;
+const SIMPLIFY_TARGET = 50000;
 
 function parseStl(buffer, progressCb) {
   if (!buffer?.byteLength) throw new Error('Leere Datei');

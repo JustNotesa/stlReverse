@@ -13,7 +13,7 @@ reparieren still, CST nicht). Gewollte Golden-Änderungen: `npm run test:golden 
 ## Aktueller Pipeline-Stand
 
 Was **tatsächlich funktioniert**:
-- STL-Parsing (ASCII + binär) + Mesh-Simplification (>50k Dreiecke); Normalen aus der Wicklung
+- STL-Parsing (ASCII + binär) + Mesh-Simplification (> 50k Dreiecke, QEM-Kantenkollaps mit Gültigkeitsprüfungen, wasserdicht — `mesh-simplify.js`); Normalen aus der Wicklung
 - Bounding-Box + 3 Orthoprojektionen (XY/YZ/ZX) mit konvexer Hülle
 - **normalGroups** — Region-Growing in `region-growing.js` (gemeinsam für Worker + Tests): Dreieck gehört
   zur Region bei ≤2° zur MITTLEREN Regions-Normale und ≤0.05 mm zur Regions-Ebene; Saat = größte Dreiecke zuerst
@@ -54,6 +54,11 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
 - [ ] **Panel 3 (B-Rep-Vorschau) auf unified Faces umstellen** — zeigt dann echte N-Gons statt konvexe Hüllen
 
 ## Mittlere Priorität
+
+- [ ] **Netz-Vereinfachung: Extrusions-Spalten erhalten** — fein tessellierte CAD-Körper > 50k verlieren durch
+  `mesh-simplify.js` die übereinanderstehenden Ring-Punkte (Quader 201k: unvereinfacht 3 893, nach 50k 14 068 Export-
+  Flächen). Spaltenweiser Kollaps wie in mesh-clean.js oder Zylinder-/Ebenen-Flächen vorab erkennen und schützen.
+  Dazu: globale Durchdringungsprüfung für Wände < 0,04 mm (s. Erledigt 2026-10-31 „Saubere Netz-Vereinfachung“).
 
 - [ ] **Analytischer STEP-Export — Rest-Fälle** (Voll-Durchgangsbohrungen sind erledigt, siehe unten). Offen:
   - **Bögen, Rest:** Fächer-Splitter an der Kabelhalter-Hakenspitze (asymmetrisches Netz), ~100 Gravur-Facetten,
@@ -197,6 +202,38 @@ Kreis-Kanten teilen.
 ---
 
 ## Erledigt
+
+- [x] **Saubere Netz-Vereinfachung (2026-10-31, `wt/simplify`)** — `mesh-simplify.js` ersetzt das naive QEM in
+  analysis-core.js (Kanten einmal sortiert, Mittelpunkt, keine Prüfungen → Bremsgriff-Export AUS nicht wasserdicht).
+  Eigene Umsetzung nach Garland/Heckbert 1997 (kein Fremdcode): indiziertes Netz, Heap mit Versionszähler und Neuberechnung
+  nach jedem Kollaps, Link-Bedingung + Gradprüfung (nie non-manifold), Kipp- und Qualitätsprüfung in beiden 1-Ringen
+  (Toleranz ×0,999), Rand-/non-manifold-/inkonsistente/Ausreißer-Punkte gesperrt, Merkmalskanten (> 30°) als Zusatz-
+  Quadriken, Ecken wandern nie, Kante zwischen zwei Merkmalslinien nur, wenn sie selbst Merkmalskante ist; Gradgrenze 24
+  (je Pass ×2) gegen quadratische Laufzeit an Fächer-Naben; lokale Durchdringungsprüfung im 2-Ring und Gegenwand-Prüfung
+  gegen die ORIGINAL-Gegenseite (statisches BVH); Fehlerschranke `maxErrorMm` 0,02 mm (= kleinste Detailgröße) — lieber
+  Ziel verfehlen als verzerren. Platzierung Standard „nur Endpunkte“: jeder Ausgabepunkt ist ein exakter Eingabepunkt
+  (Ebenen/Zylinder bleiben exakt; Quader 201k→100k: 6678 statt 23768 Export-Flächen gegenüber QEM-Optimum).
+  Prüfungen: `tests/simplify.test.js` (manifold, Ziel, Ebenen exakt eben, Ecken exakt, gedreht/verschoben, keine
+  Kippung/Durchdringung, offenes Netz, Fortschritt, Laufzeit), Körper/Prüfer `tests/simplify-bodies.mjs`, Messung
+  `node tests/simplify-bench.mjs [--big]`; adversariale Prüfung (Sub-Agent) mit Gegenbeispielen (Splitter-Stift,
+  Fächer-Naben, dünne Rohre, Rauschen, Ausreißer, Topologie-Sonderfälle) eingearbeitet.
+  **Messung (Node, Worker-Pipeline, Export AUS):** Bremsgriff 182 840 Dr. → 50k: vorher 34 938 Flächen NICHT wasserdicht,
+  jetzt 36 694 wasserdicht (AN auch), Vereinfachung ~1,2 s, Analyse ~5 s, Export ~2 s; → 100k: 67 865 Fl., Export ~7 s;
+  ohne Vereinfachung 100 889 Fl., Analyse 9 s, Export 12 s. Synthetisch 200k/500k (Kugel, Torus, Quader mit 4 Bohrungen,
+  gedreht): alle wasserdicht; 500k → 50k Analyse ≤ 12 s, Export ≤ 2,3 s.
+  **Schwelle bleibt „ab 50k auf 50k“** (gemeinsame Konstante `SIMPLIFY_ABOVE/SIMPLIFY_TARGET` in analysis-core.js für
+  Worker und Tests): der STEP-Export läuft im Haupt-Thread — bei 100k friert die Oberfläche beim Bremsgriff ~3× länger
+  ein (Export 7 s statt 2 s in Node, Browser ~2×), Freiform-Teile bekommen doppelt so viele Flächen; nur fein
+  tessellierte CAD-Körper profitieren von 100k (Quader 6,7k statt 14k Flächen), gedrehte nicht (79k statt 44k).
+  Worker-Zeitgrenze: Abbruch erst nach 45 s ohne Fortschritt, höchstens 5 min; danach wird der Worker neu erzeugt
+  (Detail-Lauf fällt dann auf volle Analyse zurück). Schritte-Liste: Einlesen/Bereinigen/Vereinfachen gehören zu
+  Schritt 1/2 (läuft nie rückwärts); nach Fehler bleiben erledigte Schritte abgehakt, der abgebrochene wird rot
+  (Screenshots `tests/screenshots/simplify-schritte-*.png`).
+  Offen: (1) Vereinfachung zerstört die Spalten-Struktur fein tessellierter Extrusionen → Bohrungs-/Bogen-Erkennung
+  schlechter (Quader 201k: unvereinfacht 3 893 Flächen, → 50k 14 068) — spaltenweiser Kollaps wie in mesh-clean.js
+  wäre der nächste Schritt; (2) Wände dünner als ~2 × 0,02 mm können sich bei starker Reduktion noch durchdringen
+  (Kugelschale 0,02 mm), keine globale Durchdringungsprüfung; (3) gedrehter Quader liefert schon unvereinfacht 52k statt
+  3,9k Flächen (Erkennung lageabhängig, unabhängig von der Vereinfachung); (4) verrauschte Scans erreichen das Ziel ggf. nicht.
 
 - [x] **Berührende Körper / non-manifold-Kanten (2026-10-31, `wt/nmsplit`, User-Teil Rändel-Box)** — Box und Deckel
   stoßen bei z = 70 Fläche an Fläche; die Kontaktfläche steht im Netz doppelt (oben +z, unten −z, z. T. anders
