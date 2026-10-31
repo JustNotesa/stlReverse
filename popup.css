@@ -144,7 +144,7 @@ body[data-state="inspect"] main.layout {
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; white-space: nowrap; }
-.brand img { width: 24px; height: 24px; flex: none; }
+.brand svg { width: 22px; height: 22px; flex: none; color: var(--accent); }
 
 .file-chip {
   display: flex; align-items: baseline; gap: 8px;
