@@ -14,11 +14,11 @@ import {
 } from './utils.js';
 import { matchTubeMouths } from './tube-sweep.js?v=4';
 // Profil-Bögen (profile-arcs.js): gestreifte Rundungen → echte Zylinder-/Kegel-Flächen mit Bogen-Kanten
-import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=5';
+import { findArcBands, validateArcBands, applyArcBands, buildArcPlans, expandArcLoop, insertRulings } from './profile-arcs.js?v=6';
 // Gravur (extrusion-bands.js): Schriftzüge (Wand-Streifen) → B-Spline-Kurven
-import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=1';
+import { findExtBands, mergeDets, splitDet } from './extrusion-bands.js?v=2';
 // Gravur (extrusion-plans.js): Pläne der Extrusionsbänder (SURFACE_OF_LINEAR_EXTRUSION) + Rand-Aufweitung
-import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=1';
+import { buildExtPlans, expandCurveLoop } from './extrusion-plans.js?v=2';
 // [freiform1] Einhängepunkt: Freiform-Pfad (fit-basierte Segmentierung → eigenes B-Rep → STEP)
 import { chooseFreeform } from './freeform-brep.js?v=1';
 
@@ -46,6 +46,11 @@ export const STEP_UNCERTAINTY_MM = '1.E-04';
 // 'wall' bleibt die Sperre — und der Bogen-Pfad ist ohnehin strenger (Fit 5e-3 mm ≪ Rand-Toleranz
 // 0.08…0.06·R), eine gedellte Wand kann seinen Fit nicht bestehen.
 const boreFailWhy = new WeakMap();
+
+// Cache-Schlüssel für den Vertex-Key (siehe buildVolumeStepBrepV2): das Cache-Eintragsobjekt
+// hängt als Symbol-Property direkt am Punkt-Array — Property-Zugriff ist rund 4x schneller
+// als WeakMap.get (die ~40 % der Exportzeit in toFixed gingen beim Schlüssel-Holen drauf).
+const VK = Symbol('vtxKey');
 
 export function buildOutlinesDxf(outlines) {
   const lines = [];
@@ -686,12 +691,17 @@ export function buildVolumeStepBrepV2(analysis) {
   // Schlüssel je Punkt-Array merken: Defeaturing/Verschmelzen fragen dieselben Punkte tausendfach
   // ab (eBike: ~40 % der Exportzeit in toFixed). Die Koordinaten werden mitgeprüft, damit ein
   // nachträglich verändertes Array nie einen veralteten Schlüssel liefert.
-  const vkCache = new WeakMap();
+  // Der Cache-Eintrag hängt als Symbol-Property (VK) am Punkt-Array statt in einer WeakMap —
+  // das Lesen ist deutlich billiger. vkOwner ist die Eigentümer-Kennung dieses Export-Calls:
+  // dieselben Punkt-Arrays werden über mehrere Export-Calls hinweg wiederverwendet (Defeature
+  // an/aus auf denselben Gruppen), ein Eintrag eines fremden Calls darf nie benutzt werden.
+  const vkOwner = {};                                    // Eigentümer-Kennung dieses Export-Calls
   const vtxKey = (v) => {
-    const c = vkCache.get(v);
-    if (c && c.x === v[0] && c.y === v[1] && c.z === v[2]) return c.k;
+    const c = v ? v[VK] : undefined;
+    if (c && c.o === vkOwner && c.x === v[0] && c.y === v[1] && c.z === v[2]) return c.k;
     const k = `${fixZero(v[0], VKEY_DP)},${fixZero(v[1], VKEY_DP)},${fixZero(v[2], VKEY_DP)}`;
-    if (v && typeof v === 'object') vkCache.set(v, { x: v[0], y: v[1], z: v[2], k });
+    // Nur erweiterbare Objekte tragen den Cache — eingefrorene Arrays werden nicht zwischengespeichert.
+    if (v && typeof v === 'object' && Object.isExtensible(v)) v[VK] = { o: vkOwner, x: v[0], y: v[1], z: v[2], k };
     return k;
   };
   const edgeKeyFn = (a, b) => {
@@ -703,11 +713,11 @@ export function buildVolumeStepBrepV2(analysis) {
   const VID_M = 67108864;                                    // 2^26 Punkte → Schlüssel < 2^52
   const vidOf = new Map(), vidKeys = [];
   const vid = (p) => {
-    const k = vtxKey(p), c = vkCache.get(p);                  // Nummer im vtxKey-Cache-Eintrag merken
-    if (c && c.k === k && c.i !== undefined) return c.i;
+    const k = vtxKey(p), c = p[VK];                          // Nummer im vtxKey-Cache-Eintrag merken
+    if (c && c.o === vkOwner && c.k === k && c.i !== undefined) return c.i;
     let i = vidOf.get(k);
     if (i === undefined) { i = vidKeys.length; vidOf.set(k, i); vidKeys.push(k); }
-    if (c && c.k === k) c.i = i;
+    if (c && c.o === vkOwner && c.k === k) c.i = i;
     return i;
   };
   const edgeNum = (a, b) => { const ia = vid(a), ib = vid(b); return ia < ib ? ia * VID_M + ib : ib * VID_M + ia; };
@@ -1610,6 +1620,11 @@ export function buildVolumeStepBrepV2(analysis) {
   // muss gelöst werden, sonst Plan verwerfen (facettiert): `restore(plan)` gibt dann die
   // herausgenommenen Wandflächen der Bohrung an faceDefs zurück.
   const CHAMFER_MAX = 3.0, CHAMFER_MIN = 0.04;
+  // Winkel-Spannweite (Grad) der Facetten-Normalen in einer Rand-Zone: streuen sie mehr als
+  // 8° (Rundung → Viertelkreis: die Normalen laufen von achsparallel bis quer), war das Band
+  // eine RUNDUNG (sie wird als Kegel = Fase geschrieben). Sind alle Normalen fast gleich
+  // (Spannweite ≤ 8°), war das Band schon eine echte FASE (sie bleibt Kegel).
+  const RIM_ROUND_SPREAD_DEG = 8;
   let finalPlans = [];
   // Diagnose je Bohrung: prim.id → Ergebnis/Grund ('ok:through', 'ok:blind-flat', 'ok:blind-tip',
   // 'blind:<Gate>' — Gates: 'nowall' (keine Wandflächen übrig), 'wall', 'edges', 'rings:<n>', 'nodeck',
@@ -1620,6 +1635,14 @@ export function buildVolumeStepBrepV2(analysis) {
   // Gruppen, deren Facetten eine Chamfer-Zone verdrängt hat (filterChamferZones) —
   // Beweismaterial für den Orientierungs-Wächter der Kegel-Flächen (assemble).
   let chamferDroppedGroups = new Set();
+  // Randbänder, in denen mindestens eine Fläche verschwand (filterChamferZones) — der UI-Zähler
+  // zählt BÄNDER (Zonen), NICHT die Mesh-Facetten-Patches (chamferDroppedGroups zählt Facetten —
+  // das war die alte, zu hohe Zahl). Ob das Band eine RUNDUNG oder eine echte FASE war, verrät
+  // die Spannweite der Facetten-Normalen gegen die Zonen-Achse (chamferZoneAngles).
+  let chamferZonesHit = new Set();
+  // Zone → {min,max}: Winkel (Grad) zwischen Facetten-Normale und Zonen-Achse über alle
+  // entfallenen Flächen der Zone.
+  let chamferZoneAngles = new Map();
   // Achs-Verfeinerung an den Deckebenen (Bestandspfad): rimsFromLoops nimmt Achse und Zentrum aus dem
   // Primitiv-Fit. Schon 2.6e-6 rad Kippung oder 2 µm Versatz (Senkung r=1/rw=0.3, gedrehte Lagen, weit vom
   // Ursprung) lassen den Kreis neben der Deckebene liegen → circleOnDeck (1e-5 mm) lehnt Bohrungen ab, die v2
@@ -1760,19 +1783,39 @@ export function buildVolumeStepBrepV2(analysis) {
   // Rand-Kreis R@z1 und Flach-Kreis R2@z2), entfallen — ihre Geometrie übernimmt der Kegel.
   const filterChamferZones = () => {
     if (chamferZones.length) {
-      const inZone = (v) => {
+      // zoneOf liefert die ERSTE Zone, in der v liegt (alle Vertices einer Fläche liegen in
+      // derselben Zone) — daraus wird das verrundete Rand-Band abgeleitet.
+      const zoneOf = (v) => {
         for (const z of chamferZones) {
           const w = _sub3(v, z.ap), al = _dot3(w, z.axis);
           const rho = Math.hypot(w[0] - z.axis[0] * al, w[1] - z.axis[1] * al, w[2] - z.axis[2] * al);
-          if (rho >= z.R - 0.15 && rho <= z.R2 + 0.15 && al >= z.zLo - 0.15 && al <= z.zHi + 0.15) return true;
+          if (rho >= z.R - 0.15 && rho <= z.R2 + 0.15 && al >= z.zLo - 0.15 && al <= z.zHi + 0.15) return z;
         }
-        return false;
+        return null;
+      };
+      const inZone = (v) => !!zoneOf(v);
+      // Winkel (Grad) zwischen der Facetten-Normale und der Zonen-Achse: 0° = Normale parallel
+      // zur Achse, 90° = Normale quer dazu. |n·axis| → die Richtung (oben/unten) ist egal.
+      const angleToAxis = (fd, z) => {
+        const n = _norm3(fd.normal || [0, 0, 0]);
+        const ax = _norm3(z.axis || [0, 0, 1]);
+        return Math.acos(Math.min(1, Math.abs(_dot3(n, ax)))) * 180 / Math.PI;
       };
       faceDefs = faceDefs.filter(fd => {
         if (fd.outer.circleRim || fd.inner.some(l => l.circleRim)) return true; // gematchte Flach-/Deckfläche behalten
         const allV = [...fd.outer, ...fd.inner.flat()];
         if (!allV.every(inZone)) return true;
         if (fd.group) chamferDroppedGroups.add(fd.group);               // Original-Facetten für den Wächter
+        const z = allV.length ? zoneOf(allV[0]) : null;                 // Band-Zähler: Zone, nicht Facetten
+        if (z) {
+          chamferZonesHit.add(z);
+          // Normale messen: eine echte FASE hat überall dieselbe Kegel-Normale (Spannweite ≈ 0),
+          // eine RUNDUNG streut die Normalen über den ganzen Viertelkreis (Spannweite groß).
+          const ang = angleToAxis(fd, z);
+          const rec = chamferZoneAngles.get(z);
+          if (rec) { if (ang < rec.min) rec.min = ang; if (ang > rec.max) rec.max = ang; }
+          else chamferZoneAngles.set(z, { min: ang, max: ang });
+        }
         return false;
       });
     }
@@ -4874,7 +4917,7 @@ export function buildVolumeStepBrepV2(analysis) {
   // chamferZones und die Defeaturing-Zähler.
   // withBores=false (Fallback-Stufe 1): ohne analytische Bohrungen, Mäntel, Kegel UND Kanäle neu bauen.
   const runPipeline = (withBores) => {
-    finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set();
+    finalPlans = []; chamferZones = []; tubePlans = []; mantlePlans = []; mantleConePlans = []; chamferDroppedGroups = new Set(); chamferZonesHit = new Set(); chamferZoneAngles = new Map();
     boreNotes = new Map();
     preSplitStats = null;
     filletsDefeatured = 0; bandsDefeatured = 0; cornersDefeatured = 0; coneBandsDefeatured = 0; featureOps = [];
@@ -6715,6 +6758,17 @@ export function buildVolumeStepBrepV2(analysis) {
     a.report.bandsDefeatured = bandsDefeatured;
     a.report.coneBandsDefeatured = coneBandsDefeatured;
     a.report.cornersDefeatured = cornersDefeatured;
+    // UI-Zähler (Randbänder, nicht Facetten): war das Band eine RUNDUNG (Normalen streuen) oder
+    // eine echte FASE (Normalen gleich)? Eine Rundung wird als Kegel = Fase geschrieben — sie
+    // zählt NICHT als entfernte Verrundung, sondern als „→ Fase“.
+    let rimToChamfer = 0, rimChamfersKept = 0;
+    for (const z of chamferZonesHit) {
+      const rec = chamferZoneAngles.get(z);
+      const spread = rec ? (rec.max - rec.min) : 0;
+      if (spread > RIM_ROUND_SPREAD_DEG) rimToChamfer++; else rimChamfersKept++;
+    }
+    a.report.rimFilletsToChamfer = rimToChamfer;
+    a.report.rimChamfersKept = rimChamfersKept;
     if (preSplitStats) { pl.st.refits += preSplitStats.refits; pl.st.splits += preSplitStats.splits; pl.st.parts += preSplitStats.parts; }
     planarReport(a.report, pl.st);
     return a;
@@ -7046,6 +7100,8 @@ export function buildVolumeStepBrepV2(analysis) {
     base.report.bandsDefeatured = 0;
     base.report.coneBandsDefeatured = 0;
     base.report.cornersDefeatured = 0;
+    base.report.rimFilletsToChamfer = 0; // UI-Zähler
+    base.report.rimChamfersKept = 0;     // UI-Zähler
     planarReport(base.report, pl.st);
     asm = base; fallbackStage = 2;
     // Stufe 1 nur über einer vollständig dichten Basislinie (s. o.): eine schon im Netz offene Schale
