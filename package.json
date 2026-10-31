@@ -1,6 +1,6 @@
 {
   "name": "stl-reverse",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Firefox/Chrome Add-on zur heuristischen Rückführung von STL-Meshes in parametrische Beschreibungen",
