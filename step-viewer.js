@@ -1,5 +1,5 @@
 import * as THREE from './libs/three.module.js';
-import { createThreeJsViewer, disposeThreeJsViewer, registerSyncViewer, setViewSync, syncViewsFrom } from './viewers.js?v=32';
+import { createThreeJsViewer, disposeThreeJsViewer, registerSyncViewer, setViewSync, syncViewsFrom } from './viewers.js?v=33';
 
 const extensionApi = typeof browser !== 'undefined' ? browser
   : typeof chrome !== 'undefined' ? chrome : null;
@@ -52,7 +52,7 @@ export function initStepOcctViewer() {
       stepOcctAnimId   = s.animFrameId;
       // Ansichts-Kopplung mit dem STL-Viewer (Panel 1).
       registerSyncViewer('step', s.camera, s.controls);
-    } catch (e) { console.warn('STEP occt viewer init failed:', e.message); }
+    } catch (e) { console.warn('STEP occt viewer init failed:', e.message); stepOcctContainer.dataset.state = 'nowebgl'; }
   }
 
   // Wire file input + import button
