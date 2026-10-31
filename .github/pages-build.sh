@@ -24,6 +24,8 @@ add_bar() {
   local file="$1" html="$2"
   local bar="<div style=\"position:fixed;right:12px;bottom:12px;z-index:9999;font:13px/1.4 system-ui,sans-serif;background:#1f2937;color:#e5e7eb;padding:8px 12px;border-radius:999px;box-shadow:0 2px 10px rgba(0,0,0,.25)\">$html</div>"
   BAR="$bar" perl -0pi -e 's#</body>#$ENV{BAR}\n</body>#' "$file"
+  # Tab-Symbol nachrüsten, falls der gebaute Stand noch keins hat (Releases vor 0.2.6)
+  grep -q 'rel="icon"' "$file" || perl -0pi -e 's#</head>#  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">\n</head>#' "$file"
 }
 
 rm -rf "$OUT"

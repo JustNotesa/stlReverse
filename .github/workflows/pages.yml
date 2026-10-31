@@ -1,12 +1,11 @@
 # Veröffentlicht die Web-Version (dieselben Dateien wie das Add-on) auf GitHub Pages.
 # Startseite = neuester Release-Tag, /live/ = aktueller main. Aufbau in .github/pages-build.sh.
+# Läuft nur auf main (die Pages-Umgebung erlaubt nur main); nach einem Release-Tag einmal
+# `gh workflow run pages.yml --ref main` anstoßen, damit die Startseite den neuen Tag zeigt.
 name: Web-Version (GitHub Pages)
 on:
   push:
     branches: [main]
-    tags: ['v*']
-  release:
-    types: [published]
   workflow_dispatch:
 permissions:
   contents: read
