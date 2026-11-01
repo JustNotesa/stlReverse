@@ -36,6 +36,16 @@ Ein WebExtension-Addon für Firefox/Chrome, das STL-Dreiecksmeshes lokal analysi
 5. Über `DXF exportieren`, `STEP Skizze (Step 1)` und `STEP Volumen (Step 2)` lassen sich Zeichnung bzw. Volumenmodell exportieren. `JSON exportieren`/`Kopieren` liefert die vollständige Parametrik.
 6. Optional das Ergebnis im `samples/`-Ordner testen (`samples/cube_ascii.stl`).
 
+## So funktioniert's (unter der Haube)
+Interaktive Schritt-für-Schritt-Ansicht: [`docs/pipeline.html`](docs/pipeline.html) – online unter
+<https://justnotesa.github.io/stlReverse/live/docs/pipeline.html>.
+
+1. **Einlesen & reparieren** – Dreiecke laden, doppelte Punkte verschmelzen, Löcher flicken, große Netze vereinfachen (`analysis-core.js`, `mesh-clean.js`).
+2. **Ebene Regionen** – Nachbardreiecke mit ≤ 2° Richtungsabweichung und ≤ 0,05 mm Abstand zur Ebene zusammenfassen (`region-growing.js`, `face-unification.js`).
+3. **Formen erkennen** – Streifen schmaler Regionen als Zylinder, Kegel, Rohr, Kugel oder Torus erkennen; Freiform optional als NURBS (`primitive-recognition.js`, `tube-sweep.js`, `profile-arcs.js`, `freeform-*.js`).
+4. **B-Rep bauen** – Flächen, Kanten, Ecken; Ecken einrasten, echte Bögen, Wasserdicht-Prüfung, Rückfall auf Facetten wo nötig (`exporters.js`).
+5. **STEP schreiben & anzeigen** – STEP-Text schreiben, OpenCascade liest ihn zur Kontrolle im Browser wieder ein (Panel 4, `step-viewer.js`).
+
 ## Parametrische JSON-Struktur (Kurzfassung)
 ```json
 {

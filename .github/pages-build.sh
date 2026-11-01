@@ -41,6 +41,7 @@ add_bar "$OUT/index.html" "Version ${TAG#v} · <a href=\"live/\" style=\"color:#
 # Live (main = aktueller Checkout)
 copy_app . "$OUT/live"
 cp "$OUT/live/popup.html" "$OUT/live/index.html"
+[ -d docs ] && cp -r docs "$OUT/live/"
 add_bar "$OUT/live/index.html" "🧪 Vorschau (Stand $(git rev-parse --short HEAD)) · frisch aus dem Labor, kann noch blubbern · <a href=\"../\" style=\"color:#7dd3fc;font-weight:600\">← zur stabilen Version ${TAG#v}</a>"
 
 touch "$OUT/.nojekyll"

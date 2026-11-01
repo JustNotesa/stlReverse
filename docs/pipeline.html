@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STL Reverse – so funktioniert's</title>
+<link rel="icon" type="image/svg+xml" href="../icons/icon.svg">
+<style>
+:root{--bg:#fff;--card:#f7f6f2;--p:#1f1e1d;--s:#5f5e5a;--m:#888780;--b:#d3d1c7;--acc-bg:#e6f1fb;--acc:#185fa5;--acc-b:#85b7eb}
+@media (prefers-color-scheme: dark){:root{--bg:#1f1e1d;--card:#2c2c2a;--p:#f1efe8;--s:#b4b2a9;--m:#888780;--b:#444441;--acc-bg:#0c447c;--acc:#b5d4f4;--acc-b:#378add}}
+body{margin:0;background:var(--bg);color:var(--p);font:16px/1.6 system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+h2{font-size:18px;font-weight:500;margin:6px 0 4px}
+.lead{color:var(--s);margin:0 0 20px}
+.card{background:var(--card);border:0.5px solid var(--b);border-radius:12px;padding:16px}
+.pill{border:0.5px solid var(--b);background:transparent;color:var(--s);border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer}
+.pill.on{background:var(--acc-bg);color:var(--acc);border-color:var(--acc-b)}
+.btn{border:0.5px solid var(--b);background:var(--bg);color:var(--p);border-radius:8px;padding:6px 14px;font-size:14px;cursor:pointer}
+svg text{font:12px system-ui,sans-serif;fill:var(--s)}
+svg text.th{font-size:14px;font-weight:500;fill:var(--p)}
+#txt{color:var(--s);margin:0 0 6px}
+#mod{margin:0;font-size:12px;color:var(--m);font-family:ui-monospace,monospace}
+</style>
+</head>
+<body>
+<main>
+<h1>So funktioniert STL Reverse</h1>
+<p class="lead">Der Weg vom Dreiecksnetz zur STEP-Datei mit echten Flächen, am Beispiel eines Klotzes mit gerundeter Kante.</p>
+<div class="card">
+  <div id="pills" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+  <svg id="pic" width="100%" viewBox="0 0 680 280" role="img" aria-label="Beispielteil im jeweiligen Verarbeitungsschritt"></svg>
+  <div style="min-height:130px">
+    <h2 id="ttl"></h2>
+    <p id="txt"></p>
+    <p id="mod"></p>
+  </div>
+  <div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn" id="prev" aria-label="Zurück">←</button>
+    <button class="btn" id="next">Weiter →</button>
+  </div>
+</div>
+</main>
+<script>
+(function(){
+const S=[
+{p:'1 Einlesen',t:'STL einlesen und reparieren',x:'Eine STL ist nur ein Haufen Dreiecke, ohne Wissen über Flächen. Doppelte Punkte werden verschmolzen, Löcher und verdrehte Dreiecke geflickt. Sehr große Dateien werden vorher vereinfacht.',m:'analysis-core.js · mesh-clean.js · mesh-repair.js · mesh-simplify.js'},
+{p:'2 Regionen',t:'Ebene Regionen wachsen lassen',x:'Ausgehend vom größten Dreieck werden Nachbarn angehängt, solange ihre Richtung höchstens 2° abweicht und kein Punkt mehr als 0,05 mm neben der Ebene liegt. Auf der Rundung bleibt so jede Facette eine eigene kleine Region.',m:'region-growing.js · face-unification.js'},
+{p:'3 Formen',t:'Formen erkennen',x:'Streifen aus schmalen Regionen werden geprüft: Passen sie auf einen Zylinder, Kegel, ein Rohr, eine Kugel oder einen Torus? Wenn ja, werden sie zu einer einzigen Rundfläche mit Achse und Radius zusammengefasst. Freie Formen (Freiform-Schalter) werden als NURBS-Flächen angenähert.',m:'primitive-recognition.js · tube-sweep.js · profile-arcs.js · freeform-*.js'},
+{p:'4 B-Rep',t:'Echten Körper bauen (B-Rep)',x:'Aus den erkannten Flächen entsteht ein Körpermodell mit Kanten und Ecken: Ecken einrasten, Bögen statt Zickzack-Kanten, Ebenen glätten. Danach Prüfung auf Wasserdichtheit. Klappt eine Rundfläche nicht, fällt nur sie auf Facetten zurück, im Notfall das ganze Teil.',m:'exporters.js (buildVolumeStepBrepV2) · freeform-brep.js'},
+{p:'5 STEP',t:'STEP schreiben und anzeigen',x:'Das Modell wird als STEP-Text geschrieben (PLANE, CYLINDRICAL_SURFACE …). Zur Kontrolle liest der echte CAD-Kern OpenCascade die Datei im Browser wieder ein, das ist Panel 4. Bei großen Dateien dauert genau dieser Schritt.',m:'exporters.js · step-viewer.js (occt-import-js)'}
+];
+let cur=0;const dv=[60,-40],cc=[400,140],rr=80,NN=6;
+const arc=[];for(let i=0;i<=NN;i++){const a=Math.PI/2*(1-i/NN);arc.push([cc[0]+rr*Math.cos(a),cc[1]-rr*Math.sin(a)]);}
+const sh=p=>[p[0]+dv[0],p[1]+dv[1]];
+const fFront=[[200,240],[200,60],...arc,[480,240]];
+const fTop=[[200,60],[400,60],sh([400,60]),sh([200,60])];
+const fRight=[[480,140],[480,240],sh([480,240]),sh([480,140])];
+const bands=[];for(let i=0;i<NN;i++)bands.push([arc[i],arc[i+1],sh(arc[i+1]),sh(arc[i])]);
+const P=a=>a.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+const poly=(a,f,o,s,w)=>'<polygon points="'+P(a)+'" fill="'+f+'" fill-opacity="'+o+'" stroke="'+(s||'var(--s)')+'" stroke-width="'+(w||0.5)+'" stroke-linejoin="round"/>';
+const ln=(a,b,s,w,da)=>'<line x1="'+a[0]+'" y1="'+a[1]+'" x2="'+b[0]+'" y2="'+b[1]+'" stroke="'+(s||'var(--s)')+'" stroke-width="'+(w||0.5)+'"'+(da?' stroke-dasharray="3 3"':'')+'/>';
+const tx=(x,y,t,cl)=>'<text'+(cl?' class="'+cl+'"':'')+' x="'+x+'" y="'+y+'">'+t+'</text>';
+const tri=()=>{let s='';const o=[200,240];for(let i=1;i<fFront.length-1;i++)s+=ln(o,fFront[i]);[fTop,fRight,...bands].forEach(q=>s+=ln(q[0],q[2]));return s;};
+function draw(k){let g='';
+if(k===0){g+=poly(fFront,'#888780',.12)+poly(fTop,'#888780',.2)+poly(fRight,'#888780',.16);bands.forEach(b=>g+=poly(b,'#888780',.24));g+=tri();
+g+=tx(560,90,'nur Dreiecke')+tx(560,108,'kein Wissen über')+tx(560,126,'Flächen');}
+if(k===1){const cols=['#D85A30','#1D9E75','#D4537E','#378ADD','#BA7517','#639922'];
+g+=poly(fFront,'#7F77DD',.3)+poly(fTop,'#1D9E75',.3)+poly(fRight,'#D4537E',.3);bands.forEach((b,i)=>g+=poly(b,cols[i],.5));g+=tri();
+g+=tx(560,90,'3 große Ebenen')+tx(560,108,'+ 6 Mini-Regionen')+tx(560,126,'auf der Rundung');}
+if(k===2){g+=poly(fFront,'#7F77DD',.25)+poly(fTop,'#7F77DD',.25)+poly(fRight,'#7F77DD',.25);bands.forEach(b=>g+=poly(b,'#D85A30',.5,'#D85A30',.5));
+g+=tx(560,90,'Ebene ×3','th')+tx(560,120,'Zylinder','th')+tx(560,138,'r = 8 mm');g+=ln([552,115],[480,80],null,0.5,1);}
+if(k===3){const s1=sh([400,60]),s2=sh([480,140]);const A='M400,60 A80,80 0 0 1 480,140';
+g+='<path d="'+A+' L480,240 L200,240 L200,60 Z" fill="#7F77DD" fill-opacity=".22" stroke="var(--p)" stroke-width="1.5"/>';
+g+=poly(fTop,'#7F77DD',.22,'var(--p)',1.5)+poly(fRight,'#7F77DD',.22,'var(--p)',1.5);
+g+='<path d="'+A+' L'+s2[0]+','+s2[1]+' A80,80 0 0 0 '+s1[0]+','+s1[1]+' Z" fill="#D85A30" fill-opacity=".35" stroke="var(--p)" stroke-width="1.5"/>';
+[[200,240],[200,60],[400,60],[480,140],[480,240],sh([200,60]),s1,s2,sh([480,240])].forEach(p=>g+='<circle cx="'+p[0]+'" cy="'+p[1]+'" r="3" fill="var(--p)"/>');
+g+=tx(560,90,'Flächen, Kanten,')+tx(560,108,'Ecken: echter Bogen')+tx(560,126,'statt Zickzack');}
+if(k===4){const L=['#12 = PLANE(…);','#13 = PLANE(…);','#14 = CYLINDRICAL_SURFACE(…);','#15 = ADVANCED_FACE(…);','#16 = MANIFOLD_SOLID_BREP(…);'];
+g+='<rect x="60" y="40" width="300" height="200" rx="8" fill="none" stroke="var(--s)" stroke-width="0.5"/>';
+L.forEach((l,i)=>g+=tx(76,76+i*30,l));
+g+='<line x1="370" y1="140" x2="440" y2="140" stroke="var(--s)" stroke-width="1.5" marker-end="url(#ar)"/>';
+g+='<rect x="450" y="70" width="170" height="140" rx="8" fill="#1D9E75" fill-opacity=".12" stroke="#1D9E75" stroke-width="0.5"/>';
+g+=tx(470,130,'OpenCascade','th')+tx(470,152,'liest STEP wieder ein')+tx(470,170,'= Panel 4');}
+document.getElementById('pic').innerHTML='<defs><marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>'+g;}
+function show(){const s=S[cur];document.getElementById('ttl').textContent=s.t;document.getElementById('txt').textContent=s.x;document.getElementById('mod').textContent=s.m;
+const pl=document.getElementById('pills');pl.innerHTML='';
+S.forEach((q,i)=>{const b=document.createElement('button');b.className='pill'+(i===cur?' on':'');b.textContent=q.p;b.addEventListener('click',()=>{cur=i;show();});pl.appendChild(b);});
+draw(cur);}
+document.getElementById('prev').addEventListener('click',()=>{cur=(cur+S.length-1)%S.length;show();});
+document.getElementById('next').addEventListener('click',()=>{cur=(cur+1)%S.length;show();});
+show();
+})();
+</script>
+</body>
+</html>
