@@ -61,6 +61,24 @@ Ziel: `buildVolumeStepBrepV2` liefert aktuell 1 ADVANCED_FACE pro normalGroup-Re
   gruppen). Freiform-Schalter hilft nicht: `buildFreeformBrep` gibt nach 0,8 s `null` zurück → Rückfall. Ziel: glatte
   Griffflächen als B-Spline-Flächen, Bohrungen/Augen als Zylinder. Erst Ursache des `null` klären (Freiform Etappe 3);
   MiniMax nur mit synthetischen Ersatzkörpern (organischer Hebel mit Augen) füttern.
+  **Befund 2026-11-01:** Datei = 4 getrennte Körper (2 Griff-Hülsen organisch rundum, 2 Vierkant-Stäbe mit Endkappen).
+  Stab-Seiten/Böden/Endflächen sind exakt eben (Abweichung 0,000 mm) und kommen als je eine Fläche an, Stab-Kanten = Zylinder.
+  Die ~70k Facetten sind die Hülsen (~52 % der Oberfläche). Ursache des `null`: `indexMesh` (freeform-segment.js) nimmt
+  nur EINE zusammenhängende Schale → Freiform je Körper statt fürs ganze Teil.
+
+- [ ] **Kanten zuerst, Flächen dazwischen aufspannen (Freiform Etappe 3)** — User-Idee 2026-11-01: Ein STEP-Körper sind
+  Kanten (Geraden, Bögen, Polylinien/B-Splines) mit Flächen dazwischen; „organisch“ heißt nur, dass die Fläche keine
+  Grundform ist. Plan: (1) Kanten im Netz finden — scharfe Knicke + Krümmungs-Grate/-Wechsel (wo die Form „umschlägt“),
+  zu einem geschlossenen Kantennetz verbinden; (2) Kanten als Linie/Bogen/B-Spline fitten (gemeinsam für beide Nachbar-
+  flächen, exakt); (3) je Masche: Grundform (Ebene/Zylinder/…) wenn sie passt, sonst B-Spline-Fläche, die die Randkurven
+  exakt enthält und das Innere ans Netz ausgleicht (Coons/Gordon + Ausgleich, Bausteine in freeform-nurbs.js). Gilt auch
+  für Box/Fahrradhalter/Dino-Clip, nicht nur organische Teile. Testkörper synthetisch (Seifenstück, Griffschale, Hebel).
+
+- [ ] **Toleranz: Automatik + Regler + Nutzer-Hinweise** — User-Wunsch 2026-11-01. Heute fest 2°/0,05 mm (region-growing.js).
+  (a) Automatik: Rauschen der STL an großen ebenen Flächen messen → Toleranz je Teil; (b) Regler als Übersteuerung im UI;
+  (c) Regionen nachträglich zusammenlegen, wenn eine gemeinsame Ausgleichsebene in der Toleranz bleibt, Punkte darauf
+  ziehen; (d) Nutzer-Hinweis in Panel 1 (STL): Bereich antippen/markieren = „kleines Detail, kein Rauschen“ → dort strenge
+  Toleranz (bzw. umgekehrt „hier ist nur Rauschen“).
 
 - [ ] **Netz-Vereinfachung: Extrusions-Spalten erhalten** — fein tessellierte CAD-Körper > 50k verlieren durch
   `mesh-simplify.js` die übereinanderstehenden Ring-Punkte (Quader 201k: unvereinfacht 3 893, nach 50k 14 068 Export-
